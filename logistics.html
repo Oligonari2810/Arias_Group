@@ -1,0 +1,205 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .log-wrap { max-width: 1200px; margin: 0 auto; }
+  .offer-card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .offer-card h3 { margin: 0 0 8px; color: #93c5fd; }
+  .offer-details { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .offer-details div { font-size: 13px; }
+  .offer-details .label { color: #94a3b8; }
+  .offer-details .value { font-weight: 700; }
+  .logistics-row { display: grid; grid-template-columns: 120px 1fr 120px auto; gap: 12px; align-items: end; margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155; }
+  .totals-row { display: flex; justify-content: space-between; padding: 4px 0; }
+  .totals-row.grand { border-top: 2px solid #22c55e; padding-top: 8px; margin-top: 4px; }
+  .btn-approve { background: #22c55e; padding: 8px 16px; font-size: 13px; }
+  .btn-pdf { background: #3b82f6; padding: 8px 16px; font-size: 13px; }
+  .btn-delete { background: #dc2626; padding: 8px 16px; font-size: 13px; }
+  .status-badge { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .status-pending { background: #fbbf24; color: #1e3a0e; }
+  .status-confirmed { background: #22c55e; color: #fff; }
+  .lines-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+  .lines-table th { color: #94a3b8; font-size: 11px; }
+  .lines-table td { border-bottom: 1px solid #1f2937; padding: 4px 0; }
+</style>
+
+<div class="log-wrap">
+  <h2 style="color:#93c5fd; margin-bottom:4px;">📦 Logística — Ofertas</h2>
+  <p class="muted" style="margin-bottom:20px;">Calcula contenedores y flete. Genera presupuesto final.</p>
+
+  {% if not offers %}
+  <div class="offer-card" style="text-align:center; padding:40px;">
+    <p class="muted">No hay ofertas. Genera una desde el <a href="{{ url_for('quote') }}">Cotizador →</a></p>
+  </div>
+  {% endif %}
+
+  {% for offer in offers %}
+  <div class="offer-card" id="offer-{{ offer['id'] }}">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h3>📄 {{ offer['offer_number'] }}</h3>
+      <span class="status-badge {% if offer['status'] == 'confirmed' %}status-confirmed{% else %}status-pending{% endif %}">
+        {{ '✅ Confirmada' if offer['status'] == 'confirmed' else '⏳ Pendiente' }}
+      </span>
+    </div>
+    <div class="offer-details">
+      <div><span class="label">Cliente:</span> <span class="value">{{ offer['client_name'] }}</span></div>
+      <div><span class="label">Proyecto:</span> <span class="value">{{ offer['project_name'] }}</span></div>
+      <div><span class="label">Total Producto:</span> <span class="value" style="color:#22c55e;">€ {{ "%.2f"|format(offer['total_product_eur']) }}</span></div>
+    </div>
+
+    <details style="margin-bottom:8px;">
+      <summary style="cursor:pointer; color:#94a3b8; font-size:13px;">Ver líneas ({{ (offer['lines_json']|from_json|length) }} productos)</summary>
+      <table class="lines-table">
+        <thead><tr><th>SKU</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Subtotal</th></tr></thead>
+        <tbody>
+        {% for line in offer['lines_json']|from_json %}
+        <tr>
+          <td style="font-family:monospace;">{{ line.sku }}</td>
+          <td>{{ line.name[:35] }}</td>
+          <td>{{ line.qty }} {{ line.unit }}</td>
+          <td>€ {{ "%.2f"|format(line.price) }}</td>
+          <td>€ {{ "%.2f"|format(line.price * line.qty) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
+
+    {% if offer['status'] != 'confirmed' %}
+    <!-- PENDING: logistics form -->
+    <div class="logistics-row">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Incoterm</label>
+        <select class="incoterm-sel" data-offer="{{ offer['id'] }}" onchange="toggleLogistics(this)">
+          <option value="EXW">EXW</option>
+          <option value="FOB">FOB</option>
+          <option value="CIF">CIF</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Ruta marítima</label>
+        <select class="route-sel" data-offer="{{ offer['id'] }}" onchange="calcLogistics(this)">
+          <option value="">— Sin flete —</option>
+          {% for r in routes %}
+          <option value="{{ r['id'] }}" data-c40="{{ r['container_40_eur'] }}">
+            {{ r['origin_port'] }} → {{ r['destination_port'] }} ({{ r['carrier'] }})
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Contenedores</label>
+        <input type="number" class="container-input" data-offer="{{ offer['id'] }}" value="0" min="0" step="1" onchange="calcLogistics(this)">
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button onclick="confirmOffer({{ offer['id'] }})" class="btn-approve">✅ Confirmar</button>
+        <button onclick="deleteOffer({{ offer['id'] }})" class="btn-delete">🗑️</button>
+      </div>
+    </div>
+    <div style="margin-top:12px;">
+      <div class="totals-row">
+        <span class="total-label">Producto + Desperdicio:</span>
+        <span>€ {{ "%.2f"|format(offer['total_product_eur']) }}</span>
+      </div>
+      <div class="totals-row">
+        <span class="total-label">+ Logística:</span>
+        <span>€ <span class="log-total">0.00</span></span>
+      </div>
+      <div class="totals-row grand">
+        <span class="total-label">TOTAL:</span>
+        <span class="final-total" style="color:#22c55e;font-size:18px;font-weight:700;">€ {{ "%.2f"|format(offer['total_final_eur']) }}</span>
+      </div>
+    </div>
+
+    {% else %}
+    <!-- CONFIRMED: show PDF button + summary -->
+    <div style="margin-top:12px;display:flex;gap:12px;align-items:center;">
+      <button onclick="downloadPDF({{ offer['id'] }})" class="btn-pdf">📄 Descargar PDF</button>
+      <button onclick="deleteOffer({{ offer['id'] }})" class="btn-delete">🗑️</button>
+      <span style="color:#94a3b8;font-size:13px;">Incoterm: {{ offer['incoterm'] }}{% if offer['container_count'] and offer['container_count'] > 0 %} · {{ offer['container_count'] }} cont.{% endif %}</span>
+    </div>
+    <div style="margin-top:8px;">
+      <div class="totals-row">
+        <span class="total-label">Producto:</span>
+        <span>€ {{ "%.2f"|format(offer['total_product_eur']) }}</span>
+      </div>
+      <div class="totals-row">
+        <span class="total-label">+ Logística:</span>
+        <span>€ {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</span>
+      </div>
+      <div class="totals-row grand">
+        <span class="total-label">TOTAL:</span>
+        <span style="color:#22c55e;font-size:18px;font-weight:700;">€ {{ "%.2f"|format(offer['total_final_eur']) }}</span>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+function toggleLogistics(sel) {
+  const card = sel.closest('.offer-card');
+  const inc = sel.value;
+  card.querySelector('.route-sel').parentElement.style.display = inc !== 'EXW' ? 'block' : 'none';
+  card.querySelector('.container-input').parentElement.style.display = inc !== 'EXW' ? 'block' : 'none';
+  if (inc === 'EXW') calcLogistics(sel);
+}
+
+function calcLogistics(el) {
+  const card = el.closest('.offer-card');
+  const routeSel = card.querySelector('.route-sel');
+  const containerInput = card.querySelector('.container-input');
+  const logTotal = card.querySelector('.log-total');
+  const finalTotal = card.querySelector('.final-total');
+  const prodTotal = parseFloat(card.querySelector('.offer-details .value').textContent.replace('€ ', '')) || 0;
+  
+  const containers = parseInt(containerInput.value) || 0;
+  let freightCost = 0;
+  if (routeSel.selectedIndex > 0 && containers > 0) {
+    const opt = routeSel.options[routeSel.selectedIndex];
+    const c40 = parseFloat(opt.dataset.c40) || 0;
+    freightCost = containers * c40;
+  }
+  logTotal.textContent = freightCost.toFixed(2);
+  finalTotal.textContent = '€ ' + (prodTotal + freightCost).toFixed(2);
+}
+
+function confirmOffer(offerId) {
+  const card = document.getElementById('offer-' + offerId);
+  const incoterm = card.querySelector('.incoterm-sel').value;
+  const routeSel = card.querySelector('.route-sel');
+  const containerInput = card.querySelector('.container-input');
+  const logTotal = parseFloat(card.querySelector('.log-total').textContent) || 0;
+  const prodTotal = parseFloat(card.querySelector('.offer-details .value').textContent.replace('€ ', '')) || 0;
+  
+  fetch('/api/update-offer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      id: offerId,
+      incoterm: incoterm,
+      route_id: routeSel.value || null,
+      container_count: parseInt(containerInput.value) || 0,
+      logistic_cost: logTotal,
+      final_total: prodTotal + logTotal,
+      status: 'confirmed'
+    })
+  }).then(r => r.json()).then(data => {
+    if (data.ok) location.reload();
+  });
+}
+
+function deleteOffer(offerId) {
+  if (!confirm('¿Eliminar esta oferta?')) return;
+  fetch('/api/delete-offer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: offerId})
+  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); });
+}
+
+function downloadPDF(offerId) {
+  window.open('/api/offer-pdf/' + offerId, '_blank');
+}
+</script>
+{% endblock %}

@@ -1,0 +1,546 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .quote-wrap { max-width: 1200px; margin: 0 auto; }
+  .mode-toggle { display: flex; gap: 0; margin-bottom: 20px; }
+  .mode-btn { flex: 1; padding: 14px; text-align: center; font-weight: 700; font-size: 15px;
+    border: 1px solid #334155; background: #111827; color: #94a3b8; cursor: pointer; }
+  .mode-btn.active { background: #1e3a5f; color: #e5e7eb; border-color: #3b82f6; }
+  .mode-btn:first-child { border-radius: 10px 0 0 10px; }
+  .mode-btn:last-child { border-radius: 0 10px 10px 0; }
+  .input-row { display: grid; grid-template-columns: 140px 140px 1fr 100px auto; gap: 12px; margin-bottom: 16px; align-items: end; }
+  .input-row-no-sub { display: grid; grid-template-columns: 140px 1fr 100px auto; gap: 12px; margin-bottom: 16px; align-items: end; }
+  .sys-row { display: grid; grid-template-columns: 1fr 160px auto; gap: 12px; margin-bottom: 16px; align-items: end; }
+  .params-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;
+    padding: 16px; background: #111827; border: 1px solid #334155; border-radius: 10px; margin-bottom: 16px; }
+  .param label { display: block; font-size: 11px; color: #94a3b8; margin-bottom: 4px; text-transform: uppercase; }
+  .param input { width: 100%; padding: 8px; font-size: 14px; }
+  .totals-card { padding: 20px; background: #0f172a; border: 1px solid #334155; border-radius: 10px; }
+  .total-row { display: flex; justify-content: space-between; padding: 6px 0; }
+  .total-row.grand { border-top: 2px solid #22c55e; padding-top: 12px; margin-top: 8px; }
+  .total-label { color: #94a3b8; }
+  .total-value { font-weight: 700; font-size: 18px; }
+  .total-value.eur { color: #22c55e; }
+  .total-value.usd { color: #fbbf24; }
+  .unit-badge { background: #1e3a5f; color: #93c5fd; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .client-row { display: grid; grid-template-columns: 1fr 1fr 200px; gap: 12px; margin-bottom: 16px; align-items: end; }
+  .offer-banner { background: #052e16; border: 1px solid #166534; border-radius: 10px; padding: 16px; margin-top: 16px; }
+</style>
+
+<div class="quote-wrap">
+  <h2 style="color:#93c5fd; margin-bottom:4px;">📋 Cotizador</h2>
+  <p class="muted" style="margin-bottom:20px;">Cotiza por producto suelto o por sistema. Con desperdicio y margen comercial.</p>
+
+  <!-- Client info -->
+  <div class="client-row">
+    <div>
+      <label style="font-size:12px;color:#94a3b8;">Cliente</label>
+      <select id="clientSelect" onchange="onClientSelect()">
+        <option value="">— Selecciona cliente —</option>
+        {% for c in clients %}
+        <option value="{{ c['id'] }}" data-name="{{ c['name'] }}" data-company="{{ c['company'] or '' }}" data-email="{{ c['email'] or '' }}">
+          {{ c['name'] }}{% if c['company'] %} ({{ c['company'] }}){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label style="font-size:12px;color:#94a3b8;">Proyecto</label>
+      <input type="text" id="projectName" placeholder="Nombre del proyecto">
+    </div>
+    <div>
+      <label style="font-size:12px;color:#94a3b8;">Nº Oferta</label>
+      <input type="text" id="offerNumber" placeholder="2026-001">
+    </div>
+  </div>
+
+  <!-- Mode Toggle -->
+  <div class="mode-toggle">
+    <button class="mode-btn active" id="btnProduct" onclick="setMode('product')">📦 Por Producto</button>
+    <button class="mode-btn" id="btnSystem" onclick="setMode('system')">🧩 Por Sistema</button>
+  </div>
+
+  <!-- Product Mode -->
+  <div id="productSection">
+    <div class="input-row-no-sub" id="inputRowNoSub">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Familia</label>
+        <select id="familySelect" onchange="onFamilyChange()">
+          {% for fam in families %}
+          <option value="{{ fam }}">{{ fam }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="subfamilyContainer" style="display:none;">
+        <label style="font-size:12px;color:#94a3b8;">Tipo</label>
+        <select id="subfamilySelect" onchange="filterProducts()">
+          <option value="">— Todos —</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Producto</label>
+        <select id="productSelect">
+          <option value="">— Selecciona —</option>
+          {% for p in products %}
+          <option value="{{ p['id'] }}" data-sku="{{ p['sku'] }}" data-name="{{ p['name'] }}"
+                  data-price="{{ p['price_per_unit'] }}" data-unit="{{ p['unit_label'] }}"
+                  data-family="{{ p['category'] }}" data-subfamily="{{ p.get('subfamily', '') }}">
+            {{ p['sku'][:12] }} — {{ p['name'][:40] }} ({{ p['unit_label'] }})
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Cantidad</label>
+        <input type="number" id="qtyInput" value="1" min="1" step="1">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <button onclick="addProduct()" style="width:100%;white-space:nowrap;">+ Añadir</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- System Mode -->
+  <div id="systemSection" style="display:none;">
+    <div class="sys-row">
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">Sistema</label>
+        <select id="systemSelect">
+          <option value="">— Elegir —</option>
+          {% for s in systems %}
+          <option value="{{ s['id'] }}">{{ s['name'] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label style="font-size:12px;color:#94a3b8;">m² a cubrir</label>
+        <input type="number" id="areaInput" value="100" min="1" step="1">
+      </div>
+      <div style="display:flex;align-items:flex-end;">
+        <button onclick="addSystem()" style="width:100%;white-space:nowrap;">🧩 Calcular</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Parameters + Logistics -->
+  <div class="params-grid">
+    <div class="param">
+      <label>Desperdicio %</label>
+      <input type="number" id="wasteInput" value="5" min="0" max="50" step="1" onchange="recalcAll()" oninput="recalcAll()">
+    </div>
+    <div class="param">
+      <label>Margen %</label>
+      <input type="number" id="marginInput" value="33" min="0" max="100" step="1" onchange="recalcAll()" oninput="recalcAll()">
+    </div>
+    <div class="param">
+      <label>FX EUR/USD</label>
+      <input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001" onchange="recalcAll()" oninput="recalcAll()">
+    </div>
+    <div class="param">
+      <label>Incoterm</label>
+      <select id="incotermSelect" onchange="onIncotermChange()">
+        <option value="EXW">EXW (fábrica)</option>
+        <option value="FOB">FOB (puerto España)</option>
+        <option value="CIF">CIF (destino)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Logistics section (hidden for EXW) -->
+  <div id="logisticsSection" style="display:none;">
+    <div class="params-grid" style="background:#0b1220;">
+      <div class="param">
+        <label>Ruta marítima</label>
+        <select id="routeSelect" onchange="recalcAll()">
+          <option value="">— Sin ruta —</option>
+          {% for r in routes %}
+          <option value="{{ r['id'] }}" data-c40="{{ r['container_40_eur'] }}">
+            {{ r['origin_port'] }} → {{ r['destination_port'] }} ({{ r['carrier'] }})
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="param">
+        <label>Nº Contenedores</label>
+        <input type="number" id="containerCount" value="0" min="0" step="1" readonly style="background:#1e3a5f;color:#fbbf24;font-weight:700;">
+      </div>
+      <div class="param">
+        <label>Coste Logístico Total</label>
+        <div id="logisticCostDisplay" style="font-size:16px;font-weight:700;color:#fbbf24;">€ 0.00</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lines Table -->
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th><th>Producto</th><th>Familia</th>
+        <th style="text-align:center;">Unidad</th>
+        <th style="text-align:right;">Precio Ud.</th>
+        <th style="text-align:right;">Cant.</th>
+        <th style="text-align:right;">Subtotal</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="linesBody"></tbody>
+  </table>
+
+  <!-- Totals -->
+  <div class="totals-card">
+    <div class="total-row">
+      <span class="total-label">Subtotal productos:</span>
+      <span>€ <span id="subtotalProducts">0.00</span></span>
+    </div>
+    <div class="total-row">
+      <span class="total-label">+ Desperdicio (<span id="wastePctLabel">5</span>%):</span>
+      <span>€ <span id="wasteCost">0.00</span></span>
+    </div>
+    <div class="total-row">
+      <span class="total-label">+ Logística (<span id="incotermLabel">EXW</span>):</span>
+      <span>€ <span id="logisticTotal">0.00</span></span>
+    </div>
+    <div class="total-row">
+      <span class="total-label">= Coste total:</span>
+      <span>€ <span id="costProduct">0.00</span></span>
+    </div>
+    <div class="total-row">
+      <span class="total-label">+ Margen (<span id="marginPctLabel">33</span>%):</span>
+      <span>€ <span id="marginEur">0.00</span></span>
+    </div>
+    <div class="total-row grand">
+      <span class="total-label" style="color:#e5e7eb;font-size:16px;">TOTAL:</span>
+      <span class="total-value eur">€ <span id="totalEur">0.00</span></span>
+    </div>
+    <div class="total-row">
+      <span class="total-label">En USD:</span>
+      <span class="total-value usd">$ <span id="totalUsd">0.00</span></span>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div style="display:flex;gap:12px;margin-top:20px;">
+    <button onclick="clearAll()" class="btn-warn" style="max-width:150px;">🗑️ Limpiar</button>
+    <button onclick="generateOffer()" style="background:#22c55e;max-width:250px;font-size:15px;padding:14px;">
+      📄 Generar Oferta → Logística
+    </button>
+  </div>
+
+  <div id="offerBanner" class="offer-banner" style="display:none;"></div>
+</div>
+
+<script>
+const products = {{ products|tojson }};
+const systems = {{ systems|tojson }};
+const subfamilies = {{ subfamilies|tojson }};
+let lines = [];
+let mode = 'product';
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('btnProduct').classList.toggle('active', m === 'product');
+  document.getElementById('btnSystem').classList.toggle('active', m === 'system');
+  document.getElementById('productSection').style.display = m === 'product' ? 'block' : 'none';
+  document.getElementById('systemSection').style.display = m === 'system' ? 'block' : 'none';
+}
+
+function onFamilyChange() {
+  const fam = document.getElementById('familySelect').value;
+  const subDiv = document.getElementById('subfamilyContainer');
+  const row = document.getElementById('inputRowNoSub');
+  const sfSel = document.getElementById('subfamilySelect');
+
+  const hasSub = subfamilies[fam] && subfamilies[fam].length > 0;
+  if (hasSub) {
+    subDiv.style.display = 'block';
+    row.className = 'input-row';
+    // Populate subfamily options for this family
+    sfSel.innerHTML = '<option value="">— Todos —</option>';
+    subfamilies[fam].forEach(sf => {
+      const opt = document.createElement('option');
+      opt.value = sf.key;
+      opt.textContent = sf.label;
+      sfSel.appendChild(opt);
+    });
+  } else {
+    subDiv.style.display = 'none';
+    row.className = 'input-row-no-sub';
+  }
+  filterProducts();
+}
+
+function filterProducts() {
+  const fam = document.getElementById('familySelect').value;
+  const sf = document.getElementById('subfamilySelect').value;
+  const sel = document.getElementById('productSelect');
+  sel.innerHTML = '<option value="">— Selecciona —</option>';
+  products.forEach(p => {
+    let show = (p.category === fam);
+    if (show && sf && p.subfamily) {
+      show = (p.subfamily === sf);
+    }
+    if (show) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.dataset.sku = p.sku;
+      opt.dataset.name = p.name;
+      opt.dataset.price = p.price_per_unit;
+      opt.dataset.unit = p.unit_label;
+      opt.dataset.family = p.category;
+      opt.dataset.subfamily = p.subfamily || '';
+      opt.dataset.unitsPallet = p.units_per_pallet || 0;
+      opt.dataset.sqmPallet = p.sqm_per_pallet || 0;
+      opt.dataset.kgPerUnit = p.kg_per_unit || 0;
+      opt.textContent = p.sku.substring(0,12) + ' — ' + p.name.substring(0,40) + ' (' + p.unit_label + ')';
+      sel.appendChild(opt);
+    }
+  });
+}
+
+function onClientSelect() {
+  // Client is now selected from dropdown
+}
+
+function onIncotermChange() {
+  const inc = document.getElementById('incotermSelect').value;
+  document.getElementById('logisticsSection').style.display = inc !== 'EXW' ? 'block' : 'none';
+  document.getElementById('incotermLabel').textContent = inc;
+  recalcAll();
+}
+
+function addProduct() {
+  const sel = document.getElementById('productSelect');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt.value) return;
+  const qty = parseFloat(document.getElementById('qtyInput').value) || 1;
+  lines.push({
+    sku: opt.dataset.sku, name: opt.dataset.name,
+    family: opt.dataset.family, unit: opt.dataset.unit,
+    price: parseFloat(opt.dataset.price), qty: qty
+  });
+  sel.selectedIndex = 0;
+  document.getElementById('qtyInput').value = 1;
+  recalcAll();
+}
+
+function addSystem() {
+  const sel = document.getElementById('systemSelect');
+  if (!sel.value) return;
+  const area = parseFloat(document.getElementById('areaInput').value) || 0;
+  if (area <= 0) return;
+  const sys = systems.find(s => s.id == sel.value);
+  if (!sys) return;
+  sys.components.forEach(comp => {
+    const qty = Math.ceil(area * comp.consumption_per_sqm);
+    lines.push({
+      sku: comp.sku, name: comp.name,
+      family: comp.category, unit: comp.unit,
+      price: comp.unit_price_eur, qty: qty
+    });
+  });
+  recalcAll();
+}
+
+function removeLine(i) { lines.splice(i, 1); recalcAll(); }
+function clearAll() { lines.length = 0; recalcAll(); document.getElementById('offerBanner').style.display = 'none'; }
+
+function unitLabel(u) {
+  const labels = {'m²':'m²','ml':'ml','caja':'caja','rollo':'rollo','saco':'saco','bote':'bote','ud':'ud','board':'placa','placa':'placa'};
+  return labels[u] || u;
+}
+
+function recalcAll() {
+  const wastePct = (parseFloat(document.getElementById('wasteInput').value) || 5) / 100;
+  const margin = (parseFloat(document.getElementById('marginInput').value) || 33) / 100;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const incoterm = document.getElementById('incotermSelect').value;
+
+  // Calculate logistics cost
+  let logisticCost = 0;
+  let containerCount = 0;
+  if (incoterm !== 'EXW') {
+    // Calculate product cost (FOB base)
+    const productCost = lines.reduce((s, l) => s + l.price * l.qty, 0);
+    const wasteCost = productCost * wastePct;
+    const fobCost = productCost + wasteCost;
+
+    // Calculate pallets and weight for container optimization
+    let totalPallets = 0;
+    let totalWeight = 0;
+    lines.forEach(line => {
+      const qtyWithWaste = Math.ceil(line.qty * (1 + wastePct));
+      // Find product in catalog for logistics data
+      const prod = products.find(p => p.sku === line.sku);
+      if (prod) {
+        const unitsPerPallet = prod.units_per_pallet || 0;
+        if (unitsPerPallet > 0) {
+          totalPallets += qtyWithWaste / unitsPerPallet;
+        }
+        const kgPerUnit = prod.kg_per_unit || 0;
+        totalWeight += qtyWithWaste * kgPerUnit;
+      }
+    });
+
+    // Container optimization (20'=10 palés/21500kg, 40'=20/26500, 40HC=24/26500)
+    const palletsLogistic = Math.ceil(totalPallets);
+    if (palletsLogistic > 0) {
+      if (palletsLogistic <= 10 && totalWeight <= 21500) {
+        containerCount = 1; // 20'
+      } else if (palletsLogistic <= 20 && totalWeight <= 26500) {
+        containerCount = 1; // 40'
+      } else if (palletsLogistic <= 24 && totalWeight <= 26500) {
+        containerCount = 1; // 40HC
+      } else {
+        containerCount = Math.ceil(palletsLogistic / 24); // Multiple 40HC
+      }
+    }
+
+    // Calculate ocean freight if CIF
+    let oceanFreight = 0;
+    if (incoterm === 'CIF') {
+      const routeSel = document.getElementById('routeSelect');
+      const opt = routeSel.options[routeSel.selectedIndex];
+      if (opt && opt.dataset.c40) {
+        oceanFreight = parseFloat(opt.dataset.c40) || 0;
+      }
+    }
+
+    // Total logistic cost
+    if (incoterm === 'FOB') {
+      logisticCost = fobCost;
+    } else if (incoterm === 'CIF') {
+      logisticCost = fobCost + (oceanFreight * containerCount);
+    }
+
+    // Update container count display
+    document.getElementById('containerCount').value = containerCount;
+
+    // Update logistic cost display
+    document.getElementById('logisticCostDisplay').textContent = '€ ' + logisticCost.toFixed(2);
+  } else {
+    // EXW - no logistics
+    document.getElementById('logisticCostDisplay').textContent = '€ 0.00';
+    document.getElementById('containerCount').value = 0;
+  }
+
+  const body = document.getElementById('linesBody');
+  body.innerHTML = '';
+  let totalProducts = 0;
+
+  lines.forEach((line, i) => {
+    const qtyWithWaste = Math.ceil(line.qty * (1 + wastePct));
+    const sub = line.price * qtyWithWaste;
+    totalProducts += sub;
+    body.innerHTML += `<tr>
+      <td style="font-family:monospace;font-size:11px;">${line.sku}</td>
+      <td>${line.name}</td>
+      <td><span class="badge">${line.family}</span></td>
+      <td style="text-align:center;"><span class="unit-badge">${line.unit}</span></td>
+      <td style="text-align:right;">€ ${line.price.toFixed(2)}</td>
+      <td style="text-align:right;font-weight:700;">${qtyWithWaste} <span style="color:#94a3b8;font-weight:400;font-size:12px;">${line.unit}</span></td>
+      <td style="text-align:right;font-weight:700;">€ ${sub.toFixed(2)}</td>
+      <td><button onclick="removeLine(${i})" style="background:#dc2626;padding:4px 10px;font-size:12px;width:auto;">✕</button></td>
+    </tr>`;
+  });
+
+  const wasteCost = totalProducts * wastePct;
+  const costTotal = totalProducts + wasteCost + logisticCost;
+  const saleTotal = costTotal / (1 - margin);
+  const marginEur = saleTotal - costTotal;
+
+  document.getElementById('subtotalProducts').textContent = totalProducts.toFixed(2);
+  document.getElementById('wasteCost').textContent = wasteCost.toFixed(2);
+  document.getElementById('logisticTotal').textContent = logisticCost.toFixed(2);
+  document.getElementById('costProduct').textContent = costTotal.toFixed(2);
+  document.getElementById('marginEur').textContent = marginEur.toFixed(2);
+  document.getElementById('wastePctLabel').textContent = (wastePct * 100).toFixed(0);
+  document.getElementById('marginPctLabel').textContent = (margin * 100).toFixed(0);
+  document.getElementById('totalEur').textContent = saleTotal.toFixed(2);
+  document.getElementById('totalUsd').textContent = (saleTotal * fx).toFixed(2);
+}
+
+function generateOffer() {
+  const clientSel = document.getElementById('clientSelect');
+  if (!clientSel.value) { alert('Selecciona un cliente.'); return; }
+  const clientOpt = clientSel.options[clientSel.selectedIndex];
+  const client = clientOpt.dataset.name || clientOpt.textContent;
+
+  if (lines.length === 0) { alert('Añade al menos un producto.'); return; }
+  const project = document.getElementById('projectName').value || 'Proyecto sin nombre';
+  const offerNum = document.getElementById('offerNumber').value || '2026-' + Date.now().toString().slice(-4);
+
+  const wastePct = parseFloat(document.getElementById('wasteInput').value) || 5;
+  const margin = parseFloat(document.getElementById('marginInput').value) || 33;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const incoterm = document.getElementById('incotermSelect').value;
+
+  // Get logistics data
+  const logisticCost = parseFloat(document.getElementById('logisticTotal').textContent) || 0;
+  const containers = parseInt(document.getElementById('containerCount').value) || 0;
+  const routeSel = document.getElementById('routeSelect');
+  const routeId = routeSel.value || null;
+
+  // Calculate pallets and weight for offer
+  const wastePctDecimal = wastePct / 100;
+  let totalPallets = 0;
+  let totalWeight = 0;
+  lines.forEach(line => {
+    const qtyWithWaste = Math.ceil(line.qty * (1 + wastePctDecimal));
+    const prod = products.find(p => p.sku === line.sku);
+    if (prod) {
+      const unitsPerPallet = prod.units_per_pallet || 0;
+      if (unitsPerPallet > 0) {
+        totalPallets += qtyWithWaste / unitsPerPallet;
+      }
+      const kgPerUnit = prod.kg_per_unit || 0;
+      totalWeight += qtyWithWaste * kgPerUnit;
+    }
+  });
+
+  const offer = {
+    client: client,
+    project: project,
+    offerNumber: offerNum,
+    wastePct: wastePct,
+    margin: margin,
+    fx: fx,
+    incoterm: incoterm,
+    logisticCost: logisticCost,
+    containerCount: containers,
+    routeId: routeId,
+    totalPallets: Math.ceil(totalPallets),
+    totalWeight: Math.round(totalWeight),
+    lines: lines.map(l => ({
+      sku: l.sku, name: l.name, family: l.family, unit: l.unit,
+      price: l.price, qty: l.qty
+    }))
+  };
+
+  fetch('/api/save-offer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(offer)
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      document.getElementById('offerBanner').innerHTML = `
+        <p style="color:#bbf7d0;font-size:16px;margin:0;">✅ Oferta <b>${offerNum}</b> generada para <b>${client}</b> — <b>${project}</b></p>
+        <p style="color:#94a3b8;font-size:13px;margin:8px 0 0;">Total producto: <b>€ ${document.getElementById('totalEur').textContent}</b> → 
+        <a href="/presupuestos" style="color:#93c5fd;">Ver Presupuestos →</a></p>
+      `;
+      document.getElementById('offerBanner').style.display = 'block';
+    } else {
+      alert('Error: ' + data.error);
+    }
+  })
+  .catch(err => alert('Error: ' + err.message));
+}
+
+// Initialize on load
+document.addEventListener('DOMContentLoaded', function() {
+  onClientSelect();
+  onIncotermChange();
+  recalcAll();
+});
+</script>
+{% endblock %}

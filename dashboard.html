@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block title %}Dashboard — Arias Group{% endblock %}
+{% block content %}
+<div class="wrap">
+  <!-- KPIs -->
+  <div class="grid grid-3">
+    <div class="card"><div class="muted">Clientes</div><div class="kpi">{{ clients }}</div></div>
+    <div class="card"><div class="muted">Productos</div><div class="kpi">{{ products }}</div></div>
+    <div class="card"><div class="muted">Sistemas</div><div class="kpi">{{ systems }}</div></div>
+    <div class="card"><div class="muted">Pipeline (ofertas)</div><div class="kpi" style="color:#22c55e;">€ {{ "{:,.0f}".format(total_pipeline_eur) }}</div><div class="muted">{{ counts.quotes }} oferta(s)</div></div>
+    <div class="card"><div class="muted">Proyectos GO</div><div class="kpi" style="color:#f59e0b;">{{ counts.go }}</div><div class="muted">de {{ counts.projects }} total</div></div>
+    <div class="card"><div class="muted">EUR → USD</div><div class="kpi" style="color:#22c55e;">{{ fx.get('USD', '—') }}</div></div>
+  </div>
+
+  <div class="grid grid-2" style="margin-top:16px;">
+    <!-- Pipeline -->
+    <div class="card">
+      <h2>Etapa de Proyectos</h2>
+      <table>
+        <thead><tr><th>Etapa</th><th>Proyectos</th></tr></thead>
+        <tbody>
+          {% for row in stage_counts %}
+            <tr><td>{{ row['stage'] }}</td><td>{{ row['qty'] }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Últimas ofertas -->
+    <div class="card">
+      <h2>Ofertas Recientes</h2>
+      {% if quotes_data %}
+      <table>
+        <thead><tr><th>Ref</th><th>Cliente</th><th>Venta €</th><th>Margen %</th><th>Palés</th><th>Cont.</th><th>Fecha</th></tr></thead>
+        <tbody>
+          {% for q in quotes_data %}
+          <tr>
+            <td>{{ q['version_label'] }}</td>
+            <td>{{ q['client_name'] }}</td>
+            <td style="color:#22c55e; font-weight:700;">€ {{ "{:,.0f}".format(q['sale_total_eur']) }}</td>
+            <td><span class="badge" style="color:{% if q['margin_ok'] %}#22c55e{% else %}#f87171{% endif %};">{{ q['gross_margin_pct'] }}%</span></td>
+            <td>{{ q['pallets'] }}</td>
+            <td>{{ q['containers_40'] }}</td>
+            <td>{{ q['created_at'] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted" style="text-align:center; padding:20px;">Sin ofertas calculadas. <a href="{{ url_for('quote') }}">Crear primera cotización →</a></p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Últimos proyectos -->
+  <div class="card" style="margin-top:16px;">
+    <h2>Proyectos Recientes</h2>
+    <table>
+      <thead><tr><th>Proyecto</th><th>Cliente</th><th>Empresa</th><th>Etapa</th></tr></thead>
+      <tbody>
+        {% for p in projects %}
+        <tr>
+          <td><a href="{{ url_for('project_detail', project_id=p['id']) }}">{{ p['name'] }}</a></td>
+          <td>{{ p['client_name'] }}</td>
+          <td>{{ p['company'] or '—' }}</td>
+          <td><span class="badge">{{ p['stage'] }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

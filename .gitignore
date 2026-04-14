@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database (optional - uncomment if you don't want to track DB)
+# fassa_ops.db
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+*.env

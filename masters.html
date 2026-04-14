@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Tablas Maestras — Fassa Caribbean Ops{% endblock %}
+{% block content %}
+<div class="wrap">
+  <h1>Tablas Maestras</h1>
+  {% with messages = get_flashed_messages() %}{% if messages %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endif %}{% endwith %}
+
+  <div style="display:flex;gap:12px;margin-bottom:24px;">
+    <a href="?tab=shipping" style="padding:8px 18px;border-radius:8px;background:{{'#1d4ed8' if tab=='shipping' else '#1f2937'}};color:white;font-weight:600;">🚢 Rutas Logísticas</a>
+    <a href="?tab=customs"  style="padding:8px 18px;border-radius:8px;background:{{'#1d4ed8' if tab=='customs'  else '#1f2937'}};color:white;font-weight:600;">🏛 Aranceles Aduana</a>
+    <a href="?tab=fx"       style="padding:8px 18px;border-radius:8px;background:{{'#1d4ed8' if tab=='fx'       else '#1f2937'}};color:white;font-weight:600;">💱 Tipos de Cambio</a>
+  </div>
+
+  {% if tab == 'shipping' %}
+  <div class="card" style="margin-bottom:24px;">
+    <h3>Nueva Ruta</h3>
+    <form method="POST">
+      <input type="hidden" name="action" value="add_shipping">
+      <div class="row">
+        <div><label>Puerto origen</label><input name="origin_port" placeholder="Valencia" required></div>
+        <div><label>Puerto destino</label><input name="destination_port" placeholder="Santo Domingo (Caucedo)" required></div>
+        <div><label>Naviera</label><input name="carrier" placeholder="MSC"></div>
+        <div><label>Tránsito (días)</label><input name="transit_days" type="number" placeholder="18"></div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>20' Standard €</label><input name="container_20_eur" type="number" step="50" placeholder="1800"></div>
+        <div><label>40' Standard €</label><input name="container_40_eur" type="number" step="50" placeholder="2800"></div>
+        <div><label>40' HC €</label><input name="container_40hc_eur" type="number" step="50" placeholder="2950"></div>
+        <div><label>Seguro %</label><input name="insurance_pct" type="number" step="0.001" value="0.005"></div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>Válido desde</label><input name="valid_from" type="date"></div>
+        <div><label>Válido hasta</label><input name="valid_until" type="date"></div>
+        <div><label>Notas</label><input name="notes" placeholder="Notas"></div>
+        <div style="display:flex;align-items:flex-end;"><button type="submit">+ Añadir ruta</button></div>
+      </div>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Rutas activas ({{ shipping|length }})</h3>
+    <table>
+      <tr><th>Origen</th><th>Destino</th><th>Naviera</th><th>Días</th><th>20' €</th><th>40' €</th><th>40'HC €</th><th>Seguro</th><th>Válido hasta</th><th></th></tr>
+      {% for r in shipping %}
+      <tr>
+        <td>{{ r.origin_port }}</td>
+        <td>{{ r.destination_port }}</td>
+        <td>{{ r.carrier or '—' }}</td>
+        <td style="text-align:center;">{{ r.transit_days }}</td>
+        <td>€ {{ "{:,.0f}".format(r.container_20_eur) }}</td>
+        <td>€ {{ "{:,.0f}".format(r.container_40_eur) }}</td>
+        <td>€ {{ "{:,.0f}".format(r.container_40hc_eur) }}</td>
+        <td>{{ "%.1f"|format(r.insurance_pct*100) }}%</td>
+        <td>{{ r.valid_until or '—' }}</td>
+        <td>
+          <form method="POST" style="display:inline;">
+            <input type="hidden" name="action" value="delete_shipping">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <button type="submit" class="btn-warn" style="width:auto;padding:4px 10px;font-size:12px;" onclick="return confirm('¿Eliminar?')">✕</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="10" class="muted">Sin rutas</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  {% elif tab == 'customs' %}
+  <div class="card" style="margin-bottom:24px;">
+    <h3>Nuevo Arancel</h3>
+    <form method="POST">
+      <input type="hidden" name="action" value="add_customs">
+      <div class="row">
+        <div><label>País</label><input name="country" placeholder="República Dominicana" required></div>
+        <div><label>Código HS</label><input name="hs_code" placeholder="6809.11" required></div>
+        <div><label>Categoría</label><input name="category" placeholder="Placas yeso laminado"></div>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <div><label>DAI %</label><input name="dai_pct" type="number" step="0.01" placeholder="0.20"></div>
+        <div><label>ITBIS / IVA %</label><input name="itbis_pct" type="number" step="0.01" value="0.18"></div>
+        <div><label>Otros %</label><input name="other_pct" type="number" step="0.01" value="0.00"></div>
+        <div><label>Notas</label><input name="notes"></div>
+        <div style="display:flex;align-items:flex-end;"><button type="submit">+ Añadir</button></div>
+      </div>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Aranceles ({{ customs|length }})</h3>
+    <table>
+      <tr><th>País</th><th>HS Code</th><th>Categoría</th><th>DAI</th><th>ITBIS</th><th>Otros</th><th>Total efectivo</th><th>Notas</th><th></th></tr>
+      {% for c in customs %}
+      <tr>
+        <td>{{ c.country }}</td>
+        <td><code>{{ c.hs_code }}</code></td>
+        <td>{{ c.category or '—' }}</td>
+        <td>{{ "%.0f"|format(c.dai_pct*100) }}%</td>
+        <td>{{ "%.0f"|format(c.itbis_pct*100) }}%</td>
+        <td>{{ "%.0f"|format(c.other_pct*100) }}%</td>
+        <td><strong>{{ "%.1f"|format((c.dai_pct+c.itbis_pct+c.other_pct)*100) }}%</strong></td>
+        <td class="muted" style="font-size:12px;">{{ c.notes or '' }}</td>
+        <td>
+          <form method="POST" style="display:inline;">
+            <input type="hidden" name="action" value="delete_customs">
+            <input type="hidden" name="id" value="{{ c.id }}">
+            <button type="submit" class="btn-warn" style="width:auto;padding:4px 10px;font-size:12px;" onclick="return confirm('¿Eliminar?')">✕</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="9" class="muted">Sin aranceles</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  {% elif tab == 'fx' %}
+  <div class="card" style="margin-bottom:24px;">
+    <h3>Nuevo Tipo de Cambio</h3>
+    <form method="POST">
+      <input type="hidden" name="action" value="add_fx">
+      <div class="row">
+        <div><label>Moneda base</label>
+          <select name="base_currency"><option>EUR</option><option>USD</option></select></div>
+        <div><label>Moneda destino</label><input name="target_currency" placeholder="USD" required></div>
+        <div><label>Tasa</label><input name="rate" type="number" step="0.0001" required></div>
+        <div><label>Fuente</label><input name="source" value="Manual"></div>
+        <div style="display:flex;align-items:flex-end;"><button type="submit">+ Añadir</button></div>
+      </div>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Tipos de cambio activos</h3>
+    <table>
+      <tr><th>Base</th><th>Destino</th><th>Tasa</th><th>Actualizado</th><th>Fuente</th><th>Actualizar</th></tr>
+      {% for f in fx %}
+      <tr>
+        <td><strong>{{ f.base_currency }}</strong></td>
+        <td><strong>{{ f.target_currency }}</strong></td>
+        <td style="font-size:18px;font-weight:800;color:#22c55e;">{{ f.rate }}</td>
+        <td class="muted">{{ f.updated_at[:10] }}</td>
+        <td class="muted">{{ f.source }}</td>
+        <td>
+          <form method="POST" style="display:flex;gap:8px;">
+            <input type="hidden" name="action" value="update_fx">
+            <input type="hidden" name="id" value="{{ f.id }}">
+            <input name="rate" type="number" step="0.0001" value="{{ f.rate }}" style="width:100px;">
+            <button type="submit" style="width:auto;padding:6px 14px;">↻</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

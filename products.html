@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h2 style="color:#93c5fd;">Catálogo de Productos</h2>
+  <p class="muted">{{ products|length }} productos · Precios Abril 2026 · Fuente: V4 PRODUCT</p>
+  <table>
+    <thead><tr><th>SKU</th><th>Producto</th><th>Categoría</th><th>Unidad</th><th>Precio/ud</th><th>€/m²</th><th>Arias €/m²</th><th>Ud/palet</th><th>m²/palet</th></tr></thead>
+    <tbody>
+    {% for p in products %}
+      <tr>
+        <td style="font-family:monospace;font-size:12px;">{{ p['sku'] }}</td>
+        <td>{{ p['name'] }}</td>
+        <td><span class="badge">{{ p['category'] }}</span></td>
+        <td>{{ p['unit'] }}</td>
+        <td style="font-weight:800;color:#22c55e;">€ {{ p['unit_price_eur'] }}</td>
+        {% if p['pvp_per_m2'] %}
+        <td style="color:#94a3b8;">€ {{ '%.2f'|format(p['pvp_per_m2']) }}</td>
+        {% else %}
+        <td style="color:#94a3b8;">—</td>
+        {% endif %}
+        {% if p['precio_arias_m2'] %}
+        <td style="color:#fbbf24;">€ {{ '%.2f'|format(p['precio_arias_m2']) }}</td>
+        {% else %}
+        <td style="color:#94a3b8;">—</td>
+        {% endif %}
+        <td>{{ p['units_per_pallet'] or '-' }}</td>
+        <td>{{ p['sqm_per_pallet'] or '-' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
