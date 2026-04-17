@@ -6,10 +6,58 @@
 <div class="grid-3">
   <div class="card"><div class="muted">Clientes</div><div class="kpi">{{ clients }}</div></div>
   <div class="card"><div class="muted">Productos</div><div class="kpi">{{ products }}</div></div>
-  <div class="card"><div class="muted">Sistemas</div><div class="kpi">{{ systems }}</div></div>
   <div class="card"><div class="muted">Pipeline €</div><div class="kpi">{{ "{:,.0f}".format(total_pipeline_eur) }}</div><div class="muted">{{ counts.quotes }} oferta(s)</div></div>
-  <div class="card"><div class="muted">Proyectos GO</div><div class="kpi">{{ counts.go }} / {{ counts.projects }}</div></div>
-  <div class="card"><div class="muted">EUR → USD</div><div class="kpi">{{ fx.get('USD', '—') }}</div></div>
+  <div class="card"><div class="muted">Confirmado €</div><div class="kpi" style="color:green;">{{ "{:,.0f}".format(total_confirmed_eur) }}</div></div>
+  <div class="card"><div class="muted">Conversión</div><div class="kpi">{{ conversion_rate }}%</div><div class="muted">{{ approved_n }} de {{ total_offers }}</div></div>
+  <div class="card">
+    <div class="muted">Ofertas por estado</div>
+    <div style="font-size:0.9em; margin-top:4px;">
+      <div><span style="color:#b80;">Pendientes</span>: <b>{{ pending_n }}</b>{% if total_offers %} · {{ (pending_n / total_offers * 100)|round(0)|int }}%{% endif %}</div>
+      <div><span style="color:green;">Aprobadas</span>: <b>{{ approved_n }}</b>{% if total_offers %} · {{ (approved_n / total_offers * 100)|round(0)|int }}%{% endif %}</div>
+      <div><span style="color:#a23;">Rechazadas</span>: <b>{{ rejected_n }}</b>{% if total_offers %} · {{ (rejected_n / total_offers * 100)|round(0)|int }}%{% endif %}</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid-2" style="margin-top:12px;">
+  <div>
+    <h2>Top empresas por volumen</h2>
+    {% if top_companies %}
+    <table>
+      <thead><tr><th>Empresa</th><th class="num">Ofertas</th><th class="num">Total €</th></tr></thead>
+      <tbody>
+        {% for c in top_companies %}
+        <tr>
+          <td>{{ c['company'] }}</td>
+          <td class="num">{{ c['n'] }}</td>
+          <td class="num">{{ "{:,.0f}".format(c['total'] or 0) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Sin datos.</p>
+    {% endif %}
+  </div>
+
+  <div>
+    <h2>Familias más cotizadas</h2>
+    {% if top_families %}
+    <table>
+      <thead><tr><th>Familia</th><th class="num">Coste total €</th></tr></thead>
+      <tbody>
+        {% for fam, total in top_families %}
+        <tr>
+          <td>{{ fam }}</td>
+          <td class="num">{{ "{:,.0f}".format(total) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Sin datos.</p>
+    {% endif %}
+  </div>
 </div>
 
 <div class="grid-2" style="margin-top:12px;">
@@ -29,16 +77,17 @@
     <h2>Ofertas recientes</h2>
     {% if quotes_data %}
     <table>
-      <thead><tr><th>Ref</th><th>Cliente</th><th class="num">Venta €</th><th class="num">Margen %</th><th class="num">Palés</th><th class="num">Cont.</th><th>Fecha</th></tr></thead>
+      <thead><tr><th>Ref</th><th>Cliente</th><th>Proyecto</th><th class="num">Total €</th><th>Estado</th><th>Fecha</th></tr></thead>
       <tbody>
         {% for q in quotes_data %}
         <tr>
-          <td>{{ q['version_label'] }}</td>
+          <td class="mono">{{ q['offer_number'] }}</td>
           <td>{{ q['client_name'] }}</td>
+          <td>{{ q['project_name'] }}</td>
           <td class="num">{{ "{:,.0f}".format(q['sale_total_eur']) }}</td>
-          <td class="num">{{ q['gross_margin_pct'] }}</td>
-          <td class="num">{{ q['pallets'] }}</td>
-          <td class="num">{{ q['containers_40'] }}</td>
+          <td>{% if q['status'] == 'approved' %}<span style="color:green;">Aprobada</span>
+              {% elif q['status'] == 'rejected' %}<span style="color:#a23;">Rechazada</span>
+              {% else %}<span style="color:#b80;">Pendiente</span>{% endif %}</td>
           <td>{{ q['created_at'] }}</td>
         </tr>
         {% endfor %}
@@ -52,7 +101,7 @@
 
 <h2>Proyectos recientes</h2>
 <table>
-  <thead><tr><th>Proyecto</th><th>Cliente</th><th>Empresa</th><th>Etapa</th></tr></thead>
+  <thead><tr><th>Proyecto</th><th>Cliente</th><th>Empresa</th><th>Etapa</th><th>GO/NO-GO</th></tr></thead>
   <tbody>
     {% for p in projects %}
     <tr>
@@ -60,6 +109,7 @@
       <td>{{ p['client_name'] }}</td>
       <td>{{ p['company'] or '—' }}</td>
       <td>{{ p['stage'] }}</td>
+      <td>{{ p['go_no_go'] or 'PENDING' }}</td>
     </tr>
     {% endfor %}
   </tbody>

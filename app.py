@@ -138,8 +138,10 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             company TEXT,
+            rnc TEXT,
             email TEXT,
             phone TEXT,
+            address TEXT,
             country TEXT DEFAULT 'República Dominicana',
             score INTEGER DEFAULT 50,
             created_at TEXT NOT NULL
@@ -380,6 +382,10 @@ def init_db() -> None:
                      ('discount_pct', 'REAL DEFAULT 50')]:
         if col not in prod_cols:
             db.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
+    client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
+    for col, typ in [('rnc', 'TEXT'), ('address', 'TEXT')]:
+        if col not in client_cols:
+            db.execute(f"ALTER TABLE clients ADD COLUMN {col} {typ}")
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
         db.execute("ALTER TABLE pending_offers ADD COLUMN raw_hash TEXT")
@@ -865,54 +871,92 @@ def dashboard():
         FROM projects LEFT JOIN project_quotes ON projects.id = project_quotes.project_id
         GROUP BY stage ORDER BY count DESC
     ''').fetchall()
-    recent_quotes = db.execute('''
-        SELECT q.*, p.name as project_name, c.name as client_name, c.company,
-               p.stage, s.name as system_name
-        FROM project_quotes q
-        JOIN projects p ON p.id = q.project_id
-        JOIN clients c ON c.id = p.client_id
-        LEFT JOIN systems s ON s.id = q.system_id
-        ORDER BY q.created_at DESC LIMIT 10
+    # Ofertas desde pending_offers (cotizador principal)
+    recent_offers = db.execute('''
+        SELECT * FROM pending_offers ORDER BY created_at DESC LIMIT 10
     ''').fetchall()
     quotes_data = []
     total_pipeline_eur = 0
     total_confirmed_eur = 0
-    for q in recent_quotes:
-        payload = json.loads(q['result_json'])
-        s = payload['summary']
-        margin_pct = round(s.get('gross_margin_pct', 0), 1)
+    for o in recent_offers:
+        lines = json.loads(o['lines_json']) if o['lines_json'] else []
+        margin_pct = float(o['margin_pct'] or 20)
         quotes_data.append({
-            'id': q['id'], 'project_id': q['project_id'],
-            'version_label': q['version_label'], 'project_name': q['project_name'],
-            'client_name': q['client_name'], 'company': q['company'],
-            'stage': q['stage'], 'system_name': q['system_name'],
-            'area_sqm': q['area_sqm'],
-            'sale_total_eur': s['sale_total_eur'], 'landed_total_eur': s['landed_total_eur'],
-            'gross_margin_eur': s['gross_margin_eur'], 'gross_margin_pct': margin_pct,
-            'price_per_sqm': s.get('price_per_sqm_eur', 0),
-            'pallets': s.get('total_pallets', 0), 'containers_40': s.get('containers_40_est', 0),
-            'created_at': q['created_at'][:10], 'margin_ok': margin_pct >= 18,
+            'id': o['id'], 'offer_number': o['offer_number'],
+            'project_name': o['project_name'],
+            'client_name': o['client_name'],
+            'status': o['status'],
+            'incoterm': o['incoterm'] or 'EXW',
+            'sale_total_eur': o['total_final_eur'],
+            'product_eur': o['total_product_eur'],
+            'logistic_eur': o['total_logistic_eur'] or 0,
+            'margin_pct': margin_pct,
+            'lines': len(lines),
+            'containers': o['container_count'] or 0,
+            'created_at': (o['created_at'] or '')[:10],
         })
-        total_pipeline_eur += s['sale_total_eur']
-        if q['stage'] in ('PREPAGO VALIDADO', 'ORDEN BLOQUEADA', 'PEDIDO A FASSA',
-                           'CONFIRMACIÓN FÁBRICA', 'EXPEDICIÓN (BL)', 'ENTREGA'):
-            total_confirmed_eur += s['sale_total_eur']
-    
+        if o['status'] in ('pending', 'approved'):
+            total_pipeline_eur += o['total_final_eur'] or 0
+        if o['status'] == 'approved':
+            total_confirmed_eur += o['total_final_eur'] or 0
+
+    offers_count = db.execute('SELECT COUNT(*) FROM pending_offers').fetchone()[0]
     counts = {
         'clients': clients_count, 'projects': db.execute('SELECT COUNT(*) FROM projects').fetchone()[0],
         'go': db.execute("SELECT COUNT(*) FROM projects WHERE go_no_go='GO'").fetchone()[0],
         'products': products_count, 'systems': systems_count,
-        'quotes': db.execute('SELECT COUNT(*) FROM project_quotes').fetchone()[0],
+        'quotes': offers_count,
     }
-    fx = {r['target_currency']: r['rate']
-          for r in db.execute('SELECT * FROM fx_rates WHERE base_currency="EUR"').fetchall()}
-    
+    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
+    fx = {'USD': float(fx_setting['value']) if fx_setting else 1.085}
+
+    # Top empresas por volumen € (via clients.company)
+    top_companies = db.execute('''
+        SELECT c.company, COUNT(*) n, SUM(o.total_final_eur) total
+        FROM pending_offers o
+        JOIN clients c ON c.name = o.client_name OR c.company = o.client_name
+        WHERE o.status IN ('pending','approved') AND c.company IS NOT NULL
+        GROUP BY c.company ORDER BY total DESC LIMIT 5
+    ''').fetchall()
+    if not top_companies:
+        top_companies = db.execute('''
+            SELECT client_name as company, COUNT(*) n, SUM(total_final_eur) total
+            FROM pending_offers WHERE status IN ('pending','approved')
+            GROUP BY client_name ORDER BY total DESC LIMIT 5
+        ''').fetchall()
+
+    # Ofertas por estado con % e importe
+    status_counts = db.execute('''
+        SELECT status, COUNT(*) n, SUM(total_final_eur) total
+        FROM pending_offers GROUP BY status
+    ''').fetchall()
+    total_offers = sum(r['n'] for r in status_counts)
+    approved_n = next((r['n'] for r in status_counts if r['status'] == 'approved'), 0)
+    rejected_n = next((r['n'] for r in status_counts if r['status'] == 'rejected'), 0)
+    pending_n = next((r['n'] for r in status_counts if r['status'] == 'pending'), 0)
+    conversion_rate = round(approved_n / total_offers * 100, 1) if total_offers > 0 else 0
+
+    # Familias más cotizadas (de lines_json)
+    all_lines = []
+    for o in db.execute("SELECT lines_json FROM pending_offers WHERE status IN ('pending','approved')"):
+        lines_data = json.loads(o['lines_json']) if o['lines_json'] else []
+        all_lines.extend(lines_data)
+    family_totals: dict[str, float] = {}
+    for li in all_lines:
+        fam = li.get('family', '?')
+        family_totals[fam] = family_totals.get(fam, 0) + (li.get('price', 0) * li.get('qty', 0))
+    top_families = sorted(family_totals.items(), key=lambda x: -x[1])[:6]
+
     return render_template('dashboard.html',
         stage_counts=stage_counts, projects=projects, clients=clients_count,
         products=products_count, systems=systems_count,
         quotes_data=quotes_data, total_pipeline_eur=total_pipeline_eur,
         total_confirmed_eur=total_confirmed_eur, stage_data={row['stage']: row['count'] for row in pipeline},
-        counts=counts, fx=fx, stages=STAGES)
+        counts=counts, fx=fx, stages=STAGES,
+        top_companies=top_companies, status_counts=status_counts,
+        conversion_rate=conversion_rate, top_families=top_families,
+        pending_n=pending_n, approved_n=approved_n, rejected_n=rejected_n,
+        total_offers=total_offers)
 
 
 @app.route('/clients', methods=['GET', 'POST'])
@@ -921,13 +965,15 @@ def clients():
     db = get_db()
     if request.method == 'POST':
         db.execute(
-            '''INSERT INTO clients (name, company, email, phone, country, score, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            '''INSERT INTO clients (name, company, rnc, email, phone, address, country, score, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (
                 request.form['name'],
                 request.form.get('company'),
+                request.form.get('rnc'),
                 request.form.get('email'),
                 request.form.get('phone'),
+                request.form.get('address'),
                 request.form.get('country') or 'República Dominicana',
                 int(request.form.get('score') or 50),
                 now_iso(),
@@ -1961,6 +2007,19 @@ def config():
                  request.form.get('source', 'Manual'))
             )
             flash('Tipo de cambio actualizado.')
+        elif action == 'update_route':
+            route_id = request.form.get('route_id')
+            db.execute(
+                '''UPDATE shipping_routes SET carrier=?, origin_port=?, destination_port=?,
+                   container_20_eur=?, container_40_eur=?, container_40hc_eur=? WHERE id=?''',
+                (request.form['carrier'], request.form['origin_port'],
+                 request.form['destination_port'],
+                 float(request.form.get('container_20_eur', 0) or 0),
+                 float(request.form.get('container_40_eur', 0) or 0),
+                 float(request.form.get('container_40hc_eur', 0) or 0),
+                 route_id)
+            )
+            flash('Ruta actualizada.')
         elif action == 'update_fx_setting':
             new_fx = float(request.form['fx_eur_usd'])
             db.execute(
@@ -2227,6 +2286,23 @@ def update_offer():
     return jsonify({'ok': True})
 
 
+@app.route('/api/config-delete', methods=['POST'])
+@admin_required
+def config_delete():
+    db = get_db()
+    data = request.get_json() or {}
+    item_type = data.get('type')
+    item_id = data.get('id')
+    if item_type == 'route':
+        db.execute('DELETE FROM shipping_routes WHERE id = ?', (item_id,))
+    elif item_type == 'customs':
+        db.execute('DELETE FROM customs_rates WHERE id = ?', (item_id,))
+    else:
+        return jsonify({'ok': False, 'error': 'Tipo inválido'}), 400
+    db.commit()
+    return jsonify({'ok': True})
+
+
 # ── API: Delete offer ────────────────────────────────────────────
 @app.route('/api/delete-offer', methods=['POST'])
 @login_required
@@ -2238,6 +2314,26 @@ def delete_offer():
     db.execute('DELETE FROM pending_offers WHERE id = ?', (offer_id,))
     db.commit()
     return jsonify({'ok': True})
+
+
+@app.route('/api/offer-status', methods=['POST'])
+@login_required
+def offer_status():
+    db = get_db()
+    data = request.get_json() or {}
+    offer_id = data.get('id')
+    new_status = data.get('status')
+    if new_status not in ('pending', 'approved', 'rejected'):
+        return jsonify({'ok': False, 'error': 'Estado inválido'}), 400
+    offer = db.execute('SELECT * FROM pending_offers WHERE id = ?', (offer_id,)).fetchone()
+    if not offer:
+        return jsonify({'ok': False, 'error': 'Oferta no encontrada'}), 404
+    db.execute('UPDATE pending_offers SET status = ?, updated_at = ? WHERE id = ?',
+               (new_status, now_iso(), offer_id))
+    log_audit(db, offer_id, f'STATUS_{new_status.upper()}',
+              f'{offer["offer_number"]} → {new_status}')
+    db.commit()
+    return jsonify({'ok': True, 'status': new_status})
 
 
 # ── PDF for confirmed offer — professional 2-page document ──────────

@@ -452,10 +452,10 @@ function recalcAll() {
   lines.forEach(l => { famBreakdown[l.family] = (famBreakdown[l.family] || 0) + 1; });
   const containerRec = estimateContainersJS(palletsLogistic, totalWeight, famBreakdown);
 
-  // Container auto-calc (user can override to 0 to re-trigger)
+  // Container auto-calc: siempre actualizar con la recomendación
   const manualContainers = document.getElementById('containerCount');
   let containerCount = parseInt(manualContainers.value) || 0;
-  if (containerCount === 0 && containerRec) {
+  if (containerRec && containerRec.units > 0) {
     containerCount = containerRec.units;
     manualContainers.value = containerCount;
   }
@@ -492,11 +492,6 @@ function recalcAll() {
         oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
       }
     }
-    // Auto-actualizar contenedores siempre que haya recomendación
-    if (containerRec && containerRec.units > 0) {
-      document.getElementById('containerCount').value = containerRec.units;
-      containerCount = containerRec.units;
-    }
     const logBase = oceanFreight * containerCount;
     logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
     const freightLabel = oceanFreight > 0 ? fmtN(oceanFreight) + ' €/cont × ' + containerCount + ' = ' : '';
@@ -526,7 +521,9 @@ function recalcAll() {
       const upp = prod.units_per_pallet || 0;
       if (upp > 1) {
         const totalUds = qtyW * upp;
-        packAlert = `<div style="color:#a23;font-size:0.8em;font-weight:bold;">${fmtQ(qtyW)} ${line.unit}s = ${fmtQ(totalUds)} uds</div>`;
+        const isHigh = qtyW > 100 || totalUds > 10000;
+        const color = isHigh ? 'color:#a23;font-weight:bold;' : 'color:#888;';
+        packAlert = `<div style="${color}font-size:0.8em;">${fmtQ(qtyW)} ${line.unit}s = ${fmtQ(totalUds)} uds</div>`;
       }
     }
     body.innerHTML += `<tr>

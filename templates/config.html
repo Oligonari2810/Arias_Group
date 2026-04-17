@@ -20,7 +20,7 @@
   <button type="button" onclick="toggle('routeForm')" style="float:right;">+ Ruta</button>
 </h2>
 <table>
-  <thead><tr><th>Naviera</th><th>Origen</th><th>Destino</th><th class="num">20' €</th><th class="num">40' €</th><th class="num">40HC €</th></tr></thead>
+  <thead><tr><th>Naviera</th><th>Origen</th><th>Destino</th><th class="num">20' €</th><th class="num">40' €</th><th class="num">40HC €</th><th></th></tr></thead>
   <tbody>
   {% for r in routes %}
   <tr>
@@ -30,6 +30,10 @@
     <td class="num">{{ "%.0f"|format(r['container_20_eur'] or 0) }}</td>
     <td class="num">{{ "%.0f"|format(r['container_40_eur'] or 0) }}</td>
     <td class="num">{{ "%.0f"|format(r['container_40hc_eur'] or 0) }}</td>
+    <td>
+      <button type="button" onclick="editRoute({{ r['id'] }}, '{{ r['carrier'] }}', '{{ r['origin_port'] }}', '{{ r['destination_port'] }}', {{ r['container_20_eur'] or 0 }}, {{ r['container_40_eur'] or 0 }}, {{ r['container_40hc_eur'] or 0 }})">Editar</button>
+      <button type="button" onclick="deleteItem('route', {{ r['id'] }}, '{{ r['carrier'] }} {{ r['destination_port'] }}')" style="color:#a23;">×</button>
+    </td>
   </tr>
   {% endfor %}
   </tbody>
@@ -53,7 +57,7 @@
   <button type="button" onclick="toggle('customsForm')" style="float:right;">+ Arancel</button>
 </h2>
 <table>
-  <thead><tr><th>País</th><th>HS Code</th><th>Categoría</th><th class="num">DAI %</th><th class="num">ITBIS %</th></tr></thead>
+  <thead><tr><th>País</th><th>HS Code</th><th>Categoría</th><th class="num">DAI %</th><th class="num">ITBIS %</th><th></th></tr></thead>
   <tbody>
   {% for c in customs %}
   <tr>
@@ -62,6 +66,7 @@
     <td>{{ c['category'] }}</td>
     <td class="num">{{ "%.1f"|format(c['dai_pct'] or 0) }}</td>
     <td class="num">{{ "%.1f"|format(c['itbis_pct'] or 0) }}</td>
+    <td><button type="button" onclick="deleteItem('customs', {{ c['id'] }}, '{{ c['country'] }} {{ c['hs_code'] }}')" style="color:#a23;">×</button></td>
   </tr>
   {% endfor %}
   </tbody>
@@ -112,5 +117,30 @@
 
 <script>
 function toggle(id) { var e = document.getElementById(id); e.style.display = e.style.display === 'none' ? 'block' : 'none'; }
+
+function editRoute(id, carrier, origin, dest, c20, c40, c40hc) {
+  const f = document.getElementById('routeForm');
+  f.style.display = 'block';
+  f.querySelector('[name=action]').value = 'update_route';
+  f.querySelector('[name=carrier]').value = carrier;
+  f.querySelector('[name=origin_port]').value = origin;
+  f.querySelector('[name=destination_port]').value = dest;
+  f.querySelector('[name=container_20_eur]').value = c20;
+  f.querySelector('[name=container_40_eur]').value = c40;
+  f.querySelector('[name=container_40hc_eur]').value = c40hc;
+  if (!f.querySelector('[name=route_id]')) {
+    var h = document.createElement('input'); h.type='hidden'; h.name='route_id'; f.querySelector('form').appendChild(h);
+  }
+  f.querySelector('[name=route_id]').value = id;
+  f.querySelector('button[type=submit]').textContent = 'Actualizar ruta';
+}
+
+function deleteItem(type, id, label) {
+  if (!confirm('¿Eliminar ' + label + '?')) return;
+  fetch('/api/config-delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: type, id: id})
+  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); else alert(data.error || 'Error'); });
+}
 </script>
 {% endblock %}

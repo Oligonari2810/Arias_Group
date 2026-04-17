@@ -18,7 +18,9 @@
     </div>
     <div>
       <b>€ {{ "%.2f"|format(offer['total_final_eur']) }}</b>
-      · {{ 'Confirmada' if offer['status'] == 'confirmed' else 'Pendiente' }}
+      · {% if offer['status'] == 'approved' %}<span style="color:green;font-weight:bold;">Aprobada</span>
+        {% elif offer['status'] == 'rejected' %}<span style="color:#a23;font-weight:bold;">Rechazada</span>
+        {% else %}<span style="color:#b80;">Pendiente</span>{% endif %}
     </div>
   </div>
 
@@ -70,13 +72,21 @@
   </details>
 
   <div style="margin-top:6px; font-size:12px;">
-    {% if offer['status'] != 'confirmed' %}
+    {% if offer['status'] not in ('approved', 'rejected') %}
     <a href="{{ url_for('quote') }}?edit={{ offer['id'] }}">Editar</a> ·
     {% endif %}
     <a href="/api/offer-pdf/{{ offer['id'] }}" target="_blank">PDF Presupuesto</a>
     · <a href="/api/preorden-pdf/{{ offer['id'] }}" target="_blank">PDF PreOrden</a>
     · <a href="/api/orden-logistica-pdf/{{ offer['id'] }}" target="_blank">PDF Logística</a>
-    · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;">Borrar</a>
+    {% if offer['status'] == 'pending' %}
+    · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'approved'); return false;" style="color:green;font-weight:bold;">✓ Aprobar</a>
+    · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'rejected'); return false;" style="color:#a23;">✗ Rechazar</a>
+    {% elif offer['status'] == 'approved' %}
+    · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'pending'); return false;" style="color:#888;">↩ Volver a pendiente</a>
+    {% elif offer['status'] == 'rejected' %}
+    · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'pending'); return false;" style="color:#888;">↩ Reabrir</a>
+    {% endif %}
+    · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;" style="color:#a23;">Borrar</a>
   </div>
 </div>
 {% endfor %}
@@ -90,6 +100,14 @@ function deleteOffer(id) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({id: id})
   }).then(r => r.json()).then(data => { if (data.ok) location.reload(); });
+}
+function changeStatus(id, status) {
+  const labels = {approved: 'aprobar', rejected: 'rechazar', pending: 'volver a pendiente'};
+  if (!confirm('¿Seguro que quieres ' + labels[status] + ' este presupuesto?')) return;
+  fetch('/api/offer-status', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id, status: status})
+  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); else alert(data.error || 'Error'); });
 }
 </script>
 {% endblock %}
