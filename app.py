@@ -393,42 +393,6 @@ def seed_db() -> None:
     db = get_db()
     now = now_iso()
 
-    product_rows = [
-        # Gypsotech core boards
-        ('00A003250A0', 'GYPSOTECH STD BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 4.03, None, 48, 144.0, 'Tarancón €/m²; board size 1.2 x 2.5m = 3.0m²'),
-        ('00H003250A0', 'GYPSOTECH AQUA H2 BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 6.71, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00F003250A0', 'GYPSOTECH FOCUS BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 6.80, None, 36, 108.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00W003250A0', 'GYPSOTECH AQUASUPER BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 7.16, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00LB03250AC', 'GYPSOTECH GYPSOLIGNUM BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 11.73, None, 24, 72.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('U307030300A', 'RAIL 70 Z1 3000', 'PERFILES', 'GYPSOTECH Abril 2026', 'ml', 0.45, 0.55, 350, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
-        ('C367038299A', 'MONTANTE 70/37 Z1 2990', 'PERFILES', 'GYPSOTECH Abril 2026', 'ml', 0.70, 0.70, 250, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
-        # Fassa sacks
-        ('1772Y1A', 'FASSACOL MULTI BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 11.45, 25, 64, None, '€/saco point Fátima-PT/Antas/Onda/Tarancón varies; seeded with Fátima line shown as first market price'),
-        ('1773Y1A', 'FASSACOL MULTI GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 10.16, 25, 64, None, '€/saco'),
-        ('1774Y1A', 'FASSACOL FLEX BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 13.67, 25, 64, None, '€/saco'),
-        ('1775Y1A', 'FASSACOL FLEX GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 12.03, 25, 64, None, '€/saco'),
-        ('1778Y1A', 'FASSACOL ULTRAFLEX S1 BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 24.09, 25, 64, None, '€/saco'),
-        ('1779Y1A', 'FASSACOL ULTRAFLEX S1 GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 22.69, 25, 64, None, '€/saco'),
-        ('1347U1', 'AQUAZIP ONE PRO', 'PASTAS', 'FASSA Abril 2026', 'bag', 81.58, 20, 48, None, '€/saco'),
-        ('1077F', 'AQUAZIP GE 97 Comp A', 'PASTAS', 'FASSA Abril 2026', 'bag', 17.03, 25, 48, None, 'Comp. A €/embalaje visible; treat as bag for estimator'),
-        ('1239T1', 'AQUAZIP MO 660 Gris', 'PASTAS', 'FASSA Abril 2026', 'bag', 32.03, 25, 48, None, '€/saco'),
-        ('1188F', 'FASSACOL ONE GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 5.43, 25, 64, None, '€/saco'),
-        ('1783Y1A', 'FASSACOL PRIME GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 5.73, 25, 64, None, '€/saco'),
-        ('2990NEUTRO0', 'FAST 299', 'PASTAS', 'FASSA Abril 2026', 'bucket', 62.00, 20, 33, None, '€/bote 20kg'),
-        ('420Y1A', 'KI 7', 'PASTAS', 'FASSA Abril 2026', 'bag', 3.99, 25, 64, None, '€/saco'),
-        ('611Y1A', 'MM 30 GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 2.86, 25, 64, None, '€/saco'),
-    ]
-
-    for row in product_rows:
-        db.execute(
-            """
-            INSERT OR IGNORE INTO products
-            (sku, name, category, source_catalog, unit, unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            row,
-        )
-
     systems = [
         ('Sistema cerámica estándar', 'Adhesivo base para revestimiento cerámico interior', 0.08),
         ('Sistema impermeabilización baño', 'Impermeabilización cementosa flexible para baños y zonas húmedas', 0.10),
@@ -438,33 +402,6 @@ def seed_db() -> None:
     ]
     for row in systems:
         db.execute('INSERT OR IGNORE INTO systems (name, description, default_waste_pct) VALUES (?, ?, ?)', row)
-
-    db.commit()
-
-    def get_id(table: str, name_or_sku: str, field: str = 'name') -> int:
-        return db.execute(f'SELECT id FROM {table} WHERE {field} = ?', (name_or_sku,)).fetchone()['id']
-
-    components = [
-        # Ceramics systems kg/m² typical estimator, editable later
-        ('Sistema cerámica estándar', '1773Y1A', 4.0, 0.08),
-        # Waterproofing bathroom
-        ('Sistema impermeabilización baño', '1347U1', 1.5, 0.10),
-        ('Sistema impermeabilización baño', '1239T1', 0.5, 0.05),
-        # Boards estimator uses board area conversion inside quote math when unit=board
-        ('Sistema placa estándar interior', '00A003250A0', 1/3.0, 0.05),
-        ('Sistema placa humedad', '00H003250A0', 1/3.0, 0.05),
-        ('Sistema protección fuego', '00F003250A0', 1/3.0, 0.05),
-    ]
-    for system_name, sku, consumption_per_sqm, waste_pct in components:
-        system_id = get_id('systems', system_name)
-        product_id = get_id('products', sku, 'sku')
-        db.execute(
-            """
-            INSERT OR IGNORE INTO system_components (system_id, product_id, consumption_per_sqm, waste_pct)
-            VALUES (?, ?, ?, ?)
-            """,
-            (system_id, product_id, consumption_per_sqm, waste_pct),
-        )
 
     if db.execute('SELECT COUNT(*) AS c FROM clients').fetchone()['c'] == 0:
         db.execute(
