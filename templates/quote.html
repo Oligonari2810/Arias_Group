@@ -482,20 +482,26 @@ function recalcAll() {
   let logisticCost = 0;
   if (incoterm !== 'EXW') {
     let oceanFreight = 0;
-    if (incoterm === 'CIF') {
-      const routeSel = document.getElementById('routeSelect');
-      const opt = routeSel.options[routeSel.selectedIndex];
-      if (opt && containerRec) {
-        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40';
-        oceanFreight = parseFloat(opt.dataset[rateKey]) || parseFloat(opt.dataset.c40) || 0;
-      } else if (opt) {
-        oceanFreight = parseFloat(opt.dataset.c40) || 0;
+    const routeSel = document.getElementById('routeSelect');
+    const routeOpt = routeSel.options[routeSel.selectedIndex];
+    if (routeOpt && routeOpt.value) {
+      if (containerRec) {
+        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40hc';
+        oceanFreight = parseFloat(routeOpt.dataset[rateKey]) || parseFloat(routeOpt.dataset.c40hc) || 0;
+      } else {
+        oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
       }
+    }
+    // Auto-actualizar contenedores siempre que haya recomendación
+    if (containerRec && containerRec.units > 0) {
+      document.getElementById('containerCount').value = containerRec.units;
+      containerCount = containerRec.units;
     }
     const logBase = oceanFreight * containerCount;
     logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
+    const freightLabel = oceanFreight > 0 ? fmtN(oceanFreight) + ' €/cont × ' + containerCount + ' = ' : '';
     document.getElementById('logisticCostDisplay').textContent =
-      '€ ' + fmtN(logBase) + (logMargin > 0 ? ' → € ' + fmtN(logisticCost) + ' (+' + (logMargin*100).toFixed(0) + '%)' : '');
+      freightLabel + '€ ' + fmtN(logBase) + (logMargin > 0 ? ' → € ' + fmtN(logisticCost) + ' (+' + (logMargin*100).toFixed(0) + '%)' : '');
   } else {
     document.getElementById('logisticCostDisplay').textContent = '€ 0.00';
   }
@@ -513,6 +519,16 @@ function recalcAll() {
     const lineSale = m < 1 ? lineCost / (1 - m) : lineCost;
     totalCost += lineCost;
     totalSale += lineSale;
+    // Alerta de embalaje: mostrar total uds cuando unit es caja/paquete
+    const prod = products.find(p => p.sku === line.sku);
+    let packAlert = '';
+    if (prod && ['caja','paquete'].includes(line.unit)) {
+      const upp = prod.units_per_pallet || 0;
+      if (upp > 1) {
+        const totalUds = qtyW * upp;
+        packAlert = `<div style="color:#a23;font-size:0.8em;font-weight:bold;">${fmtQ(qtyW)} ${line.unit}s = ${fmtQ(totalUds)} uds</div>`;
+      }
+    }
     body.innerHTML += `<tr>
       <td class="mono">${escapeHtml(line.sku)}</td>
       <td>${escapeHtml(line.name)}</td>
@@ -520,7 +536,7 @@ function recalcAll() {
       <td>${escapeHtml(line.unit)}</td>
       <td class="num">${fmtN(line.price)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
-          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)"></td>
+          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
       <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
           style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
       <td class="num">${fmtN(lineSale)}</td>
