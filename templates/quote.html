@@ -1,0 +1,656 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Cotizador</h1>
+<input type="hidden" id="editOfferId" value="">
+<div id="editBanner" style="display:none; padding:4px 8px; border:1px solid #888; background:#fffbd1; margin-bottom:8px; font-size:12px;">
+  Editando oferta <b id="editOfferNum"></b> · <a href="{{ url_for('quote') }}">Cancelar y crear nueva</a>
+</div>
+<p class="muted">Cotiza por producto suelto o por sistema. Con desperdicio y margen comercial.</p>
+
+<div class="row" style="margin-bottom:8px;">
+  <div>
+    <label>Cliente</label>
+    <select id="clientSelect" onchange="onClientSelect()">
+      <option value="">— Selecciona cliente —</option>
+      {% for c in clients %}
+      <option value="{{ c['id'] }}" data-name="{{ c['name'] }}" data-company="{{ c['company'] or '' }}" data-email="{{ c['email'] or '' }}">
+        {{ c['name'] }}{% if c['company'] %} ({{ c['company'] }}){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Proyecto</label>
+    <select id="projectSelect" onchange="onProjectSelect()">
+      <option value="">— Selecciona proyecto —</option>
+      {% for p in projects %}
+      <option value="{{ p['id'] }}" data-name="{{ p['name'] }}" data-client="{{ p['client_id'] }}"
+              data-area="{{ p['area_sqm'] or 0 }}" data-incoterm="{{ p['incoterm'] or 'EXW' }}">
+        {{ p['name'] }}
+      </option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Nº Oferta</label>
+    <input type="text" id="offerNumber" placeholder="2026-001">
+  </div>
+</div>
+
+<div style="margin:6px 0 10px 0;">
+  <button type="button" id="btnProduct" onclick="setMode('product')">Por producto</button>
+  <button type="button" id="btnSystem" onclick="setMode('system')">Por sistema</button>
+  <button type="button" id="btnImport" onclick="setMode('import')">Importar SKU + Cant.</button>
+</div>
+
+<div id="productSection">
+  <div class="row" id="inputRowNoSub" style="align-items:end;">
+    <div>
+      <label>Familia</label>
+      <select id="familySelect" onchange="onFamilyChange()">
+        {% for fam in families %}<option value="{{ fam }}">{{ fam }}</option>{% endfor %}
+      </select>
+    </div>
+    <div id="subfamilyContainer" style="display:none;">
+      <label>Tipo</label>
+      <select id="subfamilySelect" onchange="filterProducts()">
+        <option value="">— Todos —</option>
+      </select>
+    </div>
+    <div style="grid-column: span 2;">
+      <label>Producto</label>
+      <select id="productSelect">
+        <option value="">— Selecciona —</option>
+        {% for p in products %}
+        <option value="{{ p['id'] }}" data-sku="{{ p['sku'] }}" data-name="{{ p['name'] }}"
+                data-price="{{ p['price_per_unit'] }}" data-unit="{{ p['unit_label'] }}"
+                data-family="{{ p['category'] }}" data-subfamily="{{ p.get('subfamily', '') }}">
+          {{ p['sku'][:12] }} — {{ p['name'][:40] }} ({{ p['unit_label'] }})
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Cantidad</label>
+      <input type="number" id="qtyInput" value="1" min="1" step="1">
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <button type="button" onclick="addProduct()">Añadir</button>
+    </div>
+  </div>
+</div>
+
+<div id="systemSection" style="display:none;">
+  <div class="row" style="align-items:end;">
+    <div>
+      <label>Sistema</label>
+      <select id="systemSelect">
+        <option value="">— Elegir —</option>
+        {% for s in systems %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>m² a cubrir</label>
+      <input type="number" id="areaInput" value="100" min="1" step="1">
+    </div>
+    <div>
+      <label>&nbsp;</label>
+      <button type="button" onclick="addSystem()">Calcular sistema</button>
+    </div>
+  </div>
+</div>
+
+<div id="importSection" style="display:none;">
+  <div style="padding:8px; border:1px solid #ccc;">
+    <label>Pega líneas <code>SKU, cantidad</code> (una por línea)</label>
+    <textarea id="importText" rows="8" style="width:100%; font-family:monospace; font-size:0.9em;"
+              placeholder="P00A003250A0, 1673&#10;304058, 42&#10;351E1, 383&#10;304076, 138&#10;1091001Y, 4"></textarea>
+    <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+      <button type="button" onclick="importLines()">Importar</button>
+      <span id="importResult" class="muted"></span>
+    </div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:6px;">
+  <div><label>Desperdicio %</label><input type="number" id="wasteInput" value="5" min="0" max="50" step="1" oninput="recalcAll()"></div>
+  <div><label>Margen base %</label><input type="number" id="marginInput" value="20" min="0" max="100" step="1" oninput="applyGlobalMargin()"></div>
+  <div><label>FX EUR/USD</label><input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001" oninput="recalcAll()"></div>
+  <div>
+    <label>Incoterm</label>
+    <select id="incotermSelect" onchange="onIncotermChange()">
+      <option value="EXW">EXW (fábrica España)</option>
+      <option value="FOB">FOB (puerto España)</option>
+      <option value="CIF">CIF (puerto destino)</option>
+      <option value="DAP">DAP (almacén propio)</option>
+    </select>
+  </div>
+</div>
+
+<div id="logisticsSection" style="display:none; margin-top:6px;">
+  <div class="row">
+    <div>
+      <label>Ruta marítima</label>
+      <select id="routeSelect" onchange="recalcAll()">
+        <option value="">— Sin ruta —</option>
+        {% for r in routes %}
+        <option value="{{ r['id'] }}" data-c20="{{ r['container_20_eur'] }}" data-c40="{{ r['container_40_eur'] }}" data-c40hc="{{ r['container_40hc_eur'] }}">{{ r['origin_port'] }} → {{ r['destination_port'] }} ({{ r['carrier'] }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="recalcAll()"></div>
+    <div><label>Margen logística %</label><input type="number" id="logMarginInput" value="0" min="0" max="50" step="1" oninput="recalcAll()"></div>
+    <div><label>Coste logístico</label><div id="logisticCostDisplay" class="mono">€ 0.00</div></div>
+  </div>
+</div>
+
+<div id="containerAdvice" style="display:none; margin-top:8px; padding:6px 10px; border:1px solid #888; background:#fafafa; font-size:12px;"></div>
+
+<table style="margin-top:10px;">
+  <thead>
+    <tr>
+      <th>SKU</th>
+      <th>Producto</th>
+      <th>Familia</th>
+      <th>Unidad</th>
+      <th class="num">Precio €</th>
+      <th class="num">Cant.</th>
+      <th class="num">Margen %</th>
+      <th class="num">Venta €</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody id="linesBody"></tbody>
+</table>
+
+<table style="max-width:500px; margin-top:8px;">
+  <tr><td>Coste producto <span id="wasteLabel"></span></td><td class="num">€ <span id="subtotalProducts">0.00</span></td></tr>
+  <tr><td>+ Logística (<span id="incotermLabel">EXW</span>)</td><td class="num">€ <span id="logisticTotal">0.00</span></td></tr>
+  <tr><td>= Coste total</td><td class="num">€ <span id="costProduct">0.00</span></td></tr>
+  <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% medio)</td></tr>
+  <tr><th>TOTAL VENTA €</th><td class="num"><b>€ <span id="totalEur">0.00</span></b></td></tr>
+  <tr><td>TOTAL VENTA USD</td><td class="num">$ <span id="totalUsd">0.00</span></td></tr>
+</table>
+
+<div style="margin-top:8px;">
+  <button type="button" onclick="clearAll()">Limpiar</button>
+  <button type="button" onclick="generateOffer()">Generar oferta → Logística</button>
+</div>
+
+<div id="offerBanner" class="flash" style="display:none; margin-top:8px;"></div>
+
+<script>
+// Container optimizer (port from bot V2)
+const CONTAINERS = {
+  '20':   {pallets: 10, kg: 21500, label: "20'"},
+  '40':   {pallets: 20, kg: 26500, label: "40'"},
+  '40HC': {pallets: 24, kg: 26500, label: "40HC"},
+};
+
+function estimateContainersJS(pallets, weightKg, famBreakdown) {
+  if (pallets <= 0 && weightKg <= 0) return null;
+  const fams = Object.keys(famBreakdown || {});
+  const onlyPlates = fams.length === 1 && fams[0] === 'PLACAS';
+  const hasProfiles = fams.includes('PERFILES');
+  let order, note = '';
+  if (hasProfiles) {
+    order = ['40HC', '40'];
+    note = 'PERFILES detectados → 40HC preferente';
+  } else if (onlyPlates) {
+    order = ['20', '40', '40HC'];
+  } else {
+    order = ['40HC', '40', '20'];
+  }
+  // Try single container
+  for (const key of order) {
+    const d = CONTAINERS[key];
+    if (pallets <= d.pallets && weightKg <= d.kg) {
+      const palOcc = d.pallets ? pallets / d.pallets : 0;
+      const weiOcc = d.kg ? weightKg / d.kg : 0;
+      if (onlyPlates) note = 'Solo PLACAS → ' + d.label + ' (cabe en 1)';
+      return {key, label: d.label, units: 1, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, note};
+    }
+  }
+  // Multiple containers
+  let best = null;
+  for (const key of order) {
+    const d = CONTAINERS[key];
+    const uPal = d.pallets > 0 ? Math.ceil(pallets / d.pallets) : 0;
+    const uWei = d.kg > 0 ? Math.ceil(weightKg / d.kg) : 0;
+    const units = Math.max(uPal, uWei, 1);
+    const palOcc = d.pallets ? (pallets / units) / d.pallets : 0;
+    const weiOcc = d.kg ? (weightKg / units) / d.kg : 0;
+    const score = palOcc + weiOcc;
+    if (!best || units < best.units || (units === best.units && score > best.score)) {
+      best = {key, label: d.label, units, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, score, note};
+    }
+  }
+  return best;
+}
+
+const products = {{ products|tojson }};
+const systems = {{ systems|tojson }};
+const subfamilies = {{ subfamilies|tojson }};
+const allProjects = {{ projects|tojson }};
+let lines = [];
+let mode = 'product';
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('productSection').style.display = m === 'product' ? 'block' : 'none';
+  document.getElementById('systemSection').style.display = m === 'system' ? 'block' : 'none';
+  document.getElementById('importSection').style.display = m === 'import' ? 'block' : 'none';
+  document.querySelectorAll('#btnProduct,#btnSystem,#btnImport').forEach(b => b.style.fontWeight = 'normal');
+  var active = m === 'product' ? 'btnProduct' : m === 'system' ? 'btnSystem' : 'btnImport';
+  document.getElementById(active).style.fontWeight = 'bold';
+}
+
+function onFamilyChange() {
+  const fam = document.getElementById('familySelect').value;
+  const subDiv = document.getElementById('subfamilyContainer');
+  const sfSel = document.getElementById('subfamilySelect');
+  const hasSub = subfamilies[fam] && subfamilies[fam].length > 0;
+  if (hasSub) {
+    subDiv.style.display = 'block';
+    sfSel.innerHTML = '<option value="">— Todos —</option>';
+    subfamilies[fam].forEach(sf => {
+      const opt = document.createElement('option');
+      opt.value = sf.key;
+      opt.textContent = sf.label;
+      sfSel.appendChild(opt);
+    });
+  } else {
+    subDiv.style.display = 'none';
+  }
+  filterProducts();
+}
+
+function filterProducts() {
+  const fam = document.getElementById('familySelect').value;
+  const sf = document.getElementById('subfamilySelect').value;
+  const sel = document.getElementById('productSelect');
+  sel.innerHTML = '<option value="">— Selecciona —</option>';
+  products.forEach(p => {
+    let show = (p.category === fam);
+    if (show && sf) show = (p.subfamily === sf);
+    if (show) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.dataset.sku = p.sku;
+      opt.dataset.name = p.name;
+      opt.dataset.price = p.price_per_unit;
+      opt.dataset.unit = p.unit_label;
+      opt.dataset.family = p.category;
+      opt.dataset.subfamily = p.subfamily || '';
+      opt.dataset.unitsPallet = p.units_per_pallet || 0;
+      opt.dataset.sqmPallet = p.sqm_per_pallet || 0;
+      opt.dataset.kgPerUnit = p.kg_per_unit || 0;
+      opt.textContent = p.sku.substring(0,12) + ' — ' + p.name.substring(0,40) + ' (' + p.unit_label + ')';
+      sel.appendChild(opt);
+    }
+  });
+}
+
+function onClientSelect() {
+  const clientId = document.getElementById('clientSelect').value;
+  const projSel = document.getElementById('projectSelect');
+  projSel.innerHTML = '<option value="">— Selecciona proyecto —</option>';
+  allProjects.forEach(p => {
+    if (!clientId || String(p.client_id) === String(clientId)) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.dataset.name = p.name;
+      opt.dataset.client = p.client_id;
+      opt.dataset.area = p.area_sqm || 0;
+      opt.dataset.incoterm = p.incoterm || 'EXW';
+      opt.textContent = p.name;
+      projSel.appendChild(opt);
+    }
+  });
+}
+
+function onProjectSelect() {
+  const sel = document.getElementById('projectSelect');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !opt.value) return;
+  const inc = (opt.dataset.incoterm || '').toUpperCase();
+  if (inc && ['EXW','FOB','CIF'].includes(inc)) {
+    document.getElementById('incotermSelect').value = inc;
+    onIncotermChange();
+  }
+}
+
+function onIncotermChange() {
+  const inc = document.getElementById('incotermSelect').value;
+  document.getElementById('logisticsSection').style.display = inc !== 'EXW' ? 'block' : 'none';
+  document.getElementById('incotermLabel').textContent = inc;
+  recalcAll();
+}
+
+function getDefaultMargin() {
+  const v = parseFloat(document.getElementById('marginInput').value);
+  return isNaN(v) ? 20 : v;
+}
+
+function addProduct() {
+  const sel = document.getElementById('productSelect');
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt.value) return;
+  const qty = parseFloat(document.getElementById('qtyInput').value) || 1;
+  lines.push({
+    sku: opt.dataset.sku, name: opt.dataset.name,
+    family: opt.dataset.family, unit: opt.dataset.unit,
+    price: parseFloat(opt.dataset.price), qty: qty,
+    margin: getDefaultMargin()
+  });
+  sel.selectedIndex = 0;
+  document.getElementById('qtyInput').value = 1;
+  recalcAll();
+}
+
+function applyGlobalMargin() {
+  const m = getDefaultMargin();
+  lines.forEach(l => { l.margin = m; });
+  recalcAll();
+}
+
+function importLines() {
+  const raw = document.getElementById('importText').value.trim();
+  if (!raw) return;
+  const rows = raw.split('\n').filter(l => l.trim());
+  let added = 0, errors = [];
+  const margin = getDefaultMargin();
+  rows.forEach((row, i) => {
+    const parts = row.split(/[,;\t]+/).map(s => s.trim());
+    if (parts.length < 2) { errors.push('Línea ' + (i+1) + ': faltan datos'); return; }
+    const sku = parts[0];
+    const qty = parseFloat(parts[1]);
+    if (!sku || isNaN(qty) || qty <= 0) { errors.push('Línea ' + (i+1) + ': SKU o cantidad inválida'); return; }
+    const prod = products.find(p => p.sku === sku);
+    if (!prod) { errors.push('Línea ' + (i+1) + ': SKU "' + sku + '" no encontrado'); return; }
+    lines.push({
+      sku: prod.sku, name: prod.name,
+      family: prod.category, unit: prod.unit_label,
+      price: prod.price_per_unit, qty: qty,
+      margin: margin
+    });
+    added++;
+  });
+  recalcAll();
+  let msg = added + ' líneas importadas.';
+  if (errors.length) msg += ' ' + errors.length + ' errores: ' + errors.join(' | ');
+  document.getElementById('importResult').textContent = msg;
+  if (added > 0) document.getElementById('importText').value = '';
+}
+
+function updateLineMargin(i, val) {
+  lines[i].margin = parseFloat(val) || 0;
+  recalcAll();
+}
+
+function updateLineQty(i, val) {
+  const v = parseFloat(val);
+  if (isNaN(v) || v <= 0) return;
+  lines[i].qty = v;
+  document.getElementById('containerCount').value = 0;
+  recalcAll();
+}
+
+function addSystem() {
+  const sel = document.getElementById('systemSelect');
+  if (!sel.value) return;
+  const area = parseFloat(document.getElementById('areaInput').value) || 0;
+  if (area <= 0) return;
+  const sys = systems.find(s => s.id == sel.value);
+  if (!sys) return;
+  sys.components.forEach(comp => {
+    const qty = Math.ceil(area * comp.consumption_per_sqm);
+    lines.push({
+      sku: comp.sku, name: comp.name,
+      family: comp.category, unit: comp.unit,
+      price: comp.unit_price_eur, qty: qty,
+      margin: getDefaultMargin()
+    });
+  });
+  recalcAll();
+}
+
+function removeLine(i) { lines.splice(i, 1); recalcAll(); }
+function clearAll() { lines.length = 0; recalcAll(); document.getElementById('offerBanner').style.display = 'none'; }
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function fmtN(n, dec) {
+  if (dec === undefined) dec = 2;
+  return Number(n).toLocaleString('es-ES', {minimumFractionDigits: dec, maximumFractionDigits: dec});
+}
+function fmtQ(n) { return Number(n).toLocaleString('es-ES', {maximumFractionDigits: 0}); }
+
+function recalcAll() {
+  const _w = parseFloat(document.getElementById('wasteInput').value);
+  const wastePct = (isNaN(_w) ? 5 : _w) / 100;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const incoterm = document.getElementById('incotermSelect').value;
+
+  // Pallets + weight for container calc
+  let totalPallets = 0;
+  let totalWeight = 0;
+  lines.forEach(line => {
+    const qtyW = Math.ceil(line.qty * (1 + wastePct));
+    const prod = products.find(p => p.sku === line.sku);
+    if (prod) {
+      const upp = prod.units_per_pallet || 0;
+      if (upp > 0) totalPallets += qtyW / upp;
+      totalWeight += qtyW * (prod.kg_per_unit || 0);
+    }
+  });
+  const palletsLogistic = Math.ceil(totalPallets);
+
+  // Family breakdown for container optimization
+  const famBreakdown = {};
+  lines.forEach(l => { famBreakdown[l.family] = (famBreakdown[l.family] || 0) + 1; });
+  const containerRec = estimateContainersJS(palletsLogistic, totalWeight, famBreakdown);
+
+  // Container auto-calc (user can override to 0 to re-trigger)
+  const manualContainers = document.getElementById('containerCount');
+  let containerCount = parseInt(manualContainers.value) || 0;
+  if (containerCount === 0 && containerRec) {
+    containerCount = containerRec.units;
+    manualContainers.value = containerCount;
+  }
+
+  // Show recommendation
+  const advDiv = document.getElementById('containerAdvice');
+  if (containerRec && lines.length > 0) {
+    const palOcc = (containerRec.palletOcc * 100).toFixed(0);
+    const weiOcc = (containerRec.weightOcc * 100).toFixed(0);
+    const fams = Object.keys(famBreakdown).join(', ');
+    advDiv.innerHTML = '<b>' + containerRec.units + ' x ' + containerRec.label + '</b>'
+      + ' · Palés: ' + fmtQ(palletsLogistic) + '/' + fmtQ(containerRec.palCap) + ' (' + palOcc + '%)'
+      + ' · Peso: ' + fmtQ(totalWeight) + '/' + fmtQ(containerRec.weiCap) + ' kg (' + weiOcc + '%)'
+      + ' · Familias: ' + fams
+      + (containerRec.note ? ' · <b>' + containerRec.note + '</b>' : '');
+    advDiv.style.display = 'block';
+  } else {
+    advDiv.style.display = 'none';
+  }
+
+  // Logistics cost + margin
+  const _lm = parseFloat(document.getElementById('logMarginInput').value);
+  const logMargin = (isNaN(_lm) ? 0 : _lm) / 100;
+  let logisticCost = 0;
+  if (incoterm !== 'EXW') {
+    let oceanFreight = 0;
+    if (incoterm === 'CIF') {
+      const routeSel = document.getElementById('routeSelect');
+      const opt = routeSel.options[routeSel.selectedIndex];
+      if (opt && containerRec) {
+        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40';
+        oceanFreight = parseFloat(opt.dataset[rateKey]) || parseFloat(opt.dataset.c40) || 0;
+      } else if (opt) {
+        oceanFreight = parseFloat(opt.dataset.c40) || 0;
+      }
+    }
+    const logBase = oceanFreight * containerCount;
+    logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
+    document.getElementById('logisticCostDisplay').textContent =
+      '€ ' + fmtN(logBase) + (logMargin > 0 ? ' → € ' + fmtN(logisticCost) + ' (+' + (logMargin*100).toFixed(0) + '%)' : '');
+  } else {
+    document.getElementById('logisticCostDisplay').textContent = '€ 0.00';
+  }
+
+  // Lines table with per-line margin
+  const body = document.getElementById('linesBody');
+  body.innerHTML = '';
+  let totalCost = 0;
+  let totalSale = 0;
+
+  lines.forEach((line, i) => {
+    const qtyW = Math.ceil(line.qty * (1 + wastePct));
+    const lineCost = line.price * qtyW;
+    const m = (line.margin || 0) / 100;
+    const lineSale = m < 1 ? lineCost / (1 - m) : lineCost;
+    totalCost += lineCost;
+    totalSale += lineSale;
+    body.innerHTML += `<tr>
+      <td class="mono">${escapeHtml(line.sku)}</td>
+      <td>${escapeHtml(line.name)}</td>
+      <td>${escapeHtml(line.family)}</td>
+      <td>${escapeHtml(line.unit)}</td>
+      <td class="num">${fmtN(line.price)}</td>
+      <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
+          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)"></td>
+      <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
+          style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
+      <td class="num">${fmtN(lineSale)}</td>
+      <td><button type="button" onclick="removeLine(${i})">×</button></td>
+    </tr>`;
+  });
+
+  const totalSaleWithLogistic = totalSale + logisticCost;
+  const marginEur = totalSaleWithLogistic - totalCost - logisticCost;
+  const avgMargin = totalSaleWithLogistic > 0 ? (marginEur / totalSaleWithLogistic * 100) : 0;
+
+  document.getElementById('subtotalProducts').textContent = fmtN(totalCost);
+  const wpct = (wastePct * 100).toFixed(0);
+  document.getElementById('wasteLabel').textContent = wastePct > 0 ? '(+' + wpct + '% desperdicio)' : '';
+  document.getElementById('logisticTotal').textContent = fmtN(logisticCost);
+  document.getElementById('costProduct').textContent = fmtN(totalCost + logisticCost);
+  document.getElementById('marginEur').textContent = fmtN(marginEur);
+  document.getElementById('marginPctLabel').textContent = avgMargin.toFixed(0);
+  document.getElementById('totalEur').textContent = fmtN(totalSaleWithLogistic);
+  document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
+}
+
+function generateOffer() {
+  const clientSel = document.getElementById('clientSelect');
+  if (!clientSel.value) { alert('Selecciona un cliente.'); return; }
+  const clientOpt = clientSel.options[clientSel.selectedIndex];
+  const client = clientOpt.dataset.name || clientOpt.textContent;
+
+  if (lines.length === 0) { alert('Añade al menos un producto.'); return; }
+  const projSel = document.getElementById('projectSelect');
+  const projOpt = projSel.options[projSel.selectedIndex];
+  const project = (projOpt && projOpt.value) ? projOpt.dataset.name : 'Proyecto sin nombre';
+  const offerNum = document.getElementById('offerNumber').value || '2026-' + Date.now().toString().slice(-4);
+
+  const _wg = parseFloat(document.getElementById('wasteInput').value);
+  const wastePct = isNaN(_wg) ? 5 : _wg;
+  const _mg = parseFloat(document.getElementById('marginInput').value);
+  const margin = isNaN(_mg) ? 20 : _mg;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const incoterm = document.getElementById('incotermSelect').value;
+
+  const logisticCost = parseFloat(document.getElementById('logisticTotal').textContent.replace(/\./g,'').replace(',','.')) || 0;
+  const containers = parseInt(document.getElementById('containerCount').value) || 0;
+  const routeId = document.getElementById('routeSelect').value || null;
+
+  const wastePctDecimal = wastePct / 100;
+  let totalPallets = 0;
+  let totalWeight = 0;
+  lines.forEach(line => {
+    const qtyWithWaste = Math.ceil(line.qty * (1 + wastePctDecimal));
+    const prod = products.find(p => p.sku === line.sku);
+    if (prod) {
+      const upp = prod.units_per_pallet || 0;
+      if (upp > 0) totalPallets += qtyWithWaste / upp;
+      totalWeight += qtyWithWaste * (prod.kg_per_unit || 0);
+    }
+  });
+
+  const editId = document.getElementById('editOfferId').value;
+  const offer = {
+    client, project, offerNumber: offerNum,
+    wastePct, margin, fx, incoterm,
+    logisticCost, containerCount: containers, routeId,
+    totalPallets: Math.ceil(totalPallets),
+    totalWeight: Math.round(totalWeight),
+    lines: lines.map(l => ({ sku: l.sku, name: l.name, family: l.family, unit: l.unit, price: l.price, qty: l.qty, margin: l.margin }))
+  };
+  if (editId) offer.editId = parseInt(editId);
+
+  const url = editId ? '/api/update-full-offer' : '/api/save-offer';
+  fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(offer)
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      const action = editId ? 'actualizada' : 'generada';
+      const banner = document.getElementById('offerBanner');
+      banner.innerHTML = 'Oferta <b>' + escapeHtml(offerNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
+      banner.style.display = 'block';
+      if (editId) {
+        document.getElementById('editOfferId').value = '';
+        document.getElementById('editBanner').style.display = 'none';
+      }
+    } else {
+      alert('Error: ' + data.error);
+    }
+  })
+  .catch(err => alert('Error: ' + err.message));
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  onFamilyChange();
+  onClientSelect();
+  onIncotermChange();
+
+  {% if edit_offer %}
+  const editData = {{ edit_offer|tojson }};
+  document.getElementById('editOfferId').value = editData.id;
+  document.getElementById('editOfferNum').textContent = editData.offer_number;
+  document.getElementById('editBanner').style.display = 'block';
+  document.getElementById('offerNumber').value = editData.offer_number || '';
+  document.getElementById('wasteInput').value = editData.waste_pct || 0;
+  document.getElementById('marginInput').value = editData.margin_pct || 20;
+  if (editData.fx_rate) document.getElementById('fxInput').value = editData.fx_rate;
+  if (editData.incoterm) {
+    document.getElementById('incotermSelect').value = editData.incoterm;
+    onIncotermChange();
+  }
+  if (editData.container_count) document.getElementById('containerCount').value = editData.container_count;
+  (editData.lines || []).forEach(l => {
+    lines.push({
+      sku: l.sku, name: l.name, family: l.family, unit: l.unit,
+      price: l.price, qty: l.qty, margin: l.margin || editData.margin_pct || 20
+    });
+  });
+  // Try to select client
+  const clientSel = document.getElementById('clientSelect');
+  for (let i = 0; i < clientSel.options.length; i++) {
+    if (clientSel.options[i].dataset.name === editData.client_name) {
+      clientSel.selectedIndex = i;
+      onClientSelect();
+      break;
+    }
+  }
+  {% endif %}
+
+  recalcAll();
+});
+</script>
+{% endblock %}

@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Presupuestos</h1>
+<p class="muted">Ofertas generadas desde Cotización. Expande para ver detalle.</p>
+
+{% if not offers %}
+<p class="muted">Sin presupuestos. Genera uno desde <a href="{{ url_for('quote') }}">Cotización</a>.</p>
+{% else %}
+
+{% for offer in offers %}
+{% set lines = offer['lines_json']|from_json %}
+<div class="card" style="margin-bottom:8px;">
+  <div style="display:flex; justify-content:space-between; align-items:baseline;">
+    <div>
+      <b class="mono">{{ offer['offer_number'] }}</b>
+      · {{ offer['client_name'] }} · {{ offer['project_name'] }}
+      · <span class="muted">{{ offer['incoterm'] or 'EXW' }} · {{ offer['created_at'][:10] }}</span>
+    </div>
+    <div>
+      <b>€ {{ "%.2f"|format(offer['total_final_eur']) }}</b>
+      · {{ 'Confirmada' if offer['status'] == 'confirmed' else 'Pendiente' }}
+    </div>
+  </div>
+
+  <details style="margin-top:6px;">
+    <summary style="cursor:pointer; font-size:12px;">
+      Ver detalle ({{ lines|length }} líneas · {{ offer['container_count'] or 0 }} cont.
+      · Producto € {{ "%.2f"|format(offer['total_product_eur']) }}
+      · Logística € {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}
+      · Desp. {{ offer['waste_pct'] or 0 }}% · Margen {{ offer['margin_pct'] or 0 }}%)
+    </summary>
+
+    <table style="margin-top:4px;">
+      <thead>
+        <tr>
+          <th>SKU</th>
+          <th>Producto</th>
+          <th>Familia</th>
+          <th>Unidad</th>
+          <th class="num">Precio €</th>
+          <th class="num">Cant.</th>
+          <th class="num">Margen %</th>
+          <th class="num">Subtotal €</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in lines %}
+        <tr>
+          <td class="mono">{{ l.sku }}</td>
+          <td>{{ l.name }}</td>
+          <td>{{ l.family }}</td>
+          <td>{{ l.unit }}</td>
+          <td class="num">{{ "%.2f"|format(l.price) }}</td>
+          <td class="num">{{ l.qty }}</td>
+          <td class="num">{{ l.margin if l.margin is defined else '—' }}</td>
+          <td class="num">{{ "%.2f"|format(l.price * l.qty) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <table style="max-width:400px; margin-top:4px;">
+      <tr><td>Producto €</td><td class="num">{{ "%.2f"|format(offer['total_product_eur']) }}</td></tr>
+      <tr><td>Logística €</td><td class="num">{{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</td></tr>
+      <tr><th>Total €</th><td class="num"><b>{{ "%.2f"|format(offer['total_final_eur']) }}</b></td></tr>
+      {% if offer['fx_rate'] and offer['fx_rate'] != 1 %}
+      <tr><td>Total USD (FX {{ offer['fx_rate'] }})</td><td class="num">{{ "%.2f"|format(offer['total_final_eur'] * offer['fx_rate']) }}</td></tr>
+      {% endif %}
+    </table>
+  </details>
+
+  <div style="margin-top:6px; font-size:12px;">
+    {% if offer['status'] != 'confirmed' %}
+    <a href="{{ url_for('quote') }}?edit={{ offer['id'] }}">Editar</a> ·
+    {% endif %}
+    <a href="/api/offer-pdf/{{ offer['id'] }}" target="_blank">PDF Presupuesto</a>
+    · <a href="/api/preorden-pdf/{{ offer['id'] }}" target="_blank">PDF PreOrden</a>
+    · <a href="/api/orden-logistica-pdf/{{ offer['id'] }}" target="_blank">PDF Logística</a>
+    · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;">Borrar</a>
+  </div>
+</div>
+{% endfor %}
+
+{% endif %}
+
+<script>
+function deleteOffer(id) {
+  if (!confirm('¿Eliminar este presupuesto?')) return;
+  fetch('/api/delete-offer', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id})
+  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); });
+}
+</script>
+{% endblock %}

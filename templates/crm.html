@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Clientes y proyectos</h1>
+
+<h2>Clientes ({{ clients|length }})
+  <button type="button" onclick="toggle('clientForm')" style="float:right;">+ Cliente</button>
+</h2>
+<table>
+  <thead><tr><th>Nombre</th><th>Empresa</th><th>Email</th><th>Teléfono</th><th>País</th><th class="num">Proyectos</th></tr></thead>
+  <tbody>
+  {% for c in clients %}
+  <tr>
+    <td>{{ c['name'] }}</td>
+    <td>{{ c['company'] or '—' }}</td>
+    <td>{{ c['email'] or '—' }}</td>
+    <td>{{ c['phone'] or '—' }}</td>
+    <td>{{ c['country'] or '—' }}</td>
+    <td class="num">{{ projects | selectattr('client_name', 'equalto', c['name']) | list | length }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div id="clientForm" style="display:none; margin-top:8px; padding:8px; border:1px solid #888;">
+  <form method="POST">
+    <input type="hidden" name="action" value="add_client">
+    <div class="row">
+      <div><label>Nombre *</label><input type="text" name="name" required></div>
+      <div><label>Empresa</label><input type="text" name="company"></div>
+      <div><label>Email</label><input type="email" name="email"></div>
+      <div><label>Teléfono</label><input type="text" name="phone"></div>
+      <div><label>País</label><input type="text" name="country" value="RD"></div>
+    </div>
+    <button type="submit" style="margin-top:6px;">Guardar cliente</button>
+  </form>
+</div>
+
+<h2>Proyectos ({{ projects|length }})
+  <button type="button" onclick="toggle('projectForm')" style="float:right;">+ Proyecto</button>
+</h2>
+<table>
+  <thead><tr><th>Proyecto</th><th>Cliente</th><th>Etapa</th><th class="num">m²</th><th>Incoterm</th><th>GO/NO-GO</th></tr></thead>
+  <tbody>
+  {% for p in projects %}
+  <tr>
+    <td><a href="{{ url_for('project_detail', project_id=p['id']) }}">{{ p['name'] }}</a></td>
+    <td>{{ p['client_name'] }}{% if p['company'] %} ({{ p['company'] }}){% endif %}</td>
+    <td>{{ p['stage'] }}</td>
+    <td class="num">{{ p['area_sqm'] or '—' }}</td>
+    <td>{{ p['incoterm'] or '—' }}</td>
+    <td>{{ p['go_no_go'] or '—' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div id="projectForm" style="display:none; margin-top:8px; padding:8px; border:1px solid #888;">
+  <form method="POST">
+    <input type="hidden" name="action" value="add_project">
+    <div class="row">
+      <div><label>Proyecto *</label><input type="text" name="name" required></div>
+      <div>
+        <label>Cliente *</label>
+        <select name="client_id" required>
+          {% for c in clients %}
+          <option value="{{ c['id'] }}">{{ c['name'] }}{% if c['company'] %} — {{ c['company'] }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Etapa</label>
+        <select name="stage">{% for s in stages %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
+      </div>
+      <div><label>m²</label><input type="number" name="area_sqm" step="1"></div>
+      <div><label>Incoterm</label>
+        <select name="incoterm"><option>EXW</option><option>FOB</option><option>CIF</option></select>
+      </div>
+    </div>
+    <button type="submit" style="margin-top:6px;">Guardar proyecto</button>
+  </form>
+</div>
+
+<script>
+function toggle(id) { var e = document.getElementById(id); e.style.display = e.style.display === 'none' ? 'block' : 'none'; }
+</script>
+{% endblock %}

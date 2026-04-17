@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="grid-2">
+  <div class="card">
+    <h2>Nuevo cliente</h2>
+    <form method="post">
+      <div class="row">
+        <div><label>Nombre<input name="name" required></label></div>
+        <div><label>Empresa<input name="company"></label></div>
+      </div>
+      <div class="row">
+        <div><label>Email<input name="email" type="email"></label></div>
+        <div><label>Teléfono<input name="phone"></label></div>
+      </div>
+      <div class="row">
+        <div><label>País<input name="country" value="República Dominicana"></label></div>
+        <div><label>Score<input name="score" type="number" min="0" max="100" value="50"></label></div>
+      </div>
+      <button>Guardar cliente</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Clientes</h2>
+    <table>
+      <thead><tr><th>Nombre</th><th>Empresa</th><th>Score</th><th>Contacto</th></tr></thead>
+      <tbody>
+        {% for c in clients %}
+          <tr>
+            <td>{{ c['name'] }}</td>
+            <td>{{ c['company'] or '-' }}</td>
+            <td>{{ c['score'] }}</td>
+            <td>{{ c['email'] or '' }} {{ c['phone'] or '' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

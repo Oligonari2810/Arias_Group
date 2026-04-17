@@ -1,0 +1,117 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>{{ project['name'] }}</h1>
+<p class="muted">{{ project['client_name'] }}{% if project['company'] %} — {{ project['company'] }}{% endif %}
+  · Etapa: <b>{{ project['stage'] }}</b>
+  · GO/NO-GO: <b>{{ project['go_no_go'] }}</b>
+  · Área: <b>{{ "{:,.0f}".format(project['area_sqm'] or 0) }} m²</b>
+  · Margen obj.: <b>{{ (project['target_margin_pct'] * 100)|round(0) }}%</b>
+</p>
+
+<div class="grid-2">
+  <div class="card">
+    <h2>Datos del proyecto</h2>
+    <form method="post">
+      <input type="hidden" name="action" value="save_project">
+      <div class="row">
+        <div><label>Área m²</label><input name="area_sqm" value="{{ project['area_sqm'] }}"></div>
+        <div><label>FX</label><input name="fx_rate" value="{{ project['fx_rate'] }}"></div>
+        <div><label>Margen obj. %</label><input name="target_margin_pct" value="{{ project['target_margin_pct'] }}"></div>
+        <div><label>Flete € (total)</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
+        <div><label>INCOTERM</label>
+          <select name="incoterm">
+            {% for ic in ['EXW','FOB','DAP'] %}
+            <option {% if project['incoterm']==ic %}selected{% endif %}>{{ ic }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div><label>GO/NO-GO</label>
+          <select name="go_no_go">
+            <option {% if project['go_no_go']=='PENDING' %}selected{% endif %}>PENDING</option>
+            <option {% if project['go_no_go']=='GO' %}selected{% endif %}>GO</option>
+            <option {% if project['go_no_go']=='NO-GO' %}selected{% endif %}>NO-GO</option>
+          </select>
+        </div>
+      </div>
+      <label>Notas</label>
+      <textarea name="logistics_notes" style="width:100%;">{{ project['logistics_notes'] or '' }}</textarea>
+      <button type="submit" style="margin-top:6px;">Guardar cambios</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Avance de etapa</h2>
+    <form method="post">
+      <input type="hidden" name="action" value="advance_stage">
+      <label>Nueva etapa</label>
+      <select name="to_stage">{% for s in stages %}<option {% if s == project['stage'] %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+      <label style="margin-top:4px;">Nota</label>
+      <textarea name="note" style="width:100%;" placeholder="Razón del cambio..."></textarea>
+      <button type="submit" style="margin-top:6px;">Actualizar etapa</button>
+    </form>
+
+    <h3>Historial</h3>
+    <table>
+      <thead><tr><th>Fecha</th><th>De</th><th>A</th><th>Nota</th></tr></thead>
+      <tbody>
+        {% for e in events %}
+          <tr><td>{{ e['created_at'][:16].replace('T', ' ') }}</td><td>{{ e['from_stage'] or '—' }}</td><td>{{ e['to_stage'] }}</td><td>{{ e['note'] or '' }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="grid-2" style="margin-top:8px;">
+  <div class="card">
+    <h2>Contacto</h2>
+    <table>
+      <tr><th>Cliente</th><td>{{ project['client_name'] }}</td></tr>
+      <tr><th>Email</th><td>{{ project['email'] or '—' }}</td></tr>
+      <tr><th>Teléfono</th><td>{{ project['phone'] or '—' }}</td></tr>
+      <tr><th>Ubicación</th><td>{{ project['location'] or '—' }}</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Cotizar</h2>
+    <p><a href="{{ url_for('quote') }}">Ir al cotizador</a> (selecciona este proyecto en el desplegable).</p>
+    {% if quotes %}
+    <h3>Cálculos por sistema ({{ quotes|length }})</h3>
+    <table>
+      <thead><tr><th>Versión</th><th>Sistema</th><th class="num">Venta €</th><th class="num">Margen %</th><th class="num">€/m²</th><th class="num">Palés</th><th>Fecha</th><th></th></tr></thead>
+      <tbody>
+      {% for q in quotes %}
+      <tr>
+        <td>{{ q.meta['version_label'] }}</td>
+        <td>{{ q.meta['system_name'] }}</td>
+        <td class="num">{{ "{:,.2f}".format(q.payload.summary.sale_total_eur) }}</td>
+        <td class="num">{{ (q.payload.summary.gross_margin_pct*100)|round(1) }}</td>
+        <td class="num">{{ "{:,.2f}".format(q.payload.summary.price_per_sqm_eur) }}</td>
+        <td class="num">{{ q.payload.summary.total_pallets }}</td>
+        <td>{{ q.meta['created_at'][:10] }}</td>
+        <td><a href="{{ url_for('quote_pdf', project_id=project['id'], quote_id=q.meta['id']) }}" target="_blank">PDF</a></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Sin cálculos por sistema todavía.</p>
+    {% endif %}
+
+    <h3>Generar cálculo por sistema</h3>
+    <form method="post">
+      <input type="hidden" name="action" value="create_quote">
+      <div class="row">
+        <div><label>Sistema</label><select name="system_id">{% for s in systems %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}</select></div>
+        <div><label>Versión</label><input name="version_label" placeholder="V1"></div>
+        <div><label>Área m²</label><input name="area_sqm" value="{{ project['area_sqm'] }}"></div>
+        <div><label>FX</label><input name="fx_rate" value="{{ project['fx_rate'] }}"></div>
+        <div><label>Flete €</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
+        <div><label>Margen obj.</label><input name="target_margin_pct" value="{{ project['target_margin_pct'] }}"></div>
+      </div>
+      <button type="submit" style="margin-top:6px;">Calcular</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Calculadora operativa</h1>
+<div class="grid-2">
+  <div class="card">
+    <form method="post">
+      <div class="row">
+        <div><label>Sistema</label><select name="system_id">{% for s in systems %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}</select></div>
+        <div><label>Área m²</label><input name="area_sqm" type="number" step="0.01" value="1000"></div>
+      </div>
+      <div class="row">
+        <div><label>Flete EUR</label><input name="freight_eur" type="number" step="0.01" value="4200"></div>
+        <div><label>Margen objetivo</label><input name="target_margin_pct" type="number" step="0.01" value="0.30"></div>
+      </div>
+      <div class="row">
+        <div><label>FX</label><input name="fx_rate" type="number" step="0.0001" value="1"></div>
+        <div></div>
+      </div>
+      <button style="margin-top:6px;">Calcular</button>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Supuestos</h3>
+    <ul style="margin:0; padding-left:18px;">
+      <li>20': 10 palés estimados</li>
+      <li>40': 20 palés estimados</li>
+      <li>Margen sobre coste puesto</li>
+      <li>Consumos editables en <code>system_components</code></li>
+    </ul>
+  </div>
+</div>
+
+{% if result %}
+<h2>{{ result.system_name }}</h2>
+<table style="max-width:600px; margin-bottom:10px;">
+  <tr><th>Palés</th><td class="num">{{ result.summary.total_pallets }}</td><th>20'</th><td class="num">{{ result.summary.containers_20_est }}</td><th>40'</th><td class="num">{{ result.summary.containers_40_est }}</td></tr>
+  <tr><th>Coste puesto €</th><td class="num">{{ result.summary.landed_total_eur }}</td><th>Venta €</th><td class="num">{{ result.summary.sale_total_eur }}</td><th>€/m²</th><td class="num">{{ result.summary.price_per_sqm_eur }}</td></tr>
+</table>
+<table>
+  <thead><tr><th>SKU</th><th>Producto</th><th class="num">Consumo/m²</th><th class="num">Unidades</th><th class="num">Palés</th><th class="num">Peso kg</th><th class="num">Coste €</th></tr></thead>
+  <tbody>
+    {% for line in result.line_items %}
+    <tr>
+      <td class="mono">{{ line.sku }}</td>
+      <td>{{ line.name }}</td>
+      <td class="num">{{ line.consumption_per_sqm }}</td>
+      <td class="num">{{ line.units }}</td>
+      <td class="num">{{ line.pallets }}</td>
+      <td class="num">{{ line.weight_kg }}</td>
+      <td class="num">{{ line.product_cost_eur }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

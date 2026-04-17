@@ -6,11 +6,12 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
+from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import bcrypt
 import openpyxl
@@ -54,9 +55,43 @@ STAGES = [
     'RECOMPRA / REFERIDOS / ESCALA',
 ]
 
-app = Flask(__name__, template_folder='.')
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-fassa-2026')
+app = Flask(__name__)
+_secret = os.environ.get('SECRET_KEY')
+_debug = os.environ.get('FLASK_DEBUG', '0') == '1'
+if not _secret:
+    if not _debug:
+        raise RuntimeError('SECRET_KEY environment variable is required when FLASK_DEBUG != 1')
+    _secret = 'dev-secret-key-fassa-2026'
+app.config['SECRET_KEY'] = _secret
 app.config['DATABASE'] = str(DB_PATH)
+BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def bot_token_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not BOT_API_TOKEN:
+            abort(503, description='BOT_API_TOKEN no configurado en el servidor')
+        token = request.headers.get('X-Bot-Token') or request.args.get('bot_token')
+        if token != BOT_API_TOKEN:
+            abort(401, description='Token inválido')
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not current_user.is_authenticated:
+            abort(401, description='Autenticación requerida')
+        if getattr(current_user, 'role', None) != 'admin':
+            abort(403, description='Requiere rol admin')
+        return fn(*args, **kwargs)
+    return wrapper
 
 # ── Login Manager ──────────────────────────────────────────────────────
 login_manager = LoginManager()
@@ -115,6 +150,7 @@ def init_db() -> None:
             sku TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
             category TEXT NOT NULL,
+            subfamily TEXT,
             source_catalog TEXT NOT NULL,
             unit TEXT NOT NULL,
             unit_price_eur REAL NOT NULL,
@@ -123,6 +159,8 @@ def init_db() -> None:
             sqm_per_pallet REAL,
             notes TEXT
         );
+        CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+        CREATE INDEX IF NOT EXISTS idx_products_subfamily ON products(subfamily);
 
         CREATE TABLE IF NOT EXISTS systems (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +178,8 @@ def init_db() -> None:
             FOREIGN KEY(system_id) REFERENCES systems(id),
             FOREIGN KEY(product_id) REFERENCES products(id)
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_system_components_pair
+          ON system_components(system_id, product_id);
 
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +190,7 @@ def init_db() -> None:
             area_sqm REAL DEFAULT 0,
             stage TEXT NOT NULL DEFAULT 'OPORTUNIDAD',
             go_no_go TEXT DEFAULT 'PENDING',
-            incoterm TEXT DEFAULT 'CIF',
+            incoterm TEXT DEFAULT 'EXW',
             fx_rate REAL DEFAULT 1.0,
             target_margin_pct REAL DEFAULT 0.30,
             freight_eur REAL DEFAULT 0,
@@ -250,39 +290,82 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS order_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER NOT NULL,
+            sku TEXT NOT NULL,
+            name TEXT,
+            family TEXT,
+            unit TEXT,
+            qty_input REAL NOT NULL,
+            qty_logistic REAL,
+            price_unit_eur REAL,
+            cost_exw_eur REAL,
+            m2_total REAL DEFAULT 0,
+            weight_total_kg REAL DEFAULT 0,
+            pallets_theoretical REAL DEFAULT 0,
+            pallets_logistic INTEGER DEFAULT 0,
+            alerts_text TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(offer_id) REFERENCES pending_offers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_lines_offer ON order_lines(offer_id);
+
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER,
+            action TEXT NOT NULL,
+            detail TEXT,
+            username TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_offer ON audit_log(offer_id);
+
+        CREATE TABLE IF NOT EXISTS doc_sequences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prefix TEXT UNIQUE NOT NULL,
+            last_number INTEGER NOT NULL DEFAULT 0
+        );
         """
     )
+    existing_cols = {r[1] for r in db.execute("PRAGMA table_info(products)").fetchall()}
+    if 'subfamily' not in existing_cols:
+        db.execute("ALTER TABLE products ADD COLUMN subfamily TEXT")
+    offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
+    if 'raw_hash' not in offer_cols:
+        db.execute("ALTER TABLE pending_offers ADD COLUMN raw_hash TEXT")
     db.commit()
 
 
 def seed_db() -> None:
     db = get_db()
-    now = datetime.utcnow().isoformat()
+    now = now_iso()
 
     product_rows = [
         # Gypsotech core boards
-        ('00A003250A0', 'GYPSOTECH STD BA 13 MM 2500', 'Placa yeso', 'GYPSOTECH Abril 2026', 'board', 4.03, None, 48, 144.0, 'Tarancón €/m²; board size 1.2 x 2.5m = 3.0m²'),
-        ('00H003250A0', 'GYPSOTECH AQUA H2 BA 13 MM 2500', 'Placa yeso', 'GYPSOTECH Abril 2026', 'board', 6.71, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00F003250A0', 'GYPSOTECH FOCUS BA 13 MM 2500', 'Placa yeso', 'GYPSOTECH Abril 2026', 'board', 6.80, None, 36, 108.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00W003250A0', 'GYPSOTECH AQUASUPER BA 13 MM 2500', 'Placa yeso', 'GYPSOTECH Abril 2026', 'board', 7.16, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('00LB03250AC', 'GYPSOTECH GYPSOLIGNUM BA 13 MM 2500', 'Placa yeso', 'GYPSOTECH Abril 2026', 'board', 11.73, None, 24, 72.0, 'Tarancón €/m²; board size 3.0m²'),
-        ('U307030300A', 'RAIL 70 Z1 3000', 'Perfil', 'GYPSOTECH Abril 2026', 'ml', 0.45, 0.55, 350, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
-        ('C367038299A', 'MONTANTE 70/37 Z1 2990', 'Perfil', 'GYPSOTECH Abril 2026', 'ml', 0.70, 0.70, 250, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
+        ('00A003250A0', 'GYPSOTECH STD BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 4.03, None, 48, 144.0, 'Tarancón €/m²; board size 1.2 x 2.5m = 3.0m²'),
+        ('00H003250A0', 'GYPSOTECH AQUA H2 BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 6.71, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
+        ('00F003250A0', 'GYPSOTECH FOCUS BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 6.80, None, 36, 108.0, 'Tarancón €/m²; board size 3.0m²'),
+        ('00W003250A0', 'GYPSOTECH AQUASUPER BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 7.16, None, 48, 144.0, 'Tarancón €/m²; board size 3.0m²'),
+        ('00LB03250AC', 'GYPSOTECH GYPSOLIGNUM BA 13 MM 2500', 'PLACAS', 'GYPSOTECH Abril 2026', 'board', 11.73, None, 24, 72.0, 'Tarancón €/m²; board size 3.0m²'),
+        ('U307030300A', 'RAIL 70 Z1 3000', 'PERFILES', 'GYPSOTECH Abril 2026', 'ml', 0.45, 0.55, 350, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
+        ('C367038299A', 'MONTANTE 70/37 Z1 2990', 'PERFILES', 'GYPSOTECH Abril 2026', 'ml', 0.70, 0.70, 250, None, '€/ml from annex placeholder not loaded; use manual override if needed'),
         # Fassa sacks
-        ('1772Y1A', 'FASSACOL MULTI BLANCO', 'Adhesivo', 'FASSA Abril 2026', 'bag', 11.45, 25, 64, None, '€/saco point Fátima-PT/Antas/Onda/Tarancón varies; seeded with Fátima line shown as first market price'),
-        ('1773Y1A', 'FASSACOL MULTI GRIS', 'Adhesivo', 'FASSA Abril 2026', 'bag', 10.16, 25, 64, None, '€/saco'),
-        ('1774Y1A', 'FASSACOL FLEX BLANCO', 'Adhesivo', 'FASSA Abril 2026', 'bag', 13.67, 25, 64, None, '€/saco'),
-        ('1775Y1A', 'FASSACOL FLEX GRIS', 'Adhesivo', 'FASSA Abril 2026', 'bag', 12.03, 25, 64, None, '€/saco'),
-        ('1778Y1A', 'FASSACOL ULTRAFLEX S1 BLANCO', 'Adhesivo', 'FASSA Abril 2026', 'bag', 24.09, 25, 64, None, '€/saco'),
-        ('1779Y1A', 'FASSACOL ULTRAFLEX S1 GRIS', 'Adhesivo', 'FASSA Abril 2026', 'bag', 22.69, 25, 64, None, '€/saco'),
-        ('1347U1', 'AQUAZIP ONE PRO', 'Impermeabilización', 'FASSA Abril 2026', 'bag', 81.58, 20, 48, None, '€/saco'),
-        ('1077F', 'AQUAZIP GE 97 Comp A', 'Impermeabilización', 'FASSA Abril 2026', 'bag', 17.03, 25, 48, None, 'Comp. A €/embalaje visible; treat as bag for estimator'),
-        ('1239T1', 'AQUAZIP MO 660 Gris', 'Impermeabilización', 'FASSA Abril 2026', 'bag', 32.03, 25, 48, None, '€/saco'),
-        ('1188F', 'FASSACOL ONE GRIS', 'Adhesivo', 'FASSA Abril 2026', 'bag', 5.43, 25, 64, None, '€/saco'),
-        ('1783Y1A', 'FASSACOL PRIME GRIS', 'Adhesivo', 'FASSA Abril 2026', 'bag', 5.73, 25, 64, None, '€/saco'),
-        ('2990NEUTRO0', 'FAST 299', 'Pasta', 'FASSA Abril 2026', 'bucket', 62.00, 20, 33, None, '€/bote 20kg'),
-        ('420Y1A', 'KI 7', 'Revoco', 'FASSA Abril 2026', 'bag', 3.99, 25, 64, None, '€/saco'),
-        ('611Y1A', 'MM 30 GRIS', 'Mampostería', 'FASSA Abril 2026', 'bag', 2.86, 25, 64, None, '€/saco'),
+        ('1772Y1A', 'FASSACOL MULTI BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 11.45, 25, 64, None, '€/saco point Fátima-PT/Antas/Onda/Tarancón varies; seeded with Fátima line shown as first market price'),
+        ('1773Y1A', 'FASSACOL MULTI GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 10.16, 25, 64, None, '€/saco'),
+        ('1774Y1A', 'FASSACOL FLEX BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 13.67, 25, 64, None, '€/saco'),
+        ('1775Y1A', 'FASSACOL FLEX GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 12.03, 25, 64, None, '€/saco'),
+        ('1778Y1A', 'FASSACOL ULTRAFLEX S1 BLANCO', 'PASTAS', 'FASSA Abril 2026', 'bag', 24.09, 25, 64, None, '€/saco'),
+        ('1779Y1A', 'FASSACOL ULTRAFLEX S1 GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 22.69, 25, 64, None, '€/saco'),
+        ('1347U1', 'AQUAZIP ONE PRO', 'PASTAS', 'FASSA Abril 2026', 'bag', 81.58, 20, 48, None, '€/saco'),
+        ('1077F', 'AQUAZIP GE 97 Comp A', 'PASTAS', 'FASSA Abril 2026', 'bag', 17.03, 25, 48, None, 'Comp. A €/embalaje visible; treat as bag for estimator'),
+        ('1239T1', 'AQUAZIP MO 660 Gris', 'PASTAS', 'FASSA Abril 2026', 'bag', 32.03, 25, 48, None, '€/saco'),
+        ('1188F', 'FASSACOL ONE GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 5.43, 25, 64, None, '€/saco'),
+        ('1783Y1A', 'FASSACOL PRIME GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 5.73, 25, 64, None, '€/saco'),
+        ('2990NEUTRO0', 'FAST 299', 'PASTAS', 'FASSA Abril 2026', 'bucket', 62.00, 20, 33, None, '€/bote 20kg'),
+        ('420Y1A', 'KI 7', 'PASTAS', 'FASSA Abril 2026', 'bag', 3.99, 25, 64, None, '€/saco'),
+        ('611Y1A', 'MM 30 GRIS', 'PASTAS', 'FASSA Abril 2026', 'bag', 2.86, 25, 64, None, '€/saco'),
     ]
 
     for row in product_rows:
@@ -342,7 +425,7 @@ def seed_db() -> None:
             '''INSERT INTO projects
             (client_id, name, project_type, location, area_sqm, stage, go_no_go, incoterm, fx_rate, target_margin_pct, freight_eur, customs_pct, logistics_notes, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (client_id, 'Torre piloto - baños', 'Hotelería', 'Punta Cana', 800, 'CÁLCULO DETALLADO', 'GO', 'CIF', 1.0, 0.33, 4200, 0.18, 'Demo seeded project', now),
+            (client_id, 'Torre piloto - baños', 'Hotelería', 'Punta Cana', 800, 'CÁLCULO DETALLADO', 'GO', 'EXW', 1.0, 0.33, 4200, 0.18, 'Demo seeded project', now),
         )
 
     # Seed shipping routes
@@ -390,8 +473,7 @@ def seed_db() -> None:
 
     # Seed users if empty
     if db.execute('SELECT COUNT(*) AS c FROM users').fetchone()['c'] == 0:
-        from datetime import timezone
-        now_tz = datetime.now(timezone.utc).isoformat()
+        now_tz = now_iso()
         users = [
             ('ana', bcrypt.hashpw('Arias2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Ana Mar Pérez', 'amperez@ariasgroupcaribe.com'),
             ('oli', bcrypt.hashpw('Fassa2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Oli', 'oli@ariasgroupcaribe.com'),
@@ -403,93 +485,346 @@ def seed_db() -> None:
     db.commit()
 
 
-def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, customs_pct: float, target_margin_pct: float, fx_rate: float) -> dict[str, Any]:
+# ── MOTOR DE CÁLCULO UNIFICADO ────────────────────────────────────
+# Portado del bot V2 (Apps Script). Un solo motor para /quote, /api/save-offer
+# y /api/order. Alertas por línea + optimizador de contenedor por familia.
+
+CONTAINERS = {
+    '20':   {'pallets': 10, 'kg': 21500},
+    '40':   {'pallets': 20, 'kg': 26500},
+    '40HC': {'pallets': 24, 'kg': 26500},
+}
+
+FAMILY_MAP = {
+    'placas': 'PLACAS', 'placa yeso': 'PLACAS', 'placa': 'PLACAS',
+    'perfiles': 'PERFILES', 'perfil': 'PERFILES',
+    'tornillos': 'TORNILLOS',
+    'cintas': 'CINTAS', 'mallas': 'CINTAS', 'cinta': 'CINTAS', 'malla': 'CINTAS',
+    'accesorios': 'ACCESORIOS', 'accesorio': 'ACCESORIOS',
+    'pastas': 'PASTAS', 'pasta': 'PASTAS',
+    'adhesivo': 'PASTAS', 'adhesivos': 'PASTAS',
+    'impermeabilización': 'PASTAS', 'impermeabilizacion': 'PASTAS',
+    'revoco': 'PASTAS', 'revocos': 'PASTAS',
+    'mampostería': 'PASTAS', 'mamposteria': 'PASTAS',
+    'trampillas': 'TRAMPILLAS', 'trampilla': 'TRAMPILLAS',
+    'gypsocomete': 'GYPSOCOMETE',
+}
+
+
+def _num(v) -> float:
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def detect_family(category: str) -> str:
+    return FAMILY_MAP.get((category or '').strip().lower(), 'DESCONOCIDA')
+
+
+def compute_line(prod: Any, qty: float) -> dict[str, Any]:
+    """Calcula una línea normalizada con peso, palés, coste y alertas.
+
+    prod: dict/Row con {sku, name, category, unit, unit_price_eur,
+                        kg_per_unit, units_per_pallet, sqm_per_pallet}.
+    qty: cantidad en la unidad del producto (ya aplicado desperdicio).
+    """
+    if not isinstance(prod, dict):
+        prod = dict(prod)
+    sku = prod.get('sku') or ''
+    name = prod.get('name') or ''
+    family = detect_family(prod.get('category') or '')
+    unit = (prod.get('unit') or 'ud').lower()
+    price = _num(prod.get('unit_price_eur'))
+    kg_unit = _num(prod.get('kg_per_unit'))
+    upp = _num(prod.get('units_per_pallet'))
+    sqm_pp = _num(prod.get('sqm_per_pallet'))
+    qty = _num(qty)
+    alerts: list[str] = []
+
+    if price <= 0:
+        alerts.append(f'{family} {sku}: falta precio unitario')
+    if upp <= 0 and family in ('PLACAS', 'PERFILES', 'PASTAS'):
+        alerts.append(f'{family} {sku}: falta unidades/palé')
+    if kg_unit <= 0 and family in ('PLACAS', 'PASTAS', 'PERFILES'):
+        alerts.append(f'{family} {sku}: falta peso unitario')
+    if kg_unit <= 0 and family in ('TORNILLOS', 'CINTAS', 'ACCESORIOS', 'TRAMPILLAS', 'GYPSOCOMETE'):
+        alerts.append(f'{family} {sku}: sin peso unitario, peso total = 0')
+
+    m2_total = 0.0
+    if unit in ('board', 'placa') and upp > 0 and sqm_pp > 0:
+        m2_per_unit = sqm_pp / upp
+        m2_total = qty * m2_per_unit
+    elif unit in ('m2', 'm²'):
+        m2_total = qty
+
+    weight_total = qty * kg_unit
+    pallets_theoretical = (qty / upp) if upp > 0 else 0.0
+    pallets_logistic = math.ceil(pallets_theoretical) if upp > 0 else 0
+    cost_exw = qty * price
+
+    return {
+        'ok': True,
+        'sku': sku,
+        'name': name,
+        'family': family,
+        'unit': unit,
+        'qty_input': qty,
+        'units': int(math.ceil(qty)) if unit not in ('ml', 'm2', 'm²') else round(qty, 2),
+        'price_unit_eur': round(price, 4),
+        'm2_total': round(m2_total, 2),
+        'weight_total_kg': round(weight_total, 2),
+        'pallets_theoretical': round(pallets_theoretical, 3),
+        'pallets_logistic': pallets_logistic,
+        'cost_exw_eur': round(cost_exw, 2),
+        'alerts': alerts,
+    }
+
+
+def _container_result(key: str, units: int, pallets: float, weight: float) -> dict[str, Any]:
+    d = CONTAINERS[key]
+    per_pal = pallets / units if units > 0 else 0
+    per_wei = weight / units if units > 0 else 0
+    pal_occ = per_pal / d['pallets'] if d['pallets'] else 0
+    wei_occ = per_wei / d['kg'] if d['kg'] else 0
+    label = {'20': "20'", '40': "40'", '40HC': '40HC'}[key]
+    return {
+        'type_key': key,
+        'recommended': label,
+        'units': units,
+        'pallets_capacity_per_unit': d['pallets'],
+        'weight_capacity_per_unit_kg': d['kg'],
+        'pallet_occupancy': round(pal_occ, 3),
+        'weight_occupancy': round(wei_occ, 3),
+        'score': round(pal_occ + wei_occ, 3),
+    }
+
+
+def estimate_containers(pallets_logistic: float, weight_kg: float,
+                        family_breakdown: dict[str, int] | None = None) -> dict[str, Any] | None:
+    pallets = _num(pallets_logistic)
+    weight = _num(weight_kg)
+    if pallets <= 0 and weight <= 0:
+        return None
+
+    fams = set((family_breakdown or {}).keys())
+    only_plates = fams == {'PLACAS'}
+    has_profiles = 'PERFILES' in fams
+
+    if has_profiles:
+        order = ['40HC', '40']
+    elif only_plates:
+        order = ['20', '40', '40HC']
+    else:
+        order = ['40HC', '40', '20']
+
+    for key in order:
+        d = CONTAINERS[key]
+        if pallets <= d['pallets'] and weight <= d['kg']:
+            return _container_result(key, 1, pallets, weight)
+
+    best = None
+    for key in order:
+        d = CONTAINERS[key]
+        u_pal = math.ceil(pallets / d['pallets']) if d['pallets'] else 0
+        u_wei = math.ceil(weight / d['kg']) if d['kg'] else 0
+        units = max(u_pal, u_wei, 1)
+        cand = _container_result(key, units, pallets, weight)
+        if best is None \
+           or cand['units'] < best['units'] \
+           or (cand['units'] == best['units'] and cand['score'] > best['score']):
+            best = cand
+    return best
+
+
+def compute_totals(lines: list[dict[str, Any]]) -> dict[str, Any]:
+    ok_lines = [l for l in lines if l.get('ok', True)]
+    total_cost = sum(_num(l.get('cost_exw_eur')) for l in ok_lines)
+    total_weight = sum(_num(l.get('weight_total_kg')) for l in ok_lines)
+    total_m2 = sum(_num(l.get('m2_total')) for l in ok_lines)
+    total_pal_t = sum(_num(l.get('pallets_theoretical')) for l in ok_lines)
+    total_pal_l = sum(_num(l.get('pallets_logistic')) for l in ok_lines)
+    fam_breakdown: dict[str, int] = {}
+    for l in ok_lines:
+        f = l.get('family') or 'DESCONOCIDA'
+        fam_breakdown[f] = fam_breakdown.get(f, 0) + 1
+    containers = estimate_containers(total_pal_l, total_weight, fam_breakdown)
+    return {
+        'cost_exw_eur': round(total_cost, 2),
+        'weight_total_kg': round(total_weight, 2),
+        'm2_total': round(total_m2, 2),
+        'pallets_theoretical': round(total_pal_t, 3),
+        'pallets_logistic': int(math.ceil(total_pal_l)),
+        'family_breakdown': fam_breakdown,
+        'containers': containers,
+    }
+
+
+def dedup_alerts(lines: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for l in lines:
+        for a in (l.get('alerts') or []):
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+    return out
+
+
+# ── PERSISTENCIA: order_lines, audit_log, hash dedupe, secuencia ──
+
+def save_order_lines(db: sqlite3.Connection, offer_id: int,
+                     computed_lines: list[dict[str, Any]]) -> None:
+    now = now_iso()
+    for cl in computed_lines:
+        db.execute(
+            '''INSERT INTO order_lines
+            (offer_id, sku, name, family, unit, qty_input, qty_logistic,
+             price_unit_eur, cost_exw_eur, m2_total, weight_total_kg,
+             pallets_theoretical, pallets_logistic, alerts_text, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (
+                offer_id,
+                cl.get('sku'),
+                cl.get('name'),
+                cl.get('family'),
+                cl.get('unit'),
+                _num(cl.get('qty_original', cl.get('qty_input', 0))),
+                _num(cl.get('units', cl.get('qty_input', 0))),
+                _num(cl.get('price_unit_eur')),
+                _num(cl.get('cost_exw_eur')),
+                _num(cl.get('m2_total')),
+                _num(cl.get('weight_total_kg')),
+                _num(cl.get('pallets_theoretical')),
+                int(_num(cl.get('pallets_logistic'))),
+                ' | '.join(cl.get('alerts') or []) or None,
+                now,
+            )
+        )
+
+
+def log_audit(db: sqlite3.Connection, offer_id: int | None, action: str,
+              detail: str = '', username: str = '') -> None:
+    if not username:
+        try:
+            username = current_user.username if current_user.is_authenticated else 'system'
+        except RuntimeError:
+            username = 'system'
+    db.execute(
+        'INSERT INTO audit_log (offer_id, action, detail, username, created_at) VALUES (?,?,?,?,?)',
+        (offer_id, action, detail, username, now_iso()),
+    )
+
+
+def compute_raw_hash(raw_text: str) -> str:
+    import hashlib
+    return hashlib.sha256(raw_text.strip().encode()).hexdigest()[:16]
+
+
+def find_offer_by_hash(db: sqlite3.Connection, raw_hash: str) -> dict[str, Any] | None:
+    row = db.execute(
+        'SELECT * FROM pending_offers WHERE raw_hash = ? ORDER BY created_at DESC LIMIT 1',
+        (raw_hash,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def next_sequence(db: sqlite3.Connection, prefix: str) -> str:
+    row = db.execute('SELECT last_number FROM doc_sequences WHERE prefix = ?', (prefix,)).fetchone()
+    if row:
+        n = row['last_number'] + 1
+        db.execute('UPDATE doc_sequences SET last_number = ? WHERE prefix = ?', (n, prefix))
+    else:
+        n = 1
+        db.execute('INSERT INTO doc_sequences (prefix, last_number) VALUES (?, ?)', (prefix, n))
+    return f'{prefix}-{n:04d}'
+
+
+def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, target_margin_pct: float, fx_rate: float) -> dict[str, Any]:
     db = get_db()
     system = db.execute('SELECT * FROM systems WHERE id = ?', (system_id,)).fetchone()
     comps = db.execute(
-        '''SELECT sc.*, p.sku, p.name, p.category, p.unit, p.unit_price_eur, p.kg_per_unit, p.units_per_pallet, p.sqm_per_pallet
-           FROM system_components sc JOIN products p ON p.id = sc.product_id WHERE sc.system_id = ?''',
+        '''SELECT sc.consumption_per_sqm, sc.waste_pct AS sc_waste_pct,
+                  p.sku, p.name, p.category, p.unit, p.unit_price_eur,
+                  p.kg_per_unit, p.units_per_pallet, p.sqm_per_pallet
+           FROM system_components sc JOIN products p ON p.id = sc.product_id
+           WHERE sc.system_id = ?''',
         (system_id,),
     ).fetchall()
-    line_items: list[dict[str, Any]] = []
-    total_product_cost = 0.0
-    total_pallets = 0.0
-    total_weight_kg = 0.0
-    total_sqm_capacity = 0.0
-    total_units = 0.0
+
+    lines: list[dict[str, Any]] = []
+    line_items: list[dict[str, Any]] = []  # backward-compat shape for templates
 
     for c in comps:
-        waste = max(system['default_waste_pct'], c['waste_pct'])
+        cd = dict(c)
+        waste = max(_num(system['default_waste_pct']), _num(cd['sc_waste_pct']))
         gross_area = area_sqm * (1 + waste)
-        raw_qty = gross_area * c['consumption_per_sqm']
+        raw_qty = gross_area * _num(cd['consumption_per_sqm'])
+        qty = math.ceil(raw_qty) if (cd.get('unit') or '').lower() in ('board', 'bag', 'bucket', 'ud', 'unit') else raw_qty
 
-        if c['unit'] == 'board':
-            units = math.ceil(raw_qty)
-            sqm_per_unit = (c['sqm_per_pallet'] / c['units_per_pallet']) if c['sqm_per_pallet'] and c['units_per_pallet'] else 1
-            display_qty = units
-            coverage_sqm = units * sqm_per_unit
-        else:
-            units = math.ceil(raw_qty)
-            display_qty = units
-            coverage_sqm = None
+        line = compute_line(cd, qty)
+        line['waste_pct'] = waste
+        line['consumption_per_sqm'] = cd['consumption_per_sqm']
+        lines.append(line)
 
-        pallets = units / c['units_per_pallet'] if c['units_per_pallet'] else 0
-        product_cost = units * c['unit_price_eur']
-        weight = units * (c['kg_per_unit'] or 0)
+        # Back-compat fields for existing calculator.html / project_detail.html
+        line_items.append({
+            'sku': line['sku'],
+            'name': line['name'],
+            'category': cd.get('category') or line['family'],
+            'unit': line['unit'],
+            'consumption_per_sqm': cd['consumption_per_sqm'],
+            'waste_pct': waste,
+            'units': line['units'],
+            'display_qty': line['units'],
+            'pallets': line['pallets_logistic'],
+            'coverage_sqm': line['m2_total'] if line['m2_total'] else None,
+            'product_cost_eur': line['cost_exw_eur'],
+            'weight_kg': line['weight_total_kg'],
+            'alerts': line['alerts'],
+        })
 
-        line_items.append(
-            {
-                'sku': c['sku'],
-                'name': c['name'],
-                'category': c['category'],
-                'unit': c['unit'],
-                'consumption_per_sqm': c['consumption_per_sqm'],
-                'waste_pct': waste,
-                'units': units,
-                'display_qty': display_qty,
-                'pallets': round(pallets, 2),
-                'coverage_sqm': round(coverage_sqm, 2) if coverage_sqm else None,
-                'product_cost_eur': round(product_cost, 2),
-                'weight_kg': round(weight, 2),
-            }
-        )
-        total_product_cost += product_cost
-        total_pallets += pallets
-        total_weight_kg += weight
-        total_units += units
-        if coverage_sqm:
-            total_sqm_capacity += coverage_sqm
+    totals = compute_totals(lines)
+    product_cost = totals['cost_exw_eur']
 
-    landed_before_margin = total_product_cost + freight_eur
-    customs_cost = landed_before_margin * customs_pct
-    landed_total = landed_before_margin + customs_cost
+    landed_total = product_cost + freight_eur
     sale_total = landed_total / max(1 - target_margin_pct, 0.01)
     gross_margin_eur = sale_total - landed_total
     price_per_sqm = sale_total / area_sqm if area_sqm else 0
 
-    containers_20 = math.ceil(total_pallets / 10) if total_pallets else 0
-    containers_40 = math.ceil(total_pallets / 20) if total_pallets else 0
+    cont = totals.get('containers')
+    if cont and cont['type_key'] == '20':
+        c20 = cont['units']; c40 = 0
+    elif cont and cont['type_key'] in ('40', '40HC'):
+        c20 = 0; c40 = cont['units']
+    else:
+        c20 = math.ceil(totals['pallets_logistic'] / 10) if totals['pallets_logistic'] else 0
+        c40 = math.ceil(totals['pallets_logistic'] / 20) if totals['pallets_logistic'] else 0
 
     return {
         'system_name': system['name'],
         'area_sqm': area_sqm,
         'line_items': line_items,
         'summary': {
-            'total_units': total_units,
-            'total_pallets': round(total_pallets, 2),
-            'total_weight_kg': round(total_weight_kg, 2),
-            'product_cost_eur': round(total_product_cost, 2),
+            'total_units': sum(_num(l.get('units')) for l in lines),
+            'total_pallets': totals['pallets_logistic'],
+            'total_pallets_theoretical': totals['pallets_theoretical'],
+            'total_weight_kg': totals['weight_total_kg'],
+            'm2_total': totals['m2_total'],
+            'product_cost_eur': product_cost,
             'freight_eur': round(freight_eur, 2),
-            'customs_cost_eur': round(customs_cost, 2),
             'landed_total_eur': round(landed_total, 2),
             'sale_total_eur': round(sale_total, 2),
             'gross_margin_eur': round(gross_margin_eur, 2),
-            'gross_margin_pct': round((gross_margin_eur / sale_total), 4) if sale_total else 0,
+            'gross_margin_pct': round(gross_margin_eur / sale_total, 4) if sale_total else 0,
             'price_per_sqm_eur': round(price_per_sqm, 2),
-            'containers_20_est': containers_20,
-            'containers_40_est': containers_40,
+            'containers_20_est': c20,
+            'containers_40_est': c40,
+            'container_recommendation': cont,
+            'family_breakdown': totals['family_breakdown'],
             'fx_rate': fx_rate,
             'sale_total_local': round(sale_total * fx_rate, 2),
+            'alerts': dedup_alerts(lines),
         },
     }
 
@@ -593,6 +928,7 @@ def dashboard():
 
 
 @app.route('/clients', methods=['GET', 'POST'])
+@login_required
 def clients():
     db = get_db()
     if request.method == 'POST':
@@ -606,7 +942,7 @@ def clients():
                 request.form.get('phone'),
                 request.form.get('country') or 'República Dominicana',
                 int(request.form.get('score') or 50),
-                datetime.utcnow().isoformat(),
+                now_iso(),
             ),
         )
         db.commit()
@@ -617,12 +953,119 @@ def clients():
 
 
 @app.route('/products')
+@login_required
 def products():
-    rows = get_db().execute('SELECT * FROM products ORDER BY category, name').fetchall()
-    return render_template('products.html', products=rows)
+    db = get_db()
+    rows = db.execute('''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
+                         FROM products p
+                         LEFT JOIN family_defaults fd ON fd.category = p.category
+                         ORDER BY cat_order,
+                                  COALESCE(p.subfamily, ''),
+                                  p.name''').fetchall()
+    # Agrupar por categoría y subfamilia
+    groups: dict[str, dict[str, list[dict]]] = {}
+    for r in rows:
+        cat = r['category'] or 'SIN CATEGORÍA'
+        sub = r['subfamily'] or ''
+        groups.setdefault(cat, {}).setdefault(sub, []).append(dict(r))
+    # Resumen
+    totals = {cat: sum(len(v) for v in subs.values()) for cat, subs in groups.items()}
+    missing = sum(1 for r in rows if r['pvp_eur_unit'] is None)
+    fam_defaults = {r['category']: r['discount_pct']
+                    for r in db.execute('SELECT category, discount_pct FROM family_defaults').fetchall()}
+    return render_template('products.html',
+                           groups=groups,
+                           totals=totals,
+                           grand_total=len(rows),
+                           missing=missing,
+                           fam_defaults=fam_defaults,
+                           is_admin=(getattr(current_user, 'role', None) == 'admin'))
+
+
+@app.route('/api/products/<int:product_id>', methods=['GET'])
+@login_required
+def api_get_product(product_id: int):
+    db = get_db()
+    p = db.execute('SELECT * FROM products WHERE id = ?', (product_id,)).fetchone()
+    if not p:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    hist = db.execute('''SELECT field, old_value, new_value, username, changed_at
+                         FROM price_history WHERE product_id = ?
+                         ORDER BY changed_at DESC LIMIT 20''', (product_id,)).fetchall()
+    return jsonify({'ok': True, 'product': dict(p), 'history': [dict(h) for h in hist]})
+
+
+@app.route('/api/products/<int:product_id>', methods=['POST'])
+@admin_required
+def api_update_product(product_id: int):
+    db = get_db()
+    existing = db.execute('SELECT * FROM products WHERE id = ?', (product_id,)).fetchone()
+    if not existing:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    data = request.get_json() or {}
+    # Campos editables
+    editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
+                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+                'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet', 'notes']
+    changes = []
+    sets = []
+    vals: list[Any] = []
+    for f in editable:
+        if f not in data:
+            continue
+        new_v = data[f]
+        old_v = existing[f]
+        # normalizar números
+        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+                 'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet'):
+            new_v = float(new_v) if new_v not in (None, '') else None
+        if new_v == old_v:
+            continue
+        sets.append(f'{f} = ?')
+        vals.append(new_v)
+        changes.append((f, old_v, new_v))
+    if not sets:
+        return jsonify({'ok': True, 'changed': 0, 'message': 'sin cambios'})
+    # Auto-sync: si cambió pvp_eur_unit o discount_pct y no envió precio_arias_eur_unit explícito, recalcular
+    if 'precio_arias_eur_unit' not in data:
+        pvp_new = next((v for f, _, v in changes if f == 'pvp_eur_unit'), None)
+        disc_new = next((v for f, _, v in changes if f == 'discount_pct'), None)
+        pvp = pvp_new if pvp_new is not None else existing['pvp_eur_unit']
+        disc = disc_new if disc_new is not None else (existing['discount_pct'] or 50)
+        if pvp is not None:
+            arias = round(float(pvp) * (1 - float(disc) / 100), 4)
+            if arias != existing['precio_arias_eur_unit']:
+                sets.append('precio_arias_eur_unit = ?')
+                vals.append(arias)
+                changes.append(('precio_arias_eur_unit', existing['precio_arias_eur_unit'], arias))
+    # Mantener unit_price_eur alineado con precio_arias_eur_unit (motor de cálculo)
+    final_arias = next((v for f, _, v in changes if f == 'precio_arias_eur_unit'), None)
+    if final_arias is not None:
+        sets.append('unit_price_eur = ?')
+        vals.append(final_arias)
+    vals.append(product_id)
+    db.execute(f'UPDATE products SET {", ".join(sets)} WHERE id = ?', vals)
+    # Auditar solo campos numéricos en price_history
+    now_ts = now_iso()
+    user_id = current_user.id
+    username = current_user.username
+    for field, old, new in changes:
+        try:
+            old_n = float(old) if old is not None else None
+            new_n = float(new) if new is not None else None
+        except (TypeError, ValueError):
+            continue
+        db.execute('''INSERT INTO price_history
+                      (product_id, field, old_value, new_value, user_id, username, changed_at)
+                      VALUES (?,?,?,?,?,?,?)''',
+                   (product_id, field, old_n, new_n, user_id, username, now_ts))
+    db.commit()
+    updated = db.execute('SELECT * FROM products WHERE id = ?', (product_id,)).fetchone()
+    return jsonify({'ok': True, 'changed': len(changes), 'product': dict(updated)})
 
 
 @app.route('/projects', methods=['GET', 'POST'])
+@login_required
 def projects():
     db = get_db()
     if request.method == 'POST':
@@ -638,13 +1081,13 @@ def projects():
                 float(request.form.get('area_sqm') or 0),
                 request.form.get('stage') or 'OPORTUNIDAD',
                 request.form.get('go_no_go') or 'PENDING',
-                request.form.get('incoterm') or 'CIF',
+                request.form.get('incoterm') or 'EXW',
                 float(request.form.get('fx_rate') or 1),
                 float(request.form.get('target_margin_pct') or 0.30),
                 float(request.form.get('freight_eur') or 0),
                 float(request.form.get('customs_pct') or 0.18),
                 request.form.get('logistics_notes'),
-                datetime.utcnow().isoformat(),
+                now_iso(),
             ),
         )
         db.commit()
@@ -659,6 +1102,7 @@ def projects():
 
 
 @app.route('/projects/<int:project_id>', methods=['GET', 'POST'])
+@login_required
 def project_detail(project_id: int):
     db = get_db()
     project = db.execute(
@@ -677,7 +1121,7 @@ def project_detail(project_id: int):
             db.execute('UPDATE projects SET stage = ? WHERE id = ?', (to_stage, project_id))
             db.execute(
                 'INSERT INTO stage_events (project_id, from_stage, to_stage, note, created_at) VALUES (?, ?, ?, ?, ?)',
-                (project_id, project['stage'], to_stage, note, datetime.utcnow().isoformat()),
+                (project_id, project['stage'], to_stage, note, now_iso()),
             )
             db.commit()
             flash('Etapa actualizada.')
@@ -691,7 +1135,7 @@ def project_detail(project_id: int):
                     float(request.form.get('target_margin_pct') or 0.30),
                     float(request.form.get('freight_eur') or 0),
                     float(request.form.get('customs_pct') or 0.18),
-                    request.form.get('incoterm') or 'CIF',
+                    request.form.get('incoterm') or 'EXW',
                     request.form.get('go_no_go') or 'PENDING',
                     request.form.get('logistics_notes'),
                     project_id,
@@ -705,13 +1149,12 @@ def project_detail(project_id: int):
             area_sqm = float(request.form.get('area_sqm') or project['area_sqm'] or 0)
             fx_rate = float(request.form.get('fx_rate') or project['fx_rate'] or 1)
             freight_eur = float(request.form.get('freight_eur') or project['freight_eur'] or 0)
-            customs_pct = float(request.form.get('customs_pct') or project['customs_pct'] or 0.18)
             target_margin_pct = float(request.form.get('target_margin_pct') or project['target_margin_pct'] or 0.30)
-            result = calculate_quote(system_id, area_sqm, freight_eur, customs_pct, target_margin_pct, fx_rate)
+            result = calculate_quote(system_id, area_sqm, freight_eur, target_margin_pct, fx_rate)
             db.execute(
                 '''INSERT INTO project_quotes (project_id, system_id, version_label, area_sqm, fx_rate, freight_eur, customs_pct, target_margin_pct, result_json, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (project_id, system_id, version_label, area_sqm, fx_rate, freight_eur, customs_pct, target_margin_pct, json.dumps(result), datetime.utcnow().isoformat()),
+                (project_id, system_id, version_label, area_sqm, fx_rate, freight_eur, 0, target_margin_pct, json.dumps(result), now_iso()),
             )
             db.commit()
             flash('Oferta/cálculo guardado.')
@@ -734,6 +1177,7 @@ def project_detail(project_id: int):
 
 
 @app.route('/calculator', methods=['GET', 'POST'])
+@login_required
 def calculator():
     db = get_db()
     systems = db.execute('SELECT * FROM systems ORDER BY name').fetchall()
@@ -743,7 +1187,6 @@ def calculator():
             int(request.form['system_id']),
             float(request.form.get('area_sqm') or 0),
             float(request.form.get('freight_eur') or 0),
-            float(request.form.get('customs_pct') or 0.18),
             float(request.form.get('target_margin_pct') or 0.30),
             float(request.form.get('fx_rate') or 1),
         )
@@ -856,7 +1299,7 @@ def quote():
     
     families = sorted(set(p['category'] for p in products_data))
     # Custom order for families
-    family_order = ['PLACAS', 'PERFILES', 'CINTAS', 'PASTAS', 'TORNILLOS', 'TRAMPILLAS', 'ACCESORIOS', 'GYPSOCOMETE']
+    family_order = ['PLACAS', 'PERFILES', 'ACCESORIOS', 'CINTAS', 'TORNILLOS', 'PASTAS', 'GYPSOCOMETE', 'TRAMPILLAS']
     families_ordered = [f for f in family_order if f in families] + [f for f in families if f not in family_order]
     
     # Subfamilies for ALL families (grouped by family)
@@ -987,17 +1430,30 @@ def quote():
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
-    fx = db.execute(
-        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' ORDER BY updated_at DESC LIMIT 1"
-    ).fetchone()
-    fx_rate = fx['rate'] if fx else 1.085
+    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
+    fx_rate = float(fx_setting['value']) if fx_setting else 1.085
+    projects_raw = db.execute(
+        'SELECT id, client_id, name, area_sqm, incoterm FROM projects ORDER BY created_at DESC'
+    ).fetchall()
+    projects_data = [dict(p) for p in projects_raw]
+
+    edit_offer = None
+    edit_id = request.args.get('edit')
+    if edit_id:
+        row = db.execute('SELECT * FROM pending_offers WHERE id = ?', (edit_id,)).fetchone()
+        if row:
+            edit_offer = dict(row)
+            edit_offer['lines'] = json.loads(row['lines_json']) if row['lines_json'] else []
+
     return render_template('quote.html', products=products_data, clients=clients_data,
                           families=families_ordered,
                           subfamilies=subfamilies_friendly, systems=systems_data,
-                          routes=routes_data, fx_rate=fx_rate)
+                          routes=routes_data, fx_rate=fx_rate,
+                          projects=projects_data, edit_offer=edit_offer)
 
 
 @app.route('/projects/<int:project_id>/quote/<int:quote_id>/pdf')
+@login_required
 def quote_pdf(project_id: int, quote_id: int):
     db = get_db()
     project = db.execute(
@@ -1167,8 +1623,7 @@ def quote_pdf(project_id: int, quote_id: int):
     fin_rows = [
         ['Coste producto EXW fábrica', f"€ {summary['product_cost_eur']:,.2f}"],
         ['Flete internacional estimado', f"€ {summary['freight_eur']:,.2f}"],
-        ['Costes aduaneros estimados', f"€ {summary['customs_cost_eur']:,.2f}"],
-        ['Coste total llegada destino', f"€ {summary['landed_total_eur']:,.2f}"],
+        ['Coste total puesto en destino', f"€ {summary['landed_total_eur']:,.2f}"],
     ]
     fin_tbl = Table(
         [[Paragraph(r[0], S['body']), Paragraph(r[1], S['right'])] for r in fin_rows],
@@ -1178,7 +1633,7 @@ def quote_pdf(project_id: int, quote_id: int):
         ('TOPPADDING',    (0,0),(-1,-1), 4),
         ('BOTTOMPADDING', (0,0),(-1,-1), 4),
         ('LEFTPADDING',   (0,0),(-1,-1), 4),
-        ('ROWBACKGROUNDS', (0,0),(-1,-1), [LGRAY, WHITE, LGRAY, WHITE]),
+        ('ROWBACKGROUNDS', (0,0),(-1,-1), [LGRAY, WHITE, LGRAY]),
         ('LINEBELOW', (0,-1),(-1,-1), 0.5, colors.HexColor('#D0CBBC')),
     ]))
     story.append(fin_tbl)
@@ -1262,6 +1717,7 @@ def quote_pdf(project_id: int, quote_id: int):
 
 
 @app.route('/masters', methods=['GET', 'POST'])
+@login_required
 def masters():
     db = get_db()
     tab = request.args.get('tab', 'shipping')
@@ -1318,7 +1774,7 @@ def masters():
         elif action == 'update_fx':
             db.execute('UPDATE fx_rates SET rate = ?, updated_at = ?, source = ? WHERE id = ?', (
                 float(request.form['rate']),
-                datetime.utcnow().isoformat(),
+                now_iso(),
                 request.form.get('source', 'Manual'),
                 int(request.form['id']),
             ))
@@ -1331,7 +1787,7 @@ def masters():
                 request.form.get('base_currency', 'EUR'),
                 request.form['target_currency'],
                 float(request.form['rate']),
-                datetime.utcnow().isoformat(),
+                now_iso(),
                 request.form.get('source', 'Manual'),
             ))
             db.commit()
@@ -1346,6 +1802,7 @@ def masters():
 
 
 @app.route('/dashboard/financial')
+@login_required
 def dashboard_financial():
     db = get_db()
 
@@ -1442,7 +1899,7 @@ def crm():
                 (request.form['name'], request.form.get('company'),
                  request.form.get('email'), request.form.get('phone'),
                  request.form.get('country', 'RD'), request.form.get('score', 'C'),
-                 datetime.utcnow().isoformat())
+                 now_iso())
             )
             flash('Cliente creado.')
         elif action == 'add_project':
@@ -1453,7 +1910,7 @@ def crm():
                  request.form.get('stage', 'CLIENTE'), request.form.get('go_no_go', 'GO'),
                  float(request.form.get('area_sqm', 0) or 0),
                  request.form.get('incoterm', 'EXW'),
-                 datetime.utcnow().isoformat())
+                 now_iso())
             )
             flash('Proyecto creado.')
         db.commit()
@@ -1512,20 +1969,30 @@ def config():
                 '''INSERT OR REPLACE INTO fx_rates (base_currency, target_currency, rate, updated_at, source)
                    VALUES (?, ?, ?, ?, ?)''',
                 (request.form['base_currency'], request.form['target_currency'],
-                 float(request.form['rate']), datetime.utcnow().isoformat(),
+                 float(request.form['rate']), now_iso(),
                  request.form.get('source', 'Manual'))
             )
             flash('Tipo de cambio actualizado.')
+        elif action == 'update_fx_setting':
+            new_fx = float(request.form['fx_eur_usd'])
+            db.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?)",
+                (str(new_fx), now_iso())
+            )
+            flash(f'EUR/USD actualizado a {new_fx}')
         db.commit()
         return redirect(url_for('config'))
-    
+
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     customs = db.execute('SELECT * FROM customs_rates').fetchall()
     fx = db.execute('SELECT * FROM fx_rates').fetchall()
+    fx_setting = db.execute("SELECT value, updated_at FROM app_settings WHERE key='fx_eur_usd'").fetchone()
     return render_template('config.html',
                           routes=[dict(r) for r in routes],
                           customs=[dict(c) for c in customs],
-                          fx=[dict(f) for f in fx])
+                          fx=[dict(f) for f in fx],
+                          fx_eur_usd=float(fx_setting['value']) if fx_setting else 1.085,
+                          fx_updated=(fx_setting['updated_at'][:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
 
 
 # ── API: Save pending offer ───────────────────────────────────────
@@ -1536,39 +2003,95 @@ def save_offer():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data'}), 400
-    
-    total = sum(l['price'] * math.ceil(l['qty'] * (1 + data.get('wastePct', 5)/100)) for l in data.get('lines', []))
-    waste_cost = total * (data.get('wastePct', 5) / 100)
-    logistic = data.get('logisticCost', 0)
-    cost_total = total + waste_cost + logistic
-    margin = data.get('margin', 33) / 100
-    total_final = cost_total / (1 - margin)
-    
+
+    waste_pct = _num(data.get('wastePct', 5)) / 100
+    margin_pct = _num(data.get('margin', 33)) / 100
+    logistic = _num(data.get('logisticCost', 0))
+    fx = _num(data.get('fx', 1.085))
+
+    raw_lines = data.get('lines', [])
+    input_lines: list[dict[str, Any]] = []
+    computed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for li in raw_lines:
+        sku = li.get('sku')
+        qty = _num(li.get('qty', 0))
+        if not sku or qty <= 0:
+            continue
+        prod = db.execute('SELECT * FROM products WHERE sku = ?', (sku,)).fetchone()
+        if not prod:
+            skipped.append(sku)
+            continue
+        pd = dict(prod)
+        qty_with_waste = math.ceil(qty * (1 + waste_pct))
+        line = compute_line(pd, qty_with_waste)
+        line['qty_original'] = qty
+        computed.append(line)
+        input_lines.append({
+            'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
+            'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
+            'margin': _num(li.get('margin', data.get('margin', 33))),
+            'note': li.get('note'),
+        })
+
+    totals = compute_totals(computed)
+    product_cost = totals['cost_exw_eur']
+    cost_total = product_cost + logistic
+    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+
+    container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
+
+    offer_num = data.get('offerNumber') or next_sequence(db, 'OFR')
+    raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
+    dup = find_offer_by_hash(db, raw_hash)
+    if dup:
+        return jsonify({
+            'ok': False,
+            'error': f'Oferta duplicada (#{dup["offer_number"]})',
+            'existing_offer_number': dup['offer_number'],
+        }), 409
+
     db.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+         status, incoterm, container_count, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (
-            data.get('offerNumber', '2026-001'),
+            offer_num,
             data.get('client', ''),
             data.get('project', ''),
             data.get('wastePct', 5),
             data.get('margin', 33),
-            data.get('fx', 1.085),
-            json.dumps(data.get('lines', [])),
-            round(total + waste_cost, 2),
+            fx,
+            json.dumps(input_lines),
+            round(product_cost, 2),
             round(logistic, 2),
             round(total_final, 2),
             'pending',
             data.get('incoterm', 'EXW'),
-            data.get('containerCount', 0),
-            datetime.utcnow().isoformat()
+            int(container_count),
+            raw_hash,
+            now_iso(),
         )
     )
+    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    save_order_lines(db, offer_id, computed)
+    log_audit(db, offer_id, 'OFFER_CREATED',
+              f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
     db.commit()
-    return jsonify({'ok': True})
+    return jsonify({
+        'ok': True,
+        'offer_number': offer_num,
+        'offer_id': offer_id,
+        'product_cost_eur': round(product_cost, 2),
+        'total_final_eur': round(total_final, 2),
+        'total_weight_kg': totals['weight_total_kg'],
+        'pallets_logistic': totals['pallets_logistic'],
+        'container_recommendation': totals.get('containers'),
+        'alerts': dedup_alerts(computed),
+        'skipped_skus': skipped,
+    })
 
 
 @app.template_filter('from_json')
@@ -1582,7 +2105,7 @@ def from_json(value):
 @app.context_processor
 def inject_now() -> dict[str, Any]:
     return {
-        'current_year': datetime.utcnow().year,
+        'current_year': datetime.now(timezone.utc).year,
         'stages': STAGES,
         'current_user': current_user,
     }
@@ -1602,6 +2125,86 @@ def logistics():
     return render_template('logistics.html', offers=offers_data, routes=routes_data)
 
 
+# ── API: Full offer update (from cotizador edit) ─────────────────
+
+@app.route('/api/update-full-offer', methods=['POST'])
+@login_required
+def update_full_offer():
+    db = get_db()
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data'}), 400
+
+    edit_id = data.get('editId')
+    if not edit_id:
+        return jsonify({'error': 'No editId'}), 400
+
+    existing = db.execute('SELECT * FROM pending_offers WHERE id = ?', (edit_id,)).fetchone()
+    if not existing:
+        return jsonify({'error': 'Oferta no encontrada'}), 404
+    if existing['status'] == 'confirmed':
+        return jsonify({'error': 'No se puede editar una oferta confirmada'}), 403
+
+    waste_pct = _num(data.get('wastePct', 5)) / 100
+    margin_pct = _num(data.get('margin', 20)) / 100
+    logistic = _num(data.get('logisticCost', 0))
+    fx = _num(data.get('fx', 1.085))
+
+    input_lines = data.get('lines', [])
+    computed: list[dict[str, Any]] = []
+    for li in input_lines:
+        sku = li.get('sku')
+        qty = _num(li.get('qty', 0))
+        if not sku or qty <= 0:
+            continue
+        prod = db.execute('SELECT * FROM products WHERE sku = ?', (sku,)).fetchone()
+        if not prod:
+            continue
+        qty_with_waste = math.ceil(qty * (1 + waste_pct))
+        line = compute_line(dict(prod), qty_with_waste)
+        line['qty_original'] = qty
+        computed.append(line)
+
+    totals = compute_totals(computed)
+    product_cost = totals['cost_exw_eur']
+    cost_total = product_cost + logistic
+    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
+
+    db.execute(
+        '''UPDATE pending_offers SET
+           offer_number = ?, client_name = ?, project_name = ?,
+           waste_pct = ?, margin_pct = ?, fx_rate = ?,
+           lines_json = ?, total_product_eur = ?, total_logistic_eur = ?,
+           total_final_eur = ?, incoterm = ?, container_count = ?,
+           raw_hash = ?, updated_at = ?
+           WHERE id = ?''',
+        (
+            data.get('offerNumber', existing['offer_number']),
+            data.get('client', existing['client_name']),
+            data.get('project', existing['project_name']),
+            data.get('wastePct', 5),
+            data.get('margin', 20),
+            fx,
+            json.dumps(input_lines),
+            round(product_cost, 2),
+            round(logistic, 2),
+            round(total_final, 2),
+            data.get('incoterm', 'EXW'),
+            int(container_count),
+            compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
+            now_iso(),
+            edit_id,
+        )
+    )
+    db.execute('DELETE FROM order_lines WHERE offer_id = ?', (edit_id,))
+    save_order_lines(db, edit_id, computed)
+    log_audit(db, edit_id, 'OFFER_EDITED',
+              f'{data.get("offerNumber")} | {len(computed)} líneas | €{round(total_final, 2)}')
+    db.commit()
+    return jsonify({'ok': True, 'offer_id': edit_id, 'total_final_eur': round(total_final, 2)})
+
+
 # ── API: Update offer logistics ──────────────────────────────────
 @app.route('/api/update-offer', methods=['POST'])
 @login_required
@@ -1612,6 +2215,7 @@ def update_offer():
     if not offer_id:
         return jsonify({'error': 'No ID'}), 400
     
+    new_status = data.get('status', 'pending')
     db.execute(
         '''UPDATE pending_offers SET
            incoterm = ?, route_id = ?, container_count = ?,
@@ -1624,11 +2228,13 @@ def update_offer():
             data.get('container_count', 0),
             data.get('logistic_cost', 0),
             data.get('final_total', 0),
-            data.get('status', 'pending'),
-            datetime.utcnow().isoformat(),
-            offer_id
+            new_status,
+            now_iso(),
+            offer_id,
         )
     )
+    log_audit(db, offer_id, 'OFFER_UPDATED',
+              f'status={new_status} | incoterm={data.get("incoterm")} | €{data.get("final_total",0)}')
     db.commit()
     return jsonify({'ok': True})
 
@@ -1639,6 +2245,8 @@ def update_offer():
 def delete_offer():
     db = get_db()
     offer_id = request.json.get('id')
+    log_audit(db, offer_id, 'OFFER_DELETED')
+    db.execute('DELETE FROM order_lines WHERE offer_id = ?', (offer_id,))
     db.execute('DELETE FROM pending_offers WHERE id = ?', (offer_id,))
     db.commit()
     return jsonify({'ok': True})
@@ -1975,8 +2583,369 @@ def offer_pdf(offer_id):
     return resp
 
 
+# ── PDF helpers (shared styles) ──────────────────────────────────
+
+def _pdf_styles():
+    styles = getSampleStyleSheet()
+    def s(name, parent='Normal', **kw):
+        return ParagraphStyle(name, parent=styles[parent], **kw)
+    return {
+        'h1':    s('_h1', fontSize=14, fontName='Helvetica-Bold', spaceAfter=4),
+        'h2':    s('_h2', fontSize=10, fontName='Helvetica-Bold', spaceBefore=8, spaceAfter=2),
+        'p':     s('_p',  fontSize=8, leading=10),
+        'small': s('_sm', fontSize=7, leading=9, textColor=colors.HexColor('#555555')),
+        'right': s('_rt', fontSize=8, leading=10, alignment=TA_RIGHT),
+        'th':    s('_th', fontSize=7, fontName='Helvetica-Bold', textColor=colors.white),
+        'td':    s('_td', fontSize=7, leading=9),
+        'tdr':   s('_tdr', fontSize=7, leading=9, alignment=TA_RIGHT),
+    }
+
+
+def _pdf_table_style():
+    BG = colors.HexColor('#333333')
+    return TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), BG),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTSIZE', (0, 0), (-1, -1), 7),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#999999')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+    ])
+
+
+def _load_offer_with_lines(offer_id: int):
+    db = get_db()
+    offer = db.execute('SELECT * FROM pending_offers WHERE id = ?', (offer_id,)).fetchone()
+    if not offer:
+        return None, None
+    ol = db.execute('SELECT * FROM order_lines WHERE offer_id = ? ORDER BY id', (offer_id,)).fetchall()
+    if not ol:
+        raw_lines = json.loads(offer['lines_json']) if offer['lines_json'] else []
+        computed = []
+        for li in raw_lines:
+            prod = db.execute('SELECT * FROM products WHERE sku = ?', (li.get('sku'),)).fetchone()
+            if prod:
+                cl = compute_line(dict(prod), _num(li.get('qty', 0)))
+                computed.append(cl)
+        return offer, computed
+    return offer, [dict(r) for r in ol]
+
+
+# ── PDF: PreOrden Fábrica ─────────────────────────────────────────
+
+@app.route('/api/preorden-pdf/<int:offer_id>')
+@login_required
+def preorden_pdf(offer_id):
+    offer, lines = _load_offer_with_lines(offer_id)
+    if not offer:
+        return 'Oferta no encontrada', 404
+
+    S = _pdf_styles()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+    W = A4[0] - 30*mm
+    story = []
+
+    db = get_db()
+    num_pre = next_sequence(db, 'PRE')
+    db.commit()
+
+    ref_date = (offer['created_at'] or '')[:10]
+    story.append(Paragraph('PREORDEN DE SUMINISTRO — FASSA / ARIAS GROUP', S['h1']))
+    story.append(Spacer(1, 2*mm))
+
+    meta = [
+        ['Nº PreOrden', num_pre, 'Fecha', ref_date],
+        ['Cliente', offer['client_name'], 'Proyecto', offer['project_name']],
+        ['Incoterm', offer['incoterm'] or 'EXW', 'Estado', offer['status'] or 'pending'],
+    ]
+    mt = Table([[Paragraph(c, S['p']) for c in row] for row in meta],
+               colWidths=[W*0.15, W*0.35, W*0.15, W*0.35])
+    mt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('FONTSIZE', (0,0), (-1,-1), 8),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(mt)
+    story.append(Spacer(1, 4*mm))
+
+    story.append(Paragraph('DETALLE DE PRODUCTO', S['h2']))
+    head = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Unidad', 'Cantidad', 'Palés', 'm²', 'Peso kg']]
+    rows = [head]
+    total_pal = total_m2 = total_kg = 0
+    for l in lines:
+        pal = int(_num(l.get('pallets_logistic', 0)))
+        m2 = _num(l.get('m2_total', 0))
+        kg = _num(l.get('weight_total_kg', 0))
+        total_pal += pal
+        total_m2 += m2
+        total_kg += kg
+        rows.append([
+            Paragraph(str(l.get('name', '')), S['td']),
+            Paragraph(str(l.get('sku', '')), S['td']),
+            Paragraph(str(l.get('unit', '')), S['td']),
+            Paragraph(f"{_num(l.get('qty_input', l.get('qty_logistic', 0))):.0f}", S['tdr']),
+            Paragraph(str(pal), S['tdr']),
+            Paragraph(f"{m2:.1f}" if m2 else '—', S['tdr']),
+            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+        ])
+    rows.append([
+        Paragraph('<b>TOTALES</b>', S['td']), '', '', '',
+        Paragraph(f"<b>{total_pal}</b>", S['tdr']),
+        Paragraph(f"<b>{total_m2:.1f}</b>" if total_m2 else '', S['tdr']),
+        Paragraph(f"<b>{total_kg:.0f}</b>" if total_kg else '', S['tdr']),
+    ])
+    t = Table(rows, colWidths=[W*0.30, W*0.15, W*0.08, W*0.10, W*0.10, W*0.12, W*0.15])
+    t.setStyle(_pdf_table_style())
+    story.append(t)
+    story.append(Spacer(1, 4*mm))
+
+    story.append(Paragraph('LOGÍSTICA', S['h2']))
+    cont = estimate_containers(total_pal, total_kg,
+        {l.get('family', '?'): 1 for l in lines})
+    cont_txt = f"{cont['units']} x {cont['recommended']}" if cont else 'Por determinar'
+    logdata = [
+        ['Contenedores', cont_txt],
+        ['Peso bruto total', f"{total_kg:,.0f} kg" if total_kg else 'Por determinar'],
+        ['Palés totales', str(total_pal)],
+        ['Fecha embarque estimada', 'Por determinar'],
+        ['Condición de pago', 'Anticipo + saldo contra BL'],
+    ]
+    lt = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in logdata],
+               colWidths=[W*0.35, W*0.65])
+    lt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(lt)
+    story.append(Spacer(1, 6*mm))
+    story.append(Paragraph('Arias Group Caribe · PreOrden generada automáticamente', S['small']))
+
+    log_audit(db, offer_id, 'PREORDEN_PDF', f'{num_pre}')
+    db.commit()
+
+    doc.build(story)
+    buffer.seek(0)
+    resp = make_response(buffer.read())
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'attachment; filename="PreOrden_{num_pre}.pdf"'
+    return resp
+
+
+# ── PDF: Orden Logística ──────────────────────────────────────────
+
+@app.route('/api/orden-logistica-pdf/<int:offer_id>')
+@login_required
+def orden_logistica_pdf(offer_id):
+    offer, lines = _load_offer_with_lines(offer_id)
+    if not offer:
+        return 'Oferta no encontrada', 404
+
+    S = _pdf_styles()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+        leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm)
+    W = A4[0] - 30*mm
+    story = []
+
+    db = get_db()
+    num_ol = next_sequence(db, 'LOG')
+    db.commit()
+
+    ref_date = (offer['created_at'] or '')[:10]
+    total_pal = total_kg = total_m2 = 0
+    fam_breakdown: dict[str, int] = {}
+    for l in lines:
+        total_pal += int(_num(l.get('pallets_logistic', 0)))
+        total_kg += _num(l.get('weight_total_kg', 0))
+        total_m2 += _num(l.get('m2_total', 0))
+        f = l.get('family') or '?'
+        fam_breakdown[f] = fam_breakdown.get(f, 0) + 1
+    cont = estimate_containers(total_pal, total_kg, fam_breakdown)
+
+    # ── PAGE 1: Calculadora Logística ─────────────────────────────
+    story.append(Paragraph('ORDEN LOGÍSTICA — CALCULADORA', S['h1']))
+    story.append(Spacer(1, 2*mm))
+
+    meta = [
+        ['Nº Orden', num_ol, 'Fecha', ref_date],
+        ['Ref. Pedido', offer['offer_number'], 'Cliente', offer['client_name']],
+        ['Proyecto', offer['project_name'], 'Incoterm', offer['incoterm'] or 'EXW'],
+    ]
+    mt = Table([[Paragraph(c, S['p']) for c in row] for row in meta],
+               colWidths=[W*0.15, W*0.35, W*0.15, W*0.35])
+    mt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(mt)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph('DESGLOSE DE MERCANCÍA', S['h2']))
+    head = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Familia', 'Ud.', 'Cant.', 'Uds/palé', 'Palés', 'Peso kg']]
+    rows = [head]
+    for l in lines:
+        pal = int(_num(l.get('pallets_logistic', 0)))
+        kg = _num(l.get('weight_total_kg', 0))
+        qty = _num(l.get('qty_input', l.get('qty_logistic', 0)))
+        ups = int(qty / pal) if pal > 0 else 0
+        rows.append([
+            Paragraph(str(l.get('name', '')), S['td']),
+            Paragraph(str(l.get('sku', '')), S['td']),
+            Paragraph(str(l.get('family', '')), S['td']),
+            Paragraph(str(l.get('unit', '')), S['td']),
+            Paragraph(f"{qty:.0f}", S['tdr']),
+            Paragraph(str(ups) if ups else '—', S['tdr']),
+            Paragraph(str(pal), S['tdr']),
+            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+        ])
+    rows.append([
+        Paragraph('<b>TOTALES</b>', S['td']), '', '', '', '', '',
+        Paragraph(f"<b>{total_pal}</b>", S['tdr']),
+        Paragraph(f"<b>{total_kg:,.0f}</b>", S['tdr']),
+    ])
+    t = Table(rows, colWidths=[W*0.24, W*0.12, W*0.10, W*0.06, W*0.10, W*0.10, W*0.10, W*0.12])
+    t.setStyle(_pdf_table_style())
+    story.append(t)
+    story.append(Spacer(1, 4*mm))
+
+    story.append(Paragraph('CONTENEDORES', S['h2']))
+    if cont:
+        pal_occ = f"{cont['pallet_occupancy']*100:.0f}%"
+        wei_occ = f"{cont['weight_occupancy']*100:.0f}%"
+        cont_rows = [
+            ['Recomendación', f"{cont['units']} x {cont['recommended']}"],
+            ['Palés totales', f"{total_pal} (capacidad {cont['pallets_capacity_per_unit']}/cont.)"],
+            ['Ocupación palés', pal_occ],
+            ['Peso total', f"{total_kg:,.0f} kg (capacidad {cont['weight_capacity_per_unit_kg']:,}/cont.)"],
+            ['Ocupación peso', wei_occ],
+        ]
+    else:
+        cont_rows = [['Sin datos logísticos suficientes', '']]
+    ct = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in cont_rows],
+               colWidths=[W*0.35, W*0.65])
+    ct.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(ct)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph('RESUMEN COSTES', S['h2']))
+    product_cost = _num(offer['total_product_eur'])
+    logistic_cost = _num(offer['total_logistic_eur'])
+    total_final = _num(offer['total_final_eur'])
+    fx = _num(offer['fx_rate']) or 1.085
+    cost_rows = [
+        ['Coste mercancía EXW', f"€ {product_cost:,.2f}"],
+        ['Coste logístico', f"€ {logistic_cost:,.2f}"],
+        ['TOTAL €', f"€ {total_final:,.2f}"],
+        ['TOTAL USD (FX {:.3f})'.format(fx), f"$ {total_final * fx:,.2f}"],
+    ]
+    cst = Table([[Paragraph(r[0], S['p']), Paragraph(f"<b>{r[1]}</b>", S['tdr'])] for r in cost_rows],
+                colWidths=[W*0.55, W*0.45])
+    cst.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+        ('BACKGROUND', (0,2), (-1,2), colors.HexColor('#e8e8e8')),
+    ]))
+    story.append(cst)
+
+    # ── PAGE 2: Solicitud Agente Logística ────────────────────────
+    story.append(PageBreak())
+    story.append(Paragraph('SOLICITUD AL AGENTE DE CARGA', S['h1']))
+    story.append(Spacer(1, 2*mm))
+
+    sol_meta = [
+        ['Ref.', offer['offer_number'], 'Fecha', ref_date],
+        ['Cliente/Proyecto', f"{offer['client_name']} — {offer['project_name']}", 'Respuesta', 'A la brevedad'],
+    ]
+    smt = Table([[Paragraph(c, S['p']) for c in row] for row in sol_meta],
+                colWidths=[W*0.12, W*0.38, W*0.12, W*0.38])
+    smt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(smt)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph('MERCANCÍA A TRANSPORTAR', S['h2']))
+    sh = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Ud.', 'Cant.', 'Palés', 'Peso kg']]
+    srows = [sh]
+    for l in lines:
+        pal = int(_num(l.get('pallets_logistic', 0)))
+        kg = _num(l.get('weight_total_kg', 0))
+        qty = _num(l.get('qty_input', l.get('qty_logistic', 0)))
+        srows.append([
+            Paragraph(str(l.get('name', '')), S['td']),
+            Paragraph(str(l.get('sku', '')), S['td']),
+            Paragraph(str(l.get('unit', '')), S['td']),
+            Paragraph(f"{qty:.0f}", S['tdr']),
+            Paragraph(str(pal), S['tdr']),
+            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+        ])
+    st2 = Table(srows, colWidths=[W*0.30, W*0.16, W*0.10, W*0.14, W*0.14, W*0.16])
+    st2.setStyle(_pdf_table_style())
+    story.append(st2)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph('DETALLE LOGÍSTICO', S['h2']))
+    cont_txt = f"{cont['units']} x {cont['recommended']}" if cont else 'Por determinar'
+    det = [
+        ['Contenedores necesarios', cont_txt],
+        ['Peso bruto total', f"{total_kg:,.0f} kg" if total_kg else 'Por determinar'],
+        ['Palés totales', str(total_pal)],
+        ['Origen', 'Tarancón / Valencia (España)'],
+        ['Destino', 'Santo Domingo (Caucedo)'],
+        ['Fecha embarque estimada', 'Por determinar'],
+    ]
+    dt = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in det],
+               colWidths=[W*0.35, W*0.65])
+    dt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(dt)
+    story.append(Spacer(1, 3*mm))
+
+    story.append(Paragraph('SERVICIOS A COTIZAR', S['h2']))
+    servicios = [
+        'Flete terrestre Tarancón → Valencia',
+        'THC origen + despacho de exportación',
+        'Flete marítimo Valencia → Caucedo',
+        'Seguro de transporte',
+        'THC destino + despacho de importación',
+        'Gastos portuarios destino',
+        'Arrastre hasta almacén',
+    ]
+    serv_rows = [[Paragraph(f"{i+1}.", S['tdr']), Paragraph(s, S['p'])] for i, s in enumerate(servicios)]
+    svt = Table(serv_rows, colWidths=[W*0.06, W*0.94])
+    svt.setStyle(TableStyle([
+        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+    ]))
+    story.append(svt)
+    story.append(Spacer(1, 6*mm))
+    story.append(Paragraph('Arias Group Caribe · Orden Logística generada automáticamente', S['small']))
+
+    log_audit(db, offer_id, 'ORDEN_LOG_PDF', f'{num_ol}')
+    db.commit()
+
+    doc.build(story)
+    buffer.seek(0)
+    resp = make_response(buffer.read())
+    resp.headers['Content-Type'] = 'application/pdf'
+    resp.headers['Content-Disposition'] = f'attachment; filename="OrdenLogistica_{num_ol}.pdf"'
+    return resp
+
+
 # ── Bot API endpoints ────────────────────────────────────────────
 @app.route('/api/products', methods=['GET'])
+@bot_token_required
 def api_products():
     """Consulta productos por SKU, nombre o familia"""
     db = get_db()
@@ -2008,6 +2977,7 @@ def api_products():
 
 
 @app.route('/api/families', methods=['GET'])
+@bot_token_required
 def api_families():
     """Lista familias y subfamilias disponibles"""
     db = get_db()
@@ -2021,50 +2991,98 @@ def api_families():
 
 
 @app.route('/api/order', methods=['POST'])
+@bot_token_required
 def api_order():
-    """Crea pedido desde bot"""
+    """Crea pedido desde bot. Usa el mismo motor que /api/save-offer."""
     data = request.get_json()
     if not data:
         return jsonify({'ok': False, 'error': 'No data'}), 400
-    
+
+    db = get_db()
     client_name = data.get('client', 'Bot Pedido')
     items = data.get('items', [])
     if not items:
         return jsonify({'ok': False, 'error': 'No items'}), 400
-    
-    # Build lines from bot items
-    lines = []
-    total = 0
+
+    waste_pct = _num(data.get('wastePct', 0)) / 100
+    margin_pct = _num(data.get('margin', 33)) / 100
+
+    input_lines: list[dict[str, Any]] = []
+    computed: list[dict[str, Any]] = []
+    skipped: list[str] = []
+
     for item in items:
         sku = item.get('sku')
-        qty = item.get('qty', 1)
-        prod = get_db().execute('SELECT sku, name, category, unit, unit_price_eur FROM products WHERE sku = ?', (sku,)).fetchone()
-        if prod:
-            pd = dict(prod)
-            lines.append({'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'], 'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty})
-            total += pd['unit_price_eur'] * qty
-    
-    if not lines:
-        return jsonify({'ok': False, 'error': 'No valid products found'}), 400
-    
-    order_num = data.get('order_number', f'BOT-{datetime.utcnow().strftime("%Y%m%d-%H%M")}')
-    
-    get_db().execute(
+        qty = _num(item.get('qty', 0))
+        if not sku or qty <= 0:
+            continue
+        prod = db.execute('SELECT * FROM products WHERE sku = ?', (sku,)).fetchone()
+        if not prod:
+            skipped.append(sku)
+            continue
+        pd = dict(prod)
+        qty_with_waste = math.ceil(qty * (1 + waste_pct)) if waste_pct > 0 else qty
+        line = compute_line(pd, qty_with_waste)
+        line['qty_original'] = qty
+        computed.append(line)
+        input_lines.append({
+            'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
+            'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
+        })
+
+    if not computed:
+        return jsonify({'ok': False, 'error': 'No valid products found', 'skipped': skipped}), 400
+
+    totals = compute_totals(computed)
+    product_cost = totals['cost_exw_eur']
+    total_final = product_cost / max(1 - margin_pct, 0.01) if margin_pct < 1 else product_cost
+
+    order_num = data.get('order_number') or next_sequence(db, 'PED')
+    container_count = (totals.get('containers') or {}).get('units', 0)
+
+    raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
+    dup = find_offer_by_hash(db, raw_hash)
+    if dup:
+        return jsonify({
+            'ok': False,
+            'error': f'Pedido duplicado (#{dup["offer_number"]})',
+            'existing_order_number': dup['offer_number'],
+        }), 409
+
+    db.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-        (order_num, client_name, data.get('project', 'Pedido Bot'), 5, 33, 1.085,
-         json.dumps(lines), round(total, 2), 0, round(total / (1 - 0.33), 2),
-         'pending', data.get('incoterm', 'EXW'), 0, datetime.utcnow().isoformat())
+         status, incoterm, container_count, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        (order_num, client_name, data.get('project', 'Pedido Bot'),
+         _num(data.get('wastePct', 0)), _num(data.get('margin', 33)), 1.085,
+         json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
+         'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    get_db().commit()
-    
-    return jsonify({'ok': True, 'order_number': order_num, 'total_eur': round(total, 2), 'items': len(lines)})
+    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    save_order_lines(db, offer_id, computed)
+    log_audit(db, offer_id, 'ORDER_CREATED',
+              f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')
+    db.commit()
+
+    return jsonify({
+        'ok': True,
+        'order_number': order_num,
+        'offer_id': offer_id,
+        'total_eur': round(total_final, 2),
+        'product_cost_eur': round(product_cost, 2),
+        'items': len(computed),
+        'total_weight_kg': totals['weight_total_kg'],
+        'pallets_logistic': totals['pallets_logistic'],
+        'container_recommendation': totals.get('containers'),
+        'alerts': dedup_alerts(computed),
+        'skipped_skus': skipped,
+    })
 
 
 @app.route('/api/orders', methods=['GET'])
+@bot_token_required
 def api_orders():
     """Lista pedidos de un cliente"""
     db = get_db()
@@ -2082,6 +3100,7 @@ def api_orders():
 
 
 @app.route('/api/ficha-tecnica/<sku>')
+@bot_token_required
 def api_ficha_tecnica(sku):
     """Devuelve ficha técnica del producto"""
     db = get_db()
@@ -2103,4 +3122,6 @@ if __name__ == '__main__':
     with app.app_context():
         init_db()
         seed_db()
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    host = os.environ.get('FLASK_HOST', '127.0.0.1')
+    port = int(os.environ.get('FLASK_PORT', '5001'))
+    app.run(debug=_debug, host=host, port=port)

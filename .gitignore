@@ -14,8 +14,12 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Database (optional - uncomment if you don't want to track DB)
-# fassa_ops.db
+# Database
+fassa_ops.db
+backups/
+
+# PDFs (demasiado grandes para git)
+docs/*.pdf
 
 # IDE
 .vscode/

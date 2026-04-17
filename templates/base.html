@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Fassa Caribbean Ops{% endblock %}</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; background:#fff; color:#000; }
+    body { font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size:13px; line-height:1.35; }
+    a { color:#0645ad; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    code, pre, .mono, td.num, th.num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    nav { display:flex; gap:0; padding:0; background:#f3f3f3; border-bottom:1px solid #888; }
+    nav a { padding:6px 12px; color:#000; border-right:1px solid #c8c8c8; font-weight:normal; }
+    nav a.active, nav a:hover { background:#e0e0e0; }
+    nav .spacer { flex:1; }
+    nav .user { padding:6px 10px; color:#555; border-left:1px solid #c8c8c8; font-size:12px; }
+    .wrap { padding:12px 16px; max-width:1600px; }
+    h1 { font-size:16px; font-weight:600; margin:0 0 8px 0; }
+    h2 { font-size:14px; font-weight:600; margin:14px 0 6px 0; border-bottom:1px solid #000; padding-bottom:2px; }
+    h3 { font-size:13px; font-weight:600; margin:10px 0 4px 0; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { padding:3px 6px; border:1px solid #888; text-align:left; vertical-align:top; }
+    th { background:#e8e8e8; font-weight:600; font-size:11px; }
+    td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
+    input, select, textarea, button { font:inherit; padding:3px 6px; border:1px solid #888; background:#fff; color:#000; border-radius:0; }
+    input:focus, select:focus, textarea:focus { outline:1px solid #000; }
+    button { background:#f3f3f3; cursor:pointer; }
+    button:hover { background:#e0e0e0; }
+    button[type=submit] { font-weight:600; }
+    form.inline { display:inline; }
+    .row { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:6px; }
+    .grid-2 { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
+    .grid-3 { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:8px; }
+    .card { border:1px solid #888; padding:8px 10px; background:#fafafa; }
+    .kpi { font-size:18px; font-weight:600; font-family: ui-monospace, Menlo, Consolas, monospace; }
+    .muted { color:#666; }
+    .badge { display:inline-block; padding:1px 6px; border:1px solid #888; background:#f3f3f3; font-size:11px; }
+    .flash { padding:4px 8px; background:#fffbd1; border:1px solid #b8a100; margin:6px 0; font-size:12px; }
+    label { font-size:11px; color:#333; display:block; margin-bottom:2px; }
+    hr { border:0; border-top:1px solid #888; margin:10px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    <a href="{{ url_for('crm') }}">Clientes</a>
+    <a href="{{ url_for('quote') }}">Cotización</a>
+    <a href="{{ url_for('presupuestos') }}">Presupuestos</a>
+    <a href="{{ url_for('products') }}">Catálogo</a>
+    <a href="{{ url_for('config') }}">Configuración</a>
+    <span class="spacer"></span>
+    {% if current_user and current_user.is_authenticated %}
+      <span class="user">{{ current_user.username }}</span>
+      <a href="{{ url_for('logout') }}" class="user">salir</a>
+    {% endif %}
+  </nav>
+  <div class="wrap">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>
