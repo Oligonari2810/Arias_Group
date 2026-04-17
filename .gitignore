@@ -28,3 +28,7 @@ docs/*.pdf
 # Env
 .env
 *.env
+
+# Local runtime
+logs/
+run_prod.sh

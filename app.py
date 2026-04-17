@@ -24,7 +24,7 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 import io
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / 'fassa_ops.db'
+DB_PATH = Path(os.environ.get('FASSA_DB_PATH', BASE_DIR / 'fassa_ops.db'))
 
 STAGES = [
     'CLIENTE',
