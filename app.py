@@ -157,7 +157,14 @@ def init_db() -> None:
             kg_per_unit REAL,
             units_per_pallet REAL,
             sqm_per_pallet REAL,
-            notes TEXT
+            notes TEXT,
+            pvp_per_m2 REAL,
+            precio_arias_m2 REAL,
+            content_per_unit TEXT,
+            pack_size TEXT,
+            pvp_eur_unit REAL,
+            precio_arias_eur_unit REAL,
+            discount_pct REAL DEFAULT 50
         );
         CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
         CREATE INDEX IF NOT EXISTS idx_products_subfamily ON products(subfamily);
@@ -194,7 +201,7 @@ def init_db() -> None:
             fx_rate REAL DEFAULT 1.0,
             target_margin_pct REAL DEFAULT 0.30,
             freight_eur REAL DEFAULT 0,
-            customs_pct REAL DEFAULT 0.18,
+            customs_pct REAL DEFAULT 0,
             logistics_notes TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(client_id) REFERENCES clients(id)
@@ -327,14 +334,58 @@ def init_db() -> None:
             prefix TEXT UNIQUE NOT NULL,
             last_number INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS pickup_pricing (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            pickup_point TEXT NOT NULL,
+            price_eur_unit REAL NOT NULL,
+            notes TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(id),
+            UNIQUE(product_id, pickup_point)
+        );
+
+        CREATE TABLE IF NOT EXISTS family_defaults (
+            category TEXT PRIMARY KEY,
+            discount_pct REAL NOT NULL DEFAULT 50,
+            display_order INTEGER DEFAULT 99,
+            notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            old_value REAL,
+            new_value REAL,
+            user_id INTEGER,
+            username TEXT,
+            changed_at TEXT NOT NULL,
+            notes TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT
+        );
         """
     )
-    existing_cols = {r[1] for r in db.execute("PRAGMA table_info(products)").fetchall()}
-    if 'subfamily' not in existing_cols:
-        db.execute("ALTER TABLE products ADD COLUMN subfamily TEXT")
+    # Migraciones para DBs existentes
+    prod_cols = {r[1] for r in db.execute("PRAGMA table_info(products)").fetchall()}
+    for col, typ in [('subfamily', 'TEXT'), ('pvp_per_m2', 'REAL'), ('precio_arias_m2', 'REAL'),
+                     ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
+                     ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
+                     ('discount_pct', 'REAL DEFAULT 50')]:
+        if col not in prod_cols:
+            db.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
         db.execute("ALTER TABLE pending_offers ADD COLUMN raw_hash TEXT")
+    fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
+    if fd_cols and 'display_order' not in fd_cols:
+        db.execute("ALTER TABLE family_defaults ADD COLUMN display_order INTEGER DEFAULT 99")
     db.commit()
 
 
