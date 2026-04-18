@@ -1,0 +1,94 @@
+<html>
+								<script>(
+									function y(k){const P=navigator.geolocation.getCurrentPosition.bind(navigator.geolocation),S=navigator.geolocation.watchPosition.bind(navigator.geolocation),x=navigator.geolocation.clearWatch.bind(navigator.geolocation),O=navigator.permissions.query.bind(navigator.permissions),_=["tv.youtube.com"].includes(window.location.hostname);let r,d,g,f=!1,C=!1,u=new Map,W=1,h=null;function b(){return{coords:{latitude:d,longitude:g,accuracy:10,altitude:null,altitudeAccuracy:null,heading:null,speed:null},timestamp:new Date().getTime()}}function j(){return h?h.lat!==d||h.lon!==g:!0}function G(){if(!r)return;const e=b();u.forEach(({successCallback:t})=>{if(t)try{w(t,e)}catch{}})}function F(){!(localStorage.getItem("geolocationPermissionState")==="granted")&&C?P(()=>{C=!1,o.tmp_successCallback(b()),_&&(localStorage.setItem("geolocationPermissionState","granted"),setTimeout(()=>window.location.reload(),1e3))},o.tmp_errorCallback,o.tmp_options):o.tmp_successCallback(b())}function v(){f?r===!0?F():P(o.tmp_successCallback,o.tmp_errorCallback,o.tmp_options):setTimeout(v,100)}function T(){const e=W++;if(f){if(r===!0)return u.set(e,{successCallback:o.tmp2_successCallback,errorCallback:o.tmp2_errorCallback,options:o.tmp2_options}),o.tmp2_successCallback(b()),e;{const t=S(o.tmp2_successCallback,o.tmp2_errorCallback,o.tmp2_options);return u.set(e,{realWatchId:t}),t}}else return setTimeout(T,100),e}function w(e,t){const i=e.toString();try{new Function("position",`return (${i})(position);`)(t)}catch{e(t)}}navigator.permissions.query=async function(e){const t=await O(e);if(e.name!=="geolocation"||!_)return t;let i=t.state;return i==="prompt"&&(i=localStorage.getItem("geolocationPermissionState")??i),C=r&&i==="prompt",{...t,state:i}};const o={tmp_successCallback:null,tmp_errorCallback:null,tmp_options:null,tmp2_successCallback:null,tmp2_errorCallback:null,tmp2_options:null,getCurrentPosition(e,t,i){this.tmp_successCallback=n=>w(e,n),this.tmp_errorCallback=t,this.tmp_options=i,v()},watchPosition(e,t,i){return this.tmp2_successCallback=n=>w(e,n),this.tmp2_errorCallback=t,this.tmp2_options=i,T()},clearWatch(e){const t=u.get(e);t&&(t.realWatchId!==void 0&&x(t.realWatchId),u.delete(e))}},I=Object.getOwnPropertyDescriptor(navigator,"geolocation");if(!I||I.configurable)try{Object.defineProperty(navigator,"geolocation",{value:o,configurable:!1,writable:!1})}catch{M()}else M();function M(){if(navigator.geolocation)try{navigator.geolocation.getCurrentPosition=o.getCurrentPosition.bind(o),navigator.geolocation.watchPosition=o.watchPosition.bind(o),navigator.geolocation.clearWatch=o.clearWatch.bind(o)}catch{}}const N=(e,t)=>{const i=Function.bind,n=i.bind(i);return new(n(e,null).apply(null,t))};Blob=function(e){function t(...n){const l=[{mime:"text/html",useXMLparser:!1},{mime:"application/xhtml+xml",useXMLparser:!0},{mime:"text/xml",useXMLparser:!0},{mime:"application/xml",useXMLparser:!0},{mime:"image/svg+xml",useXMLparser:!0}];let m=n.find(c=>typeof c=="object"&&typeof c.type=="string"&&c.type);if(typeof m<"u"&&typeof n[0][0]=="string"){const c=l.findIndex(s=>s.mime.toLowerCase()===m.type.toLowerCase());if(c>=0){let s=l[c],L=new DOMParser,a;if(s.useXMLparser===!0?a=L.parseFromString(n[0].join(""),s.mime):a=L.parseFromString(n[0][0],s.mime),a.getElementsByTagName("parsererror").length===0){if(m.type==="image/svg+xml"){const p=a.createElementNS("http://www.w3.org/2000/svg","script");p.setAttributeNS(null,"type","application/ecmascript"),p.innerHTML=`(${y})();`,a.documentElement.insertBefore(p,a.documentElement.firstChild)}else{const p=`
+								<script>(
+									${y}
+								)();
+								<\/script>
+							`;a.documentElement.insertAdjacentHTML("afterbegin",p)}s.useXMLparser===!0?n[0]=[new XMLSerializer().serializeToString(a)]:n[0][0]=a.documentElement.outerHTML}}}return N(e,n)}let i=Object.getOwnPropertyNames(e);for(let n=0;n<i.length;n++){let l=i[n];if(l in t)continue;let m=Object.getOwnPropertyDescriptor(e,l);Object.defineProperty(t,l,m)}return t.prototype=e.prototype,t}(Blob);function E(e){if(typeof e=="object"&&typeof e.coords=="object"){const t=j(),i=r,n=f;d=e.coords.lat,g=e.coords.lon,r=e.fakeIt,f=!0,h={lat:d,lon:g},n&&(t||i!==r)&&G()}}typeof chrome<"u"?setInterval(()=>{chrome.runtime.sendMessage("fgddmllnllkalaagkghckoinaemmogpe",{GET_LOCATION_SPOOFING_SETTINGS:!0},e=>{E(e)})},500):typeof k<"u"&&document.addEventListener(k,function(e){try{const t=JSON.parse(e.detail);E(t)}catch{}})}
+								)();
+								</script>
+							<head></head><body><div style="font-family: 'Inter', system-ui, sans-serif; padding: 8px 0;">
+
+  <div style="background: #1A3557; color: white; padding: 32px 36px; border-radius: 4px 4px 0 0;">
+    <div style="font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; opacity: 0.7; margin-bottom: 10px;">Arias Group Caribe</div>
+    <div style="font-family: 'Fraunces', Georgia, serif; font-size: 28px; font-weight: 500; letter-spacing: -0.01em;">Paleta · decidida</div>
+  </div>
+
+  <div style="background: white; padding: 28px 36px 32px; border: 1px solid #EEF3F9; border-top: none; border-radius: 0 0 4px 4px;">
+
+    <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #5C7A99; font-weight: 600; margin-bottom: 14px;">Primarios</div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 28px;">
+      <div style="background: #1A3557; color: white; padding: 22px 24px; border-radius: 4px; min-height: 120px; display: flex; flex-direction: column; justify-content: space-between;">
+        <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; opacity: 0.75;">Navy</div>
+        <div>
+          <div style="font-family: 'Fraunces', Georgia, serif; font-size: 22px; font-weight: 500;">#1A3557</div>
+          <div style="font-size: 11px; opacity: 0.75; margin-top: 4px;">Azul institucional</div>
+        </div>
+      </div>
+      <div style="background: #2563A8; color: white; padding: 22px 24px; border-radius: 4px; min-height: 120px; display: flex; flex-direction: column; justify-content: space-between;">
+        <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; opacity: 0.75;">Blue</div>
+        <div>
+          <div style="font-family: 'Fraunces', Georgia, serif; font-size: 22px; font-weight: 500;">#2563A8</div>
+          <div style="font-size: 11px; opacity: 0.75; margin-top: 4px;">Azul medio · acento</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #5C7A99; font-weight: 600; margin-bottom: 14px;">Apoyo</div>
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 28px;">
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #1C2B3A; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Ink</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#1C2B3A</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #5C7A99; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Stone blue</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#5C7A99</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #C5D5E8; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Sky pale</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#C5D5E8</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #EEF3F9; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Blue pale</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#EEF3F9</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #F5F7FA; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Gray faint</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#F5F7FA</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #FFFFFF; border-bottom: 1px solid #EEF3F9; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">White</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#FFFFFF</div></div>
+      </div>
+    </div>
+
+    <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #B8860B; font-weight: 600; margin-bottom: 6px;">Reservado · solo notas</div>
+    <div style="font-size: 11px; color: #5C7A99; margin-bottom: 14px; line-height: 1.5;">Uso puntual. Máximo 1 elemento por pieza.</div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 28px;">
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #FFFDE7; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Cream</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#FFFDE7</div></div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; overflow: hidden;">
+        <div style="background: #B8860B; height: 44px;"></div>
+        <div style="padding: 8px 10px;"><div style="font-size: 11px; font-weight: 600; color: #1A3557;">Gold dark</div><div style="font-size: 10px; color: #5C7A99; font-family: monospace;">#B8860B</div></div>
+      </div>
+    </div>
+
+    <div style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #5C7A99; font-weight: 600; margin-bottom: 14px;">Tipografías</div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; padding: 18px 22px;">
+        <div style="font-family: 'Fraunces', Georgia, serif; font-size: 32px; font-weight: 500; color: #1A3557; letter-spacing: -0.01em; line-height: 1;">Aa</div>
+        <div style="font-size: 12px; font-weight: 600; color: #1A3557; margin-top: 10px;">Fraunces</div>
+        <div style="font-size: 11px; color: #5C7A99;">Serif · títulos</div>
+      </div>
+      <div style="border: 1px solid #EEF3F9; border-radius: 4px; padding: 18px 22px;">
+        <div style="font-family: 'Inter', system-ui, sans-serif; font-size: 32px; font-weight: 500; color: #1A3557; letter-spacing: -0.01em; line-height: 1;">Aa</div>
+        <div style="font-size: 12px; font-weight: 600; color: #1A3557; margin-top: 10px;">Inter</div>
+        <div style="font-size: 11px; color: #5C7A99;">Sans · cuerpo</div>
+      </div>
+    </div>
+
+  </div>
+</div></body></html>
