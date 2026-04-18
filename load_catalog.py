@@ -41,54 +41,86 @@ if EXCEL_PATH is None:
 
 print(f"📂 Excel: {EXCEL_PATH}")
 
-conn = sqlite3.connect(DB_PATH)
-db = conn.cursor()
-db.execute("DELETE FROM system_components")
-db.execute("DELETE FROM products")
-conn.commit()
-print("🧹 Catálogo anterior eliminado.")
+# Backup defensivo antes de tocar la DB
+import shutil
+from datetime import datetime
+backup_dir = BASE_DIR / 'backups'
+backup_dir.mkdir(exist_ok=True)
+ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+backup_path = backup_dir / f'fassa_ops_pre_catalog_{ts}.db'
+shutil.copy2(DB_PATH, backup_path)
+print(f"💾 Backup creado: {backup_path.name}")
 
-wb = openpyxl.load_workbook(EXCEL_PATH)
+# Leer + validar Excel ANTES de tocar la DB
+wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
 ws = wb['PRODUCT']
 
-loaded = 0
+parsed_rows = []
+errors = []
 for r in range(3, ws.max_row + 1):
     familia = ws.cell(row=r, column=1).value
     if not familia:
         continue
-    
+
     sku = ws.cell(row=r, column=4).value
     name = ws.cell(row=r, column=3).value
     unit_sale = ws.cell(row=r, column=15).value
     unit_price = ws.cell(row=r, column=17).value
     units_pallet = ws.cell(row=r, column=12).value
     sqm_pallet = ws.cell(row=r, column=13).value
-    
+
     if not sku or not name:
         continue
-    
-    unit = str(unit_sale).strip() if unit_sale else 'ud'
-    price = float(unit_price) if unit_price else 0
-    if isinstance(units_pallet, str) and units_pallet.startswith('='):
-        up = None
-    else:
-        up = float(units_pallet) if units_pallet else None
-    # Skip formula cells (start with =)
-    if isinstance(sqm_pallet, str) and sqm_pallet.startswith('='):
-        sp = None
-    else:
-        sp = float(sqm_pallet) if sqm_pallet else None
-    
-    db.execute(
-        """INSERT OR REPLACE INTO products
-        (sku, name, category, source_catalog, unit, unit_price_eur,
-         units_per_pallet, sqm_per_pallet)
-        VALUES (?, ?, ?, 'Gypsotech Abr2026', ?, ?, ?, ?)""",
-        (str(sku), str(name), str(familia), unit, price, up, sp)
-    )
-    loaded += 1
 
-conn.commit()
-print(f"✅ {loaded} productos cargados")
-print(f"📂 DB: {DB_PATH}")
-conn.close()
+    try:
+        unit = str(unit_sale).strip() if unit_sale else 'ud'
+        price = float(unit_price) if unit_price else 0
+        if isinstance(units_pallet, str) and units_pallet.startswith('='):
+            up = None
+        else:
+            up = float(units_pallet) if units_pallet else None
+        if isinstance(sqm_pallet, str) and sqm_pallet.startswith('='):
+            sp = None
+        else:
+            sp = float(sqm_pallet) if sqm_pallet else None
+        parsed_rows.append((str(sku), str(name), str(familia), unit, price, up, sp))
+    except (ValueError, TypeError) as e:
+        errors.append(f'Fila {r} (SKU {sku}): {e}')
+
+if errors:
+    print('❌ Errores de parseo — nada se ha escrito en la DB:')
+    for e in errors[:10]:
+        print(f'   · {e}')
+    sys.exit(1)
+
+if not parsed_rows:
+    print('❌ 0 filas válidas en el Excel — abortando sin tocar la DB.')
+    sys.exit(1)
+
+print(f"✓ {len(parsed_rows)} productos validados. Aplicando cambios...")
+
+# Transacción atómica: o se aplica todo, o nada
+conn = sqlite3.connect(DB_PATH)
+try:
+    db = conn.cursor()
+    db.execute('BEGIN')
+    db.execute("DELETE FROM system_components")
+    db.execute("DELETE FROM products")
+    for row in parsed_rows:
+        db.execute(
+            """INSERT INTO products
+            (sku, name, category, source_catalog, unit, unit_price_eur,
+             units_per_pallet, sqm_per_pallet)
+            VALUES (?, ?, ?, 'Gypsotech Abr2026', ?, ?, ?, ?)""",
+            row
+        )
+    conn.commit()
+    print(f"✅ {len(parsed_rows)} productos cargados")
+    print(f"📂 DB: {DB_PATH}")
+except Exception as e:
+    conn.rollback()
+    print(f"❌ Error durante la carga: {e}")
+    print(f"   Rollback aplicado. Backup disponible en: {backup_path}")
+    sys.exit(1)
+finally:
+    conn.close()

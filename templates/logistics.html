@@ -44,6 +44,7 @@
         <option value="EXW">EXW</option>
         <option value="FOB">FOB</option>
         <option value="CIF">CIF</option>
+        <option value="DAP">DAP</option>
       </select>
     </div>
     <div><label>Ruta marítima</label>
@@ -70,7 +71,8 @@
 
   {% else %}
   <div style="margin-top:6px;">
-    <a href="/api/offer-pdf/{{ offer['id'] }}" target="_blank">Descargar PDF</a>
+    <a href="/api/offer-pdf/{{ offer['id'] }}" target="_blank">Ver PDF</a>
+    · <a href="/api/offer-pdf/{{ offer['id'] }}?download=1">Descargar</a>
     · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;">borrar</a>
     · <span class="muted">Incoterm: {{ offer['incoterm'] }}{% if offer['container_count'] %} · {{ offer['container_count'] }} cont.{% endif %}</span>
   </div>

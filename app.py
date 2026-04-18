@@ -18,7 +18,7 @@ import openpyxl
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, PageBreak, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 import io
@@ -1552,19 +1552,8 @@ def quote_pdf(project_id: int, quote_id: int):
     W = A4[0] - 40*mm  # usable width
 
     # ── HEADER BLOCK ──────────────────────────────────────────────
-    header_data = [[
-        Paragraph('FASSA – ARIAS GROUP', S['brand']),
-        Paragraph(f"<b>OFERTA TÉCNICA</b>", sty('ot', fontSize=9, textColor=NAVY, fontName='Helvetica-Bold', alignment=TA_RIGHT)),
-    ]]
-    header_tbl = Table(header_data, colWidths=[W*0.5, W*0.5])
-    header_tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), NAVY),
-        ('TOPPADDING',    (0,0),(-1,-1), 10),
-        ('BOTTOMPADDING', (0,0),(-1,-1), 10),
-        ('LEFTPADDING',   (0,0),(0,0), 10),
-        ('RIGHTPADDING',  (-1,-1),(-1,-1), 10),
-    ]))
-    story.append(header_tbl)
+    for el in _ag_unified_header('OFERTA TÉCNICA', W):
+        story.append(el)
     story.append(Spacer(1, 5*mm))
 
     # ── REFERENCE ROW ─────────────────────────────────────────────
@@ -1746,7 +1735,8 @@ def quote_pdf(project_id: int, quote_id: int):
     filename = f"Oferta_{quote['version_label']}_{project['name'].replace(' ','_')}.pdf"
     response = make_response(buffer.read())
     response.headers['Content-Type'] = 'application/pdf'
-    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    disp = 'attachment' if request.args.get('download') else 'inline'
+    response.headers['Content-Disposition'] = f'{disp}; filename="{filename}"'
     return response
 
 
@@ -2350,6 +2340,20 @@ def offer_pdf(offer_id):
     fx = offer['fx_rate'] or 1.085
     total_usd = total_eur * fx
     ref_date = offer['created_at'][:10]
+
+    client_row = db.execute(
+        'SELECT name, company, address, country, rnc FROM clients WHERE name = ? OR company = ? LIMIT 1',
+        (offer['client_name'], offer['client_name'])
+    ).fetchone()
+    project_row = db.execute(
+        'SELECT location FROM projects WHERE name = ? LIMIT 1',
+        (offer['project_name'],)
+    ).fetchone()
+    client_company = (client_row['company'] if client_row and client_row['company'] else offer['client_name'])
+    client_address = (client_row['address'] if client_row and client_row['address'] else '')
+    client_country = (client_row['country'] if client_row and client_row['country'] else 'República Dominicana')
+    client_rnc = (client_row['rnc'] if client_row and client_row['rnc'] else '—')
+    location_text = (project_row['location'] if project_row and project_row['location'] else (client_address or client_country))
     
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -2358,12 +2362,25 @@ def offer_pdf(offer_id):
         topMargin=15*mm, bottomMargin=15*mm,
     )
     
-    NAVY = colors.HexColor('#0D1B4B')
-    GOLD = colors.HexColor('#C9A84C')
-    LGRAY = colors.HexColor('#F2F0EB')
-    MGRAY = colors.HexColor('#999999')
+    # Paleta oficial Arias Group (de la factura proforma real)
+    NAVY = colors.HexColor('#1A3557')          # primario: headers, títulos, marca
+    BLUE = colors.HexColor('#2563A8')          # acento: enlaces, subheaders, líneas
+    BLUE_PALE = colors.HexColor('#EEF3F9')     # fondo tabla
+    GRAY_FAINT = colors.HexColor('#F5F7FA')    # fondo alterno
+    SKY_PALE = colors.HexColor('#C5D5E8')      # divisor sutil
+    INK = colors.HexColor('#1C2B3A')           # texto cuerpo
+    STONE = colors.HexColor('#5C7A99')         # labels/meta
+    CREAM = colors.HexColor('#FFFDE7')         # fondo nota
+    GOLD_DARK = colors.HexColor('#B8860B')     # acento SOLO para notas puntuales
     WHITE = colors.white
-    SECTION_BG = colors.HexColor('#1B2A4A')
+    # Aliases para código existente (no romper nada)
+    GOLD = BLUE                                # GOLD ya no se usa como acento general → ahora es BLUE
+    GOLD_SOFT = BLUE_PALE
+    BONE = BLUE_PALE
+    LGRAY = BLUE_PALE
+    MGRAY = STONE
+    NAVY_DEEP = NAVY
+    SECTION_BG = NAVY
     
     styles = getSampleStyleSheet()
     def S(name, parent='Normal', **kw):
@@ -2374,12 +2391,12 @@ def offer_pdf(offer_id):
         'subtitle': S('sub', fontSize=9, textColor=NAVY, fontName='Helvetica', leading=12),
         'systems': S('sys', fontSize=8, textColor=MGRAY, fontName='Helvetica', leading=10),
         'h1': S('h1', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', leading=11),
-        'p': S('p', fontSize=7.5, textColor=colors.HexColor('#333333'), fontName='Helvetica', leading=11),
+        'p': S('p', fontSize=7.5, textColor=INK, fontName='Helvetica', leading=11),
         'small': S('small', fontSize=7, textColor=MGRAY, fontName='Helvetica', leading=9),
         'bold': S('bold', fontSize=7.5, textColor=NAVY, fontName='Helvetica-Bold', leading=11),
         'right': S('right', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_RIGHT, leading=11),
         'center': S('center', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_CENTER, leading=11),
-        'cond': S('cond', fontSize=7, textColor=colors.HexColor('#555555'), fontName='Helvetica', leading=10),
+        'cond': S('cond', fontSize=7, textColor=INK, fontName='Helvetica', leading=10),
         'total_l': S('tl', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
         'total_v': S('tv', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
         'footer': S('foot', fontSize=6, textColor=MGRAY, fontName='Helvetica', alignment=TA_CENTER),
@@ -2395,9 +2412,20 @@ def offer_pdf(offer_id):
     # PAGE 1: OFERTA COMERCIAL
     # ════════════════════════════════════════════════════
     
-    # Header bar
+    # Header: logo sobre fondo blanco + barra navy con texto
+    logo_path = str(BASE_DIR / 'static' / 'logos' / 'arias_group_logo_1000px.png')
+    if os.path.exists(logo_path):
+        logo_row = Table([[RLImage(logo_path, width=55*mm, height=20*mm, kind='proportional'), '']],
+                         colWidths=[W*0.4, W*0.6])
+        logo_row.setStyle(TableStyle([
+            ('LEFTPADDING', (0,0), (0,0), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        story.append(logo_row)
     hdr = [[
-        Paragraph('ARIAS GROUP CARIBE', sty['brand']),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
         Paragraph('PROPUESTA TÉCNICA Y COMERCIAL', S('pt', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr_tbl = Table(hdr, colWidths=[W*0.3, W*0.7])
@@ -2406,6 +2434,7 @@ def offer_pdf(offer_id):
         ('TOPPADDING', (0,0), (-1,-1), 10),
         ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ('LEFTPADDING', (0,0), (0,0), 14),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
     story.append(hdr_tbl)
     story.append(Spacer(1, 2*mm))
@@ -2416,10 +2445,12 @@ def offer_pdf(offer_id):
     ref_data = [
         [Paragraph('Fecha de emisión', sty['ref_label']), Paragraph(ref_date, sty['ref_value']),
          Paragraph('N° de referencia', sty['ref_label']), Paragraph(offer['offer_number'], sty['ref_value'])],
-        [Paragraph('Cliente / Destinatario', sty['ref_label']), Paragraph(offer['client_name'], sty['ref_value']),
+        [Paragraph('Cliente / Contacto', sty['ref_label']), Paragraph(offer['client_name'], sty['ref_value']),
          Paragraph('Proyecto', sty['ref_label']), Paragraph(offer['project_name'], sty['ref_value'])],
-        [Paragraph('SRL / Empresa', sty['ref_label']), Paragraph('Arias Group Caribe SRL', sty['ref_value']),
-         Paragraph('Ubicación', sty['ref_label']), Paragraph('', sty['ref_value'])],
+        [Paragraph('Empresa', sty['ref_label']), Paragraph(client_company, sty['ref_value']),
+         Paragraph('Ubicación', sty['ref_label']), Paragraph(location_text, sty['ref_value'])],
+        [Paragraph('RNC', sty['ref_label']), Paragraph(client_rnc, sty['ref_value']),
+         Paragraph('Dirección', sty['ref_label']), Paragraph(client_address or '—', sty['ref_value'])],
         [Paragraph('Sistema ofertado', sty['ref_label']), Paragraph('Suministro completo', sty['ref_value']),
          Paragraph('Incoterm', sty['ref_label']), Paragraph(offer['incoterm'] or 'EXW', sty['ref_value'])],
     ]
@@ -2442,45 +2473,38 @@ def offer_pdf(offer_id):
     story.append(Paragraph('Alcance específico: Suministro de materiales — ver detalle hoja 2', sty['p']))
     story.append(Spacer(1, 4*mm))
     
-    # Section 2
-    story.append(Paragraph('2.  OFERTA ECONÓMICA', sty['h1']))
+    # Section 2 — RESUMEN (sin listar líneas; detalle completo va en Hoja 2)
+    story.append(Paragraph('2.  RESUMEN ECONÓMICO', sty['h1']))
     story.append(Spacer(1, 2*mm))
-    econ_data = [[
-        Paragraph('<b>Descripción</b>', sty['center']),
-        Paragraph('<b>Sistema / Referencia</b>', sty['center']),
-        Paragraph('<b>Incoterm</b>', sty['center']),
-        Paragraph('<b>Divisa</b>', sty['center']),
-        Paragraph('<b>Valor total</b>', sty['center']),
-    ]]
-    for line in lines:
-        qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
-        sub = line['price'] * qty_waste
-        econ_data.append([
-            Paragraph(line['name'][:35], sty['p']),
-            Paragraph(line['sku'], sty['center']),
-            Paragraph(offer['incoterm'] or 'EXW', sty['center']),
-            Paragraph('USD', sty['center']),
-            Paragraph(f"$ {sub * fx:,.2f}", sty['right']),
-        ])
-    econ_data.append(['', '', '',
-        Paragraph('<b>TOTAL USD</b>', sty['bold']),
-        Paragraph(f"<b>$ {total_usd:,.2f}</b>", sty['right']),
-    ])
-    econ_tbl = Table(econ_data, colWidths=[W*0.35, W*0.2, W*0.15, W*0.12, W*0.18])
+    n_lineas = len(lines)
+    total_prod_eur = offer['total_product_eur'] or 0
+    total_log_eur = offer['total_logistic_eur'] or 0
+    econ_data = [
+        [Paragraph('<b>Concepto</b>', sty['center']), Paragraph('<b>Importe</b>', sty['center'])],
+        [Paragraph(f'Nº de referencias incluidas', sty['p']), Paragraph(f'{n_lineas}', sty['right'])],
+        [Paragraph('Subtotal productos (EUR)', sty['p']), Paragraph(f'€ {total_prod_eur:,.2f}', sty['right'])],
+        [Paragraph('Logística (EUR)', sty['p']), Paragraph(f'€ {total_log_eur:,.2f}', sty['right'])],
+        [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (EUR)</b>', sty['bold']), Paragraph(f'<b>€ {total_eur:,.2f}</b>', sty['right'])],
+        [Paragraph(f'Tipo de cambio EUR/USD', sty['p']), Paragraph(f'{fx:.4f}', sty['right'])],
+        [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (USD)</b>', sty['bold']), Paragraph(f'<b>$ {total_usd:,.2f}</b>', sty['right'])],
+    ]
+    econ_tbl = Table(econ_data, colWidths=[W*0.65, W*0.35])
     econ_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-        ('BACKGROUND', (0,-1), (-1,-1), LGRAY),
-        ('LINEBELOW', (0,0), (-1,-2), 0.5, colors.HexColor('#CCCCCC')),
+        ('BACKGROUND', (0,-1), (-1,-1), GOLD_SOFT),
+        ('BACKGROUND', (0,-3), (-1,-3), BONE),
         ('LINEABOVE', (0,-1), (-1,-1), 1, GOLD),
-        ('TOPPADDING', (0,0), (-1,-1), 3),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
-        ('LEFTPADDING', (0,0), (-1,-1), 4),
-        ('RIGHTPADDING', (0,0), (-1,-1), 4),
+        ('LINEABOVE', (0,-3), (-1,-3), 0.5, GOLD),
+        ('LINEBELOW', (0,0), (-1,-2), 0.3, colors.HexColor('#CCCCCC')),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
     ]))
     story.append(econ_tbl)
     story.append(Spacer(1, 2*mm))
-    story.append(Paragraph('* Precios en USD. Sujeto a confirmación de pedido formal. No incluye impuestos locales ni gastos de aduana en destino. Ver detalle completo en Hoja 2.', sty['small']))
+    story.append(Paragraph('* Importes sujetos a confirmación de pedido formal. No incluyen impuestos locales ni gastos de aduana en destino. Detalle línea-a-línea en Hoja 2.', sty['small']))
     story.append(Spacer(1, 4*mm))
     
     # Section 3
@@ -2531,8 +2555,8 @@ def offer_pdf(offer_id):
     story.append(Spacer(1, 4*mm))
     
     sig_data = [[
-        Paragraph('<b>ARIAS GROUP CARIBE SRL</b><br/><br/><br/><br/>___________________________<br/>Director Comercial<br/>Fecha: _______________', sty['sig']),
-        Paragraph(f'<b>{offer["client_name"]}</b><br/><br/><br/><br/>___________________________<br/>Firma y sello<br/>Fecha: _______________', sty['sig']),
+        Paragraph('<b>ARIAS GROUP CARIBE SRL</b><br/>RNC: 1-33-63109-1<br/>Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203<br/>Santo Domingo, D.N.<br/><br/>___________________________<br/>Director Comercial<br/>Fecha: _______________', sty['sig']),
+        Paragraph(f'<b>{client_company}</b><br/>RNC: {client_rnc}<br/>{offer["client_name"]}<br/><br/>___________________________<br/>Firma y sello<br/>Fecha: _______________', sty['sig']),
     ]]
     sig_tbl = Table(sig_data, colWidths=[W*0.5, W*0.5])
     sig_tbl.setStyle(TableStyle([
@@ -2549,9 +2573,19 @@ def offer_pdf(offer_id):
     # PAGE 2: DETALLE DE PRODUCTOS
     # ════════════════════════════════════════════════════
     
-    # Header bar
+    # Header página 2: logo blanco + barra navy
+    if os.path.exists(logo_path):
+        logo_row2 = Table([[RLImage(logo_path, width=55*mm, height=20*mm, kind='proportional'), '']],
+                          colWidths=[W*0.4, W*0.6])
+        logo_row2.setStyle(TableStyle([
+            ('LEFTPADDING', (0,0), (0,0), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        story.append(logo_row2)
     hdr2 = [[
-        Paragraph('ARIAS GROUP CARIBE', sty['brand']),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h2', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
         Paragraph('DETALLE DE PRODUCTOS', S('dp', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr2_tbl = Table(hdr2, colWidths=[W*0.3, W*0.7])
@@ -2560,6 +2594,7 @@ def offer_pdf(offer_id):
         ('TOPPADDING', (0,0), (-1,-1), 10),
         ('BOTTOMPADDING', (0,0), (-1,-1), 10),
         ('LEFTPADDING', (0,0), (0,0), 14),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
     story.append(hdr2_tbl)
     story.append(Spacer(1, 2*mm))
@@ -2579,12 +2614,15 @@ def offer_pdf(offer_id):
     ]]
     total_pal = 0
     total_m2 = 0
-    for line in lines:
+    total_kg = 0
+    # Agregar líneas con mismo SKU para la tabla de detalle (evita duplicados)
+    detail_lines = _aggregate_lines_by_sku(lines)
+    for line in detail_lines:
         qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
         sub = line['price'] * qty_waste
-        
-        # Lookup product for pallet/m2 data
-        prod = db.execute('SELECT units_per_pallet, sqm_per_pallet FROM products WHERE sku = ?', 
+
+        # Lookup product for pallet/m2/kg data
+        prod = db.execute('SELECT units_per_pallet, sqm_per_pallet, kg_per_unit FROM products WHERE sku = ?',
                          (line['sku'],)).fetchone()
         pal = 0
         m2 = 0
@@ -2593,17 +2631,19 @@ def offer_pdf(offer_id):
             total_pal += pal
         if prod and prod['sqm_per_pallet'] and prod['units_per_pallet'] and prod['units_per_pallet'] > 0:
             m2_per_unit = prod['sqm_per_pallet'] / prod['units_per_pallet']
-            m2 = round(qty_waste * m2_per_unit, 2)
+            m2 = qty_waste * m2_per_unit
             total_m2 += m2
-        
+        if prod and prod['kg_per_unit']:
+            total_kg += qty_waste * prod['kg_per_unit']
+
         prod_data.append([
             Paragraph(line['name'], sty['p']),
             Paragraph(line['sku'], sty['center']),
             Paragraph(line.get('unit', 'ud'), sty['center']),
-            Paragraph(str(qty_waste), sty['center']),
+            Paragraph(f'{qty_waste:,}', sty['center']),
             Paragraph(str(pal) if pal else '—', sty['center']),
-            Paragraph(f'{m2:.2f}' if m2 else '—', sty['center']),
-            Paragraph(f"€ {line['price']:.2f}", sty['right']),
+            Paragraph(f'{m2:,.0f}' if m2 else '—', sty['center']),
+            Paragraph(f"€ {line['price']:,.2f}", sty['right']),
             Paragraph(f"€ {sub:,.2f}", sty['right']),
         ])
     
@@ -2616,12 +2656,12 @@ def offer_pdf(offer_id):
         Paragraph(f"<b>$ {total_usd:,.2f} USD</b>", sty['right']),
     ])
     
-    prod_tbl = Table(prod_data, colWidths=[W*0.3, W*0.13, W*0.07, W*0.1, W*0.08, W*0.07, W*0.12, W*0.13])
+    prod_tbl = Table(prod_data, colWidths=[W*0.30, W*0.14, W*0.06, W*0.09, W*0.06, W*0.10, W*0.11, W*0.14])
     prod_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-        ('BACKGROUND', (0,-2), (-1,-1), LGRAY),
-        ('BACKGROUND', (0,-3), (-1,-3), colors.HexColor('#E8E8E8')),
+        ('BACKGROUND', (0,-2), (-1,-1), GOLD_SOFT),
+        ('BACKGROUND', (0,-3), (-1,-3), BONE),
         ('LINEBELOW', (0,0), (-1,-4), 0.3, colors.HexColor('#CCCCCC')),
         ('LINEABOVE', (0,-3), (-1,-3), 1, GOLD),
         ('TOPPADDING', (0,0), (-1,-1), 3),
@@ -2640,10 +2680,12 @@ def offer_pdf(offer_id):
          Paragraph('<b>Puerto destino</b>', sty['bold']), Paragraph('Puerto Caucedo, R. Dominicana', sty['p'])],
         [Paragraph('<b>Tipo contenedor</b>', sty['bold']), Paragraph("40' Standard", sty['p']),
          Paragraph('<b>Nº contenedores</b>', sty['bold']), Paragraph(str(offer['container_count'] or 0), sty['p'])],
-        [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(str(total_pal) if total_pal else '—', sty['p']),
-         Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'— kg ({total_m2:.1f} m²)', sty['p'])],
-        [Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(offer['incoterm'] or 'EXW', sty['p']),
-         Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p'])],
+        [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(f'{total_pal:,}' if total_pal else '—', sty['p']),
+         Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'{total_kg:,.0f} kg' if total_kg else '—', sty['p'])],
+        [Paragraph('<b>M² totales</b>', sty['bold']), Paragraph(f'{total_m2:,.0f} m²' if total_m2 else '—', sty['p']),
+         Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(offer['incoterm'] or 'EXW', sty['p'])],
+        [Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p']),
+         Paragraph('', sty['p']), Paragraph('', sty['p'])],
     ]
     log_tbl = Table(log_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
     log_tbl.setStyle(TableStyle([
@@ -2656,48 +2698,129 @@ def offer_pdf(offer_id):
     ]))
     story.append(log_tbl)
     story.append(Spacer(1, 6*mm))
-    story.append(Paragraph('Arias Group Caribe SRL  ·  Distribución técnica Fassa Bortolo  ·  República Dominicana', sty['footer']))
+    story.append(Paragraph('Arias Group Caribe SRL  ·  RNC 1-33-63109-1  ·  Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203, Santo Domingo, D.N.  ·  Distribución técnica Fassa Bortolo', sty['footer']))
     
     doc.build(story)
     buffer.seek(0)
     
     resp = make_response(buffer.read())
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = f'attachment; filename="Presupuesto_{offer["offer_number"]}.pdf"'
+    disp = 'attachment' if request.args.get('download') else 'inline'
+    resp.headers['Content-Disposition'] = f'{disp}; filename="Presupuesto_{offer["offer_number"]}.pdf"'
     return resp
 
 
 # ── PDF helpers (shared styles) ──────────────────────────────────
+
+# Paleta oficial Arias Group (compartida por todos los PDFs)
+AG_NAVY = colors.HexColor('#1A3557')       # primario
+AG_BLUE = colors.HexColor('#2563A8')       # acento
+AG_BLUE_PALE = colors.HexColor('#EEF3F9')  # fondo tabla
+AG_GRAY_FAINT = colors.HexColor('#F5F7FA') # fondo alterno
+AG_SKY_PALE = colors.HexColor('#C5D5E8')   # divisor
+AG_INK = colors.HexColor('#1C2B3A')        # texto
+AG_STONE = colors.HexColor('#5C7A99')      # labels
+AG_GOLD_DARK = colors.HexColor('#B8860B')  # solo notas
+
 
 def _pdf_styles():
     styles = getSampleStyleSheet()
     def s(name, parent='Normal', **kw):
         return ParagraphStyle(name, parent=styles[parent], **kw)
     return {
-        'h1':    s('_h1', fontSize=14, fontName='Helvetica-Bold', spaceAfter=4),
-        'h2':    s('_h2', fontSize=10, fontName='Helvetica-Bold', spaceBefore=8, spaceAfter=2),
-        'p':     s('_p',  fontSize=8, leading=10),
-        'small': s('_sm', fontSize=7, leading=9, textColor=colors.HexColor('#555555')),
-        'right': s('_rt', fontSize=8, leading=10, alignment=TA_RIGHT),
+        'h1':    s('_h1', fontSize=14, fontName='Helvetica-Bold', textColor=AG_NAVY, spaceAfter=4),
+        'h2':    s('_h2', fontSize=10, fontName='Helvetica-Bold', textColor=AG_NAVY, spaceBefore=8, spaceAfter=2),
+        'p':     s('_p',  fontSize=8, leading=10, textColor=AG_INK),
+        'small': s('_sm', fontSize=7, leading=9, textColor=AG_STONE),
+        'right': s('_rt', fontSize=8, leading=10, alignment=TA_RIGHT, textColor=AG_INK),
         'th':    s('_th', fontSize=7, fontName='Helvetica-Bold', textColor=colors.white),
-        'td':    s('_td', fontSize=7, leading=9),
-        'tdr':   s('_tdr', fontSize=7, leading=9, alignment=TA_RIGHT),
+        'td':    s('_td', fontSize=7, leading=9, textColor=AG_INK),
+        'tdr':   s('_tdr', fontSize=7, leading=9, alignment=TA_RIGHT, textColor=AG_INK),
     }
 
 
 def _pdf_table_style():
-    BG = colors.HexColor('#333333')
     return TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), BG),
+        ('BACKGROUND', (0, 0), (-1, 0), AG_NAVY),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTSIZE', (0, 0), (-1, -1), 7),
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ('LEFTPADDING', (0, 0), (-1, -1), 4),
         ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#999999')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('LINEBELOW', (0, 0), (-1, 0), 2, AG_BLUE),
+        ('GRID', (0, 0), (-1, -1), 0.3, AG_SKY_PALE),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, AG_GRAY_FAINT]),
     ])
+
+
+def _ag_unified_header(title_text, W, logo_width_mm=55):
+    """Header unificado para todos los PDFs Arias: logo blanco + barra navy con título en oro+blanco."""
+    logo_path = str(BASE_DIR / 'static' / 'logos' / 'arias_group_logo_1000px.png')
+    elements = []
+    if os.path.exists(logo_path):
+        logo_row = Table(
+            [[RLImage(logo_path, width=logo_width_mm*mm, height=20*mm, kind='proportional'), '']],
+            colWidths=[W*0.4, W*0.6]
+        )
+        logo_row.setStyle(TableStyle([
+            ('LEFTPADDING', (0,0), (0,0), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        elements.append(logo_row)
+    hdr = [[
+        Paragraph('<b>ARIAS GROUP CARIBE</b>', ParagraphStyle(
+            'brand_hdr', fontSize=10, textColor=colors.white, fontName='Helvetica-Bold', leading=12)),
+        Paragraph(f'<b>{title_text}</b>', ParagraphStyle(
+            'title_hdr', fontSize=11, textColor=colors.white, fontName='Helvetica-Bold', alignment=TA_CENTER, leading=13)),
+    ]]
+    hdr_tbl = Table(hdr, colWidths=[W*0.35, W*0.65])
+    hdr_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), AG_NAVY),
+        ('TOPPADDING', (0,0), (-1,-1), 10),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+        ('LEFTPADDING', (0,0), (0,0), 14),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    elements.append(hdr_tbl)
+    return elements
+
+
+def _ag_unified_footer():
+    """Footer único para todos los PDFs Arias."""
+    style = ParagraphStyle(
+        'ag_foot', fontSize=6, textColor=AG_STONE, fontName='Helvetica',
+        alignment=TA_CENTER, leading=8
+    )
+    return Paragraph(
+        'Arias Group Caribe SRL  ·  RNC 1-33-63109-1  ·  '
+        'Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203, Santo Domingo, D.N.  ·  '
+        'Distribuidor técnico Fassa Bortolo',
+        style
+    )
+
+
+def _aggregate_lines_by_sku(lines):
+    """Agrupa líneas con el mismo SKU sumando cantidades. Mantiene el resto de datos del primero."""
+    aggregated = {}
+    for l in lines:
+        sku = l.get('sku', '')
+        if not sku:
+            continue
+        if sku in aggregated:
+            existing = aggregated[sku]
+            qty_keys = ['qty', 'qty_input', 'qty_logistic']
+            for k in qty_keys:
+                if k in l and l.get(k) is not None:
+                    existing[k] = _num(existing.get(k, 0)) + _num(l.get(k, 0))
+            for k in ('pallets_logistic', 'm2_total', 'weight_total_kg'):
+                if k in l and l.get(k) is not None:
+                    existing[k] = _num(existing.get(k, 0)) + _num(l.get(k, 0))
+        else:
+            aggregated[sku] = dict(l)
+    return list(aggregated.values())
 
 
 def _load_offer_with_lines(offer_id: int):
@@ -2739,67 +2862,61 @@ def preorden_pdf(offer_id):
     db.commit()
 
     ref_date = (offer['created_at'] or '')[:10]
-    story.append(Paragraph('PREORDEN DE SUMINISTRO — FASSA / ARIAS GROUP', S['h1']))
-    story.append(Spacer(1, 2*mm))
+    for el in _ag_unified_header('PREORDEN DE SUMINISTRO A FASSA', W):
+        story.append(el)
+    story.append(Spacer(1, 4*mm))
 
     meta = [
-        ['Nº PreOrden', num_pre, 'Fecha', ref_date],
-        ['Cliente', offer['client_name'], 'Proyecto', offer['project_name']],
-        ['Incoterm', offer['incoterm'] or 'EXW', 'Estado', offer['status'] or 'pending'],
+        ['Nº PreOrden', num_pre, 'Fecha emisión', ref_date],
+        ['Comprador', 'ARIAS GROUP CARIBE SRL', 'RNC', '1-33-63109-1'],
+        ['Responsable compras', 'Ana Mar Pérez Marrero — Directora Operaciones', 'Ref. interna', f"PRES-{offer['id']}"],
+        ['Punto de entrega', 'A negociar (EXW fábrica o FCA Valencia)', 'Plazo requerido', 'A confirmar'],
     ]
-    mt = Table([[Paragraph(c, S['p']) for c in row] for row in meta],
-               colWidths=[W*0.15, W*0.35, W*0.15, W*0.35])
+    mt = Table([[Paragraph(str(c), S['p']) for c in row] for row in meta],
+               colWidths=[W*0.18, W*0.40, W*0.18, W*0.24])
     mt.setStyle(TableStyle([
-        ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
         ('FONTSIZE', (0,0), (-1,-1), 8),
         ('GRID', (0,0), (-1,-1), 0.3, colors.HexColor('#cccccc')),
+        ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#F2F0EB')),
+        ('BACKGROUND', (2,0), (2,-1), colors.HexColor('#F2F0EB')),
     ]))
     story.append(mt)
     story.append(Spacer(1, 4*mm))
 
-    story.append(Paragraph('DETALLE DE PRODUCTO', S['h2']))
-    head = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Unidad', 'Cantidad', 'Palés', 'm²', 'Peso kg']]
+    story.append(Paragraph('DETALLE DE PRODUCTO A PEDIR', S['h2']))
+    head = [Paragraph(h, S['th']) for h in ['Producto', 'Ref. Fassa', 'Ud. venta', 'Cantidad', 'Formato']]
     rows = [head]
-    total_pal = total_m2 = total_kg = 0
-    for l in lines:
-        pal = int(_num(l.get('pallets_logistic', 0)))
-        m2 = _num(l.get('m2_total', 0))
-        kg = _num(l.get('weight_total_kg', 0))
-        total_pal += pal
-        total_m2 += m2
-        total_kg += kg
+    agg_lines = _aggregate_lines_by_sku(lines)
+    for l in agg_lines:
+        qty = _num(l.get('qty_input', l.get('qty_logistic', l.get('qty', 0))))
+        prod = db.execute(
+            'SELECT pack_size, content_per_unit FROM products WHERE sku = ?',
+            (l.get('sku', ''),)
+        ).fetchone()
+        formato = ''
+        if prod:
+            parts = [p.strip() for p in [prod['content_per_unit'], prod['pack_size']] if p and p.strip()]
+            formato = ' · '.join(parts)
         rows.append([
             Paragraph(str(l.get('name', '')), S['td']),
             Paragraph(str(l.get('sku', '')), S['td']),
             Paragraph(str(l.get('unit', '')), S['td']),
-            Paragraph(f"{_num(l.get('qty_input', l.get('qty_logistic', 0))):.0f}", S['tdr']),
-            Paragraph(str(pal), S['tdr']),
-            Paragraph(f"{m2:.1f}" if m2 else '—', S['tdr']),
-            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+            Paragraph(f"{qty:,.0f}", S['tdr']),
+            Paragraph(str(formato) if formato else '—', S['td']),
         ])
-    rows.append([
-        Paragraph('<b>TOTALES</b>', S['td']), '', '', '',
-        Paragraph(f"<b>{total_pal}</b>", S['tdr']),
-        Paragraph(f"<b>{total_m2:.1f}</b>" if total_m2 else '', S['tdr']),
-        Paragraph(f"<b>{total_kg:.0f}</b>" if total_kg else '', S['tdr']),
-    ])
-    t = Table(rows, colWidths=[W*0.30, W*0.15, W*0.08, W*0.10, W*0.10, W*0.12, W*0.15])
+    t = Table(rows, colWidths=[W*0.34, W*0.14, W*0.10, W*0.12, W*0.30])
     t.setStyle(_pdf_table_style())
     story.append(t)
     story.append(Spacer(1, 4*mm))
 
-    story.append(Paragraph('LOGÍSTICA', S['h2']))
-    cont = estimate_containers(total_pal, total_kg,
-        {l.get('family', '?'): 1 for l in lines})
-    cont_txt = f"{cont['units']} x {cont['recommended']}" if cont else 'Por determinar'
-    logdata = [
-        ['Contenedores', cont_txt],
-        ['Peso bruto total', f"{total_kg:,.0f} kg" if total_kg else 'Por determinar'],
-        ['Palés totales', str(total_pal)],
-        ['Fecha embarque estimada', 'Por determinar'],
-        ['Condición de pago', 'Anticipo + saldo contra BL'],
+    story.append(Paragraph('ASPECTOS A CONFIRMAR CON FASSA', S['h2']))
+    cond_data = [
+        ['Fecha embarque', 'A confirmar'],
+        ['Logística / contenedores', 'A determinar por Fassa Bortolo'],
+        ['Condición de pago', 'Según acuerdo'],
     ]
-    lt = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in logdata],
+    lt = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in cond_data],
                colWidths=[W*0.35, W*0.65])
     lt.setStyle(TableStyle([
         ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
@@ -2807,7 +2924,7 @@ def preorden_pdf(offer_id):
     ]))
     story.append(lt)
     story.append(Spacer(1, 6*mm))
-    story.append(Paragraph('Arias Group Caribe · PreOrden generada automáticamente', S['small']))
+    story.append(_ag_unified_footer())
 
     log_audit(db, offer_id, 'PREORDEN_PDF', f'{num_pre}')
     db.commit()
@@ -2816,7 +2933,8 @@ def preorden_pdf(offer_id):
     buffer.seek(0)
     resp = make_response(buffer.read())
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = f'attachment; filename="PreOrden_{num_pre}.pdf"'
+    disp = 'attachment' if request.args.get('download') else 'inline'
+    resp.headers['Content-Disposition'] = f'{disp}; filename="PreOrden_{num_pre}.pdf"'
     return resp
 
 
@@ -2852,8 +2970,9 @@ def orden_logistica_pdf(offer_id):
     cont = estimate_containers(total_pal, total_kg, fam_breakdown)
 
     # ── PAGE 1: Calculadora Logística ─────────────────────────────
-    story.append(Paragraph('ORDEN LOGÍSTICA — CALCULADORA', S['h1']))
-    story.append(Spacer(1, 2*mm))
+    for el in _ag_unified_header('ORDEN LOGÍSTICA — CALCULADORA', W):
+        story.append(el)
+    story.append(Spacer(1, 4*mm))
 
     meta = [
         ['Nº Orden', num_ol, 'Fecha', ref_date],
@@ -2870,29 +2989,28 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 3*mm))
 
     story.append(Paragraph('DESGLOSE DE MERCANCÍA', S['h2']))
-    head = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Familia', 'Ud.', 'Cant.', 'Uds/palé', 'Palés', 'Peso kg']]
+    head = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Familia', 'Ud.', 'Cant.', 'Palés', 'Peso (kg)']]
     rows = [head]
-    for l in lines:
+    agg_lines_ol = _aggregate_lines_by_sku(lines)
+    for l in agg_lines_ol:
         pal = int(_num(l.get('pallets_logistic', 0)))
         kg = _num(l.get('weight_total_kg', 0))
-        qty = _num(l.get('qty_input', l.get('qty_logistic', 0)))
-        ups = int(qty / pal) if pal > 0 else 0
+        qty = _num(l.get('qty_input', l.get('qty_logistic', l.get('qty', 0))))
         rows.append([
             Paragraph(str(l.get('name', '')), S['td']),
             Paragraph(str(l.get('sku', '')), S['td']),
             Paragraph(str(l.get('family', '')), S['td']),
             Paragraph(str(l.get('unit', '')), S['td']),
-            Paragraph(f"{qty:.0f}", S['tdr']),
-            Paragraph(str(ups) if ups else '—', S['tdr']),
-            Paragraph(str(pal), S['tdr']),
-            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+            Paragraph(f"{qty:,.0f}", S['tdr']),
+            Paragraph(f"{pal:,}", S['tdr']),
+            Paragraph(f"{kg:,.0f}" if kg else '—', S['tdr']),
         ])
     rows.append([
-        Paragraph('<b>TOTALES</b>', S['td']), '', '', '', '', '',
-        Paragraph(f"<b>{total_pal}</b>", S['tdr']),
+        Paragraph('<b>TOTALES</b>', S['td']), '', '', '', '',
+        Paragraph(f"<b>{total_pal:,}</b>", S['tdr']),
         Paragraph(f"<b>{total_kg:,.0f}</b>", S['tdr']),
     ])
-    t = Table(rows, colWidths=[W*0.24, W*0.12, W*0.10, W*0.06, W*0.10, W*0.10, W*0.10, W*0.12])
+    t = Table(rows, colWidths=[W*0.30, W*0.13, W*0.11, W*0.07, W*0.11, W*0.09, W*0.14])
     t.setStyle(_pdf_table_style())
     story.append(t)
     story.append(Spacer(1, 4*mm))
@@ -2941,8 +3059,9 @@ def orden_logistica_pdf(offer_id):
 
     # ── PAGE 2: Solicitud Agente Logística ────────────────────────
     story.append(PageBreak())
-    story.append(Paragraph('SOLICITUD AL AGENTE DE CARGA', S['h1']))
-    story.append(Spacer(1, 2*mm))
+    for el in _ag_unified_header('SOLICITUD AL AGENTE DE CARGA', W):
+        story.append(el)
+    story.append(Spacer(1, 4*mm))
 
     sol_meta = [
         ['Ref.', offer['offer_number'], 'Fecha', ref_date],
@@ -2958,21 +3077,21 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 3*mm))
 
     story.append(Paragraph('MERCANCÍA A TRANSPORTAR', S['h2']))
-    sh = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Ud.', 'Cant.', 'Palés', 'Peso kg']]
+    sh = [Paragraph(h, S['th']) for h in ['Producto', 'SKU', 'Ud.', 'Cant.', 'Palés', 'Peso (kg)']]
     srows = [sh]
-    for l in lines:
+    for l in agg_lines_ol:
         pal = int(_num(l.get('pallets_logistic', 0)))
         kg = _num(l.get('weight_total_kg', 0))
-        qty = _num(l.get('qty_input', l.get('qty_logistic', 0)))
+        qty = _num(l.get('qty_input', l.get('qty_logistic', l.get('qty', 0))))
         srows.append([
             Paragraph(str(l.get('name', '')), S['td']),
             Paragraph(str(l.get('sku', '')), S['td']),
             Paragraph(str(l.get('unit', '')), S['td']),
-            Paragraph(f"{qty:.0f}", S['tdr']),
-            Paragraph(str(pal), S['tdr']),
-            Paragraph(f"{kg:.0f}" if kg else '—', S['tdr']),
+            Paragraph(f"{qty:,.0f}", S['tdr']),
+            Paragraph(f"{pal:,}", S['tdr']),
+            Paragraph(f"{kg:,.0f}" if kg else '—', S['tdr']),
         ])
-    st2 = Table(srows, colWidths=[W*0.30, W*0.16, W*0.10, W*0.14, W*0.14, W*0.16])
+    st2 = Table(srows, colWidths=[W*0.34, W*0.14, W*0.08, W*0.14, W*0.12, W*0.18])
     st2.setStyle(_pdf_table_style())
     story.append(st2)
     story.append(Spacer(1, 3*mm))
@@ -3014,7 +3133,7 @@ def orden_logistica_pdf(offer_id):
     ]))
     story.append(svt)
     story.append(Spacer(1, 6*mm))
-    story.append(Paragraph('Arias Group Caribe · Orden Logística generada automáticamente', S['small']))
+    story.append(_ag_unified_footer())
 
     log_audit(db, offer_id, 'ORDEN_LOG_PDF', f'{num_ol}')
     db.commit()
@@ -3023,7 +3142,8 @@ def orden_logistica_pdf(offer_id):
     buffer.seek(0)
     resp = make_response(buffer.read())
     resp.headers['Content-Type'] = 'application/pdf'
-    resp.headers['Content-Disposition'] = f'attachment; filename="OrdenLogistica_{num_ol}.pdf"'
+    disp = 'attachment' if request.args.get('download') else 'inline'
+    resp.headers['Content-Disposition'] = f'{disp}; filename="OrdenLogistica_{num_ol}.pdf"'
     return resp
 
 

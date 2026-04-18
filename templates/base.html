@@ -44,6 +44,9 @@
 </head>
 <body>
   <nav>
+    <a href="{{ url_for('dashboard') }}" style="padding:0; margin-right:8px;">
+      <img src="{{ url_for('static', filename='logos/arias_group_logo.svg') }}" alt="Arias Group" style="height:26px; vertical-align:middle;">
+    </a>
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
     <a href="{{ url_for('crm') }}">Clientes</a>
     <a href="{{ url_for('quote') }}">Cotización</a>
