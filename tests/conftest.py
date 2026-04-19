@@ -7,8 +7,10 @@ importing `app`.
 import os
 import tempfile
 
-os.environ.setdefault('FLASK_DEBUG', '1')
-os.environ.setdefault('SECRET_KEY', 'test-secret-key')
+# Force-set for the test process; do NOT use setdefault because a user env with
+# FLASK_DEBUG=0 and no SECRET_KEY would abort the app import at top level.
+os.environ['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'test-secret-key'
+os.environ['FLASK_DEBUG'] = os.environ.get('FLASK_DEBUG') or '1'
 
 _TMP_DB_FD, _TMP_DB_PATH = tempfile.mkstemp(prefix='arias_test_', suffix='.db')
 os.environ['FASSA_DB_PATH'] = _TMP_DB_PATH

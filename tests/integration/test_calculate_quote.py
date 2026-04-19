@@ -57,16 +57,23 @@ def test_calculate_quote_freight_flows_into_landed_total(app, system_id):
     assert s['landed_total_eur'] == pytest.approx(s['product_cost_eur'] + 1000.0, abs=0.01)
 
 
-def test_calculate_quote_waste_takes_max_of_system_and_component(app, system_id):
-    # With default_waste_pct=0.05 on system and 0.05 on each component, max→0.05.
-    # We just verify the resulting cost is higher than the "no waste" baseline
-    # by roughly 5% — confirms waste is applied at least once (not compounded).
+def test_calculate_quote_waste_applies_to_placa_line(app, system_id):
+    """Regression lock on the BA13 line cost.
+
+    seed: system.default_waste_pct=0.05, component.waste_pct=0.05 → waste=0.05.
+    BA13-STD consumption 1.05/m², price 4.20 €/board, 100 m² area.
+      qty_raw = 100 × (1+0.05) × 1.05 = 110.25
+      qty     = ceil(110.25)           = 111  (unit='board' → ceil)
+      cost    = 111 × 4.20             = 466.20 €
+    PERFIL-48 (1.05 × 2.50 = 2.625/m² × 105 = 275.625, ceil 276, × 2.10 = 579.60 €
+      Actually consumption×gross_area = 2.50 × 105 = 262.5, ceil = 263, × 2.10 = 552.30 €).
+    TORNILLO-25 (12 × 105 = 1260, × 0.03 = 37.80 €).
+    Total ≈ 466.20 + 552.30 + 37.80 = 1056.30 €.
+    """
     with app.app_context():
         r = calculate_quote(system_id, 100.0, 0.0, 0.25, 1.085)
-    # With 100 m² and 1.05 consumption/m² of BA13-STD (upp 50, sqm_pp 60), cost
-    # can be cross-checked: placa qty = ceil(100 * 1.05 * 1.05) = 111 boards
-    # at 4.20 € = 466.2 €. This is a regression lock; recompute if seed changes.
-    assert r['summary']['product_cost_eur'] > 400.0
+    # Tight range; if seed changes this will need updating.
+    assert 1050.0 <= r['summary']['product_cost_eur'] <= 1060.0
 
 
 def test_calculate_quote_clamps_near_100pct_target_margin(app, system_id):
