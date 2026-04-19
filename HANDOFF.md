@@ -238,20 +238,20 @@ Despliegue actual: Render (web service free / starter tier), Postgres skeleton s
 
 ---
 
-## 6. Gaps conocidos (a cerrar en este sprint)
+## 6. Gaps — estado tras sprint v1.1
 
-| # | Gap | Prioridad |
+| # | Gap | Estado |
 |---|---|---|
-| 1 | **Auto-trigger:** al `STATUS_APPROVED` no se generan `factory_orders` ni `logistics_orders`. Hoy se genera el PDF a demanda pero sin estado persistido. | **P0** |
-| 2 | Sin protección CSRF en formularios y APIs `/api/*` | **P0 (seguridad)** |
-| 3 | Open redirect en `/login?next=` | **P0 (seguridad)** |
-| 4 | SQL injection latente en `init_db()` (`ALTER TABLE` con f-string) | **P0 (seguridad)** |
-| 5 | Credenciales hardcodeadas (`Arias2026!`, `Fassa2026!`) en seed | **P0 (seguridad)** |
-| 6 | `SESSION_COOKIE_SECURE/HTTPONLY/SAMESITE` no configurados | **P1** |
-| 7 | Sin endpoint `/api/export/cotizacion/<id>` con contrato JSON §4 | **P1** |
-| 8 | Sin rate-limit en `/login` (brute force) | **P1** |
-| 9 | IDOR en `/api/offer-pdf/<id>` (no valida ownership) | **P2** |
-| 10 | Renombrado de campos legacy a convenciones Odoo (§3) | **P2 (incremental)** |
+| 1 | **Auto-trigger:** al `STATUS_APPROVED` generar `factory_orders` + `logistics_orders` | ✅ **CERRADO** (commit 9fbc467) |
+| 2 | Protección CSRF en formularios y APIs `/api/*` con sesión | ✅ **CERRADO** (commit cbf9ea6, Flask-WTF + helper JS global) |
+| 3 | Open redirect en `/login?next=` | ✅ **CERRADO** (commit 176761a, helper `_safe_next_url`) |
+| 4 | SQL injection latente en `init_db()` (`ALTER TABLE` con f-string) | ✅ **CERRADO** (commit 176761a, helper `_safe_add_column` + allowlist) |
+| 5 | Credenciales hardcodeadas (`Arias2026!`, `Fassa2026!`) en seed | ✅ **CERRADO** (commit 176761a, `SEED_*_PASSWORD` env vars) |
+| 6 | `SESSION_COOKIE_SECURE/HTTPONLY/SAMESITE` configurados | ✅ **CERRADO** (commit 176761a) |
+| 7 | Endpoint `/api/export/cotizacion/<id>` con contrato JSON §4 | ✅ **CERRADO** (commit 331adf5) |
+| 8 | Rate-limit en `/login` (brute force) | 🔲 Pendiente — requiere flask-limiter |
+| 9 | IDOR en `/api/offer-pdf/<id>` (no valida ownership) | 🔲 Pendiente — diseño de roles |
+| 10 | Renombrado de campos legacy a convenciones Odoo (§3) | 🔲 Pendiente — incremental, no-blocking |
 
 ---
 
