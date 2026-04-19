@@ -16,6 +16,7 @@
 |---|---|---|
 | 2026-04-19 | v1.0 | Versión inicial |
 | 2026-04-19 | v1.1 | **§5.20:** lista de stages reales del pipeline corregida (extraída de `app.py:29-56` — Qwen las hardcoded en el MVP inicial). PO reconoce que meter los 26 en `projects.stage` es un error de modelado porque mezcla ciclos de vida de 5 entidades distintas (cliente, cotización, pedido, envío, postventa). **Decisión:** migración verbatim en SPEC-002 (preserva comportamiento); la descomposición va en SPEC-003 (Domain Cleanup). No mezclar migración de infra con remodelado de dominio en el mismo PR. |
+| 2026-04-19 | v1.2 | **§15 nuevo:** SPEC-002 se parte en 3 PRs (002a infra skeleton / 002b schema+migrador / 002c refactor app.py) para que cada uno sea reviewable y rollbackable. Decidido con el PO antes de empezar implementación, dado el alcance real (4-6h). Ver §15 para scope de cada PR. |
 
 ---
 
@@ -433,6 +434,57 @@ jobs:
 
 - **Bloqueado por:** SPEC-001 mergeada (necesitamos los tests para validar que nada se rompe)
 - **Bloquea:** SPEC-003 (módulos), SPEC-004+ (cualquier nueva feature)
+
+---
+
+## 15. Plan de ejecución en 3 PRs (v1.2)
+
+Para mantener cada PR reviewable y con rollback fácil, SPEC-002 se ejecuta en 3 fases independientes. Cada una deja el sistema funcionando — el app sigue corriendo sobre SQLite hasta que 002c se mergee.
+
+### SPEC-002a — Infra + skeleton *(este PR)*
+**Branch:** `feature/spec-002a-infra-skeleton`
+**Qué hace:** añade dependencias y esqueletos; **no toca** `app.py` ni datos.
+- `requirements.txt`: `sqlalchemy>=2.0`, `alembic>=1.13`, `psycopg[binary]>=3.1`
+- `docker-compose.yml`: servicios `postgres` (5432, volumen persistente, dev) y `postgres-test` (5433, tmpfs, test)
+- `.env.example` con `DATABASE_URL` y `TEST_DATABASE_URL`
+- `db/` módulo: `engine.py`, `session.py`, `__init__.py` (factory, connection context, sin modelos)
+- `alembic.ini` y `alembic/env.py` configurados contra `DATABASE_URL`; directorio `alembic/versions/` vacío (o con una migración placeholder vacía que sirva de base)
+- README: sección "Local Postgres dev environment"
+
+**Criterio de aceptación:**
+- `docker compose up -d postgres` responde a `psql`
+- `alembic current` y `alembic history` funcionan contra la DB local
+- Tests de SPEC-001 siguen verdes (no cambia nada sobre SQLite)
+
+### SPEC-002b — Schema + data migrator
+**Branch:** `feature/spec-002b-schema-migrator`
+**Depende de:** 002a mergeada
+**Qué hace:** crea el esquema Postgres final y el migrador de datos desde SQLite.
+- `alembic/versions/0001_initial_schema.py` con las 18 tablas del §5 (tipos NUMERIC, TIMESTAMPTZ, JSONB, enums incluido `project_stage_enum` con los 26 stages verbatim del §5.20)
+- `scripts/migrate_sqlite_to_postgres.py` idempotente (§7 de la spec)
+- Nuevos tests: `tests/integration/test_schema.py` (introspection) y `tests/integration/test_migrator.py` (end-to-end contra fixture SQLite seed)
+- `app.py` sigue usando SQLite — nada tocado
+
+**Criterio de aceptación:**
+- `alembic upgrade head` crea todo el esquema limpio
+- `alembic downgrade base` revierte limpio
+- `python scripts/migrate_sqlite_to_postgres.py` copia un snapshot SQLite a Postgres sin errores
+- Tests nuevos verdes
+
+### SPEC-002c — Refactor `app.py` + cutover enable
+**Branch:** `feature/spec-002c-app-refactor`
+**Depende de:** 002b mergeada
+**Qué hace:** conecta `app.py` al nuevo backend vía un adapter que preserva la API de `sqlite3.Connection` (así no reescribimos las ~100 queries).
+- `db/adapter.py`: wrapper sobre psycopg3 que implementa `.execute()`, `.row_factory` equivalente a `sqlite3.Row`, `.commit()`, etc.
+- `app.py`: modificar **solo** `get_db()` y `close_db` para usar el adapter cuando `DATABASE_URL` esté definido; fallback a SQLite cuando no (backward compat durante la ventana de cutover)
+- `tests/conftest.py`: migrar a Postgres de test (docker-compose local + service en CI). SPEC-001 se re-ejecuta contra Postgres — es el proof of safety.
+- `.github/workflows/tests.yml`: service Postgres
+- `docs/deployment/postgres-migration-runbook.md`: pasos exactos de cutover en Render
+
+**Criterio de aceptación:**
+- Todos los tests de SPEC-001 verdes sobre Postgres (es la red de seguridad)
+- Coverage gate sigue ≥85% / ≥90%
+- Runbook probado en staging (Postgres en Render) — validación manual del PO
 
 ---
 
