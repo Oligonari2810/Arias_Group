@@ -6,13 +6,15 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_wtf.csrf import CSRFProtect
 import bcrypt
 import openpyxl
 from reportlab.lib.pagesizes import A4
@@ -64,7 +66,45 @@ if not _secret:
     _secret = 'dev-secret-key-fassa-2026'
 app.config['SECRET_KEY'] = _secret
 app.config['DATABASE'] = str(DB_PATH)
+# Session cookie hardening — Secure flag solo en producción (HTTPS).
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = not _debug
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.config['WTF_CSRF_TIME_LIMIT'] = None  # token vive lo que la sesión
+csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
+
+
+def _safe_next_url(target: str | None) -> str | None:
+    """Permite solo paths internos relativos. Bloquea open redirect a otros hosts."""
+    if not target:
+        return None
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    if not target.startswith('/') or target.startswith('//'):
+        return None
+    return target
+
+
+# Identificadores SQLite seguros para migraciones de columnas en init_db().
+_SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+_SAFE_COLUMN_TYPES = frozenset({
+    'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
+    'REAL DEFAULT 50', 'INTEGER DEFAULT 99',
+})
+
+
+def _safe_add_column(db: sqlite3.Connection, table: str, col: str, typ: str) -> None:
+    """ALTER TABLE seguro: valida identifier y tipo contra allowlist."""
+    if not _SAFE_IDENTIFIER_RE.match(table):
+        raise ValueError(f"Identifier inseguro de tabla: {table!r}")
+    if not _SAFE_IDENTIFIER_RE.match(col):
+        raise ValueError(f"Identifier inseguro de columna: {col!r}")
+    if typ not in _SAFE_COLUMN_TYPES:
+        raise ValueError(f"Tipo de columna no permitido: {typ!r}")
+    db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def now_iso() -> str:
@@ -337,6 +377,41 @@ def init_db() -> None:
             last_number INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Mirror de purchase.order Odoo: una orden a fábrica (Fassa) por oferta aprobada.
+        CREATE TABLE IF NOT EXISTS factory_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER NOT NULL,
+            name TEXT NOT NULL,                          -- "PO-0001" (Odoo: purchase.order.name)
+            state TEXT NOT NULL DEFAULT 'draft',         -- draft, sent, to_approve, purchase, done, cancel
+            partner_ref TEXT NOT NULL DEFAULT 'FASSA',
+            date_planned TEXT,                           -- ready_date estimada Fassa
+            sent_to_factory_at TEXT,
+            confirmed_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(offer_id) REFERENCES pending_offers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_factory_orders_offer ON factory_orders(offer_id);
+
+        -- Mirror de stock.picking Odoo: una orden logística por oferta aprobada.
+        CREATE TABLE IF NOT EXISTS logistics_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER NOT NULL,
+            name TEXT NOT NULL,                          -- "OUT-0001" (Odoo: stock.picking.name)
+            state TEXT NOT NULL DEFAULT 'draft',         -- draft, waiting, confirmed, assigned, done, cancel
+            route_id INTEGER,
+            container_type TEXT,                         -- 20' / 40' / 40HC
+            booking_ref TEXT,                            -- BL naviera
+            departure_date TEXT,
+            eta_date TEXT,
+            delivered_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(offer_id) REFERENCES pending_offers(id) ON DELETE CASCADE,
+            FOREIGN KEY(route_id) REFERENCES shipping_routes(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_logistics_orders_offer ON logistics_orders(offer_id);
+
         CREATE TABLE IF NOT EXISTS pickup_pricing (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
@@ -374,24 +449,24 @@ def init_db() -> None:
         );
         """
     )
-    # Migraciones para DBs existentes
+    # Migraciones para DBs existentes — usa _safe_add_column (allowlist valida col + tipo).
     prod_cols = {r[1] for r in db.execute("PRAGMA table_info(products)").fetchall()}
     for col, typ in [('subfamily', 'TEXT'), ('pvp_per_m2', 'REAL'), ('precio_arias_m2', 'REAL'),
                      ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
                      ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
                      ('discount_pct', 'REAL DEFAULT 50')]:
         if col not in prod_cols:
-            db.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
+            _safe_add_column(db, 'products', col, typ)
     client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
     for col, typ in [('rnc', 'TEXT'), ('address', 'TEXT')]:
         if col not in client_cols:
-            db.execute(f"ALTER TABLE clients ADD COLUMN {col} {typ}")
+            _safe_add_column(db, 'clients', col, typ)
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
-        db.execute("ALTER TABLE pending_offers ADD COLUMN raw_hash TEXT")
+        _safe_add_column(db, 'pending_offers', 'raw_hash', 'TEXT')
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
-        db.execute("ALTER TABLE family_defaults ADD COLUMN display_order INTEGER DEFAULT 99")
+        _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
     db.commit()
 
 
@@ -465,16 +540,23 @@ def seed_db() -> None:
         for f in fx:
             db.execute('INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source) VALUES (?,?,?,?,?)', f)
 
-    # Seed users if empty
+    # Seed users if empty — passwords vienen de variables de entorno (NO hardcodear).
     if db.execute('SELECT COUNT(*) AS c FROM users').fetchone()['c'] == 0:
-        now_tz = now_iso()
-        users = [
-            ('ana', bcrypt.hashpw('Arias2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Ana Mar Pérez', 'amperez@ariasgroupcaribe.com'),
-            ('oli', bcrypt.hashpw('Fassa2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Oli', 'oli@ariasgroupcaribe.com'),
-        ]
-        for u in users:
-            db.execute('INSERT INTO users (username, password_hash, role, full_name, email, created_at) VALUES (?,?,?,?,?,?)',
-                       (*u, now_tz))
+        ana_pass = os.environ.get('SEED_ANA_PASSWORD')
+        oli_pass = os.environ.get('SEED_OLI_PASSWORD')
+        if not ana_pass or not oli_pass:
+            print('⚠ No hay usuarios y SEED_ANA_PASSWORD / SEED_OLI_PASSWORD no están configurados.')
+            print('  Define ambas en .env y reinicia, o crea el primer admin manualmente:')
+            print('  python -c "import bcrypt;print(bcrypt.hashpw(b\'TUPASS\',bcrypt.gensalt()).decode())"')
+        else:
+            now_tz = now_iso()
+            users = [
+                ('ana', bcrypt.hashpw(ana_pass.encode(), bcrypt.gensalt()).decode(), 'admin', 'Ana Mar Pérez', 'amperez@ariasgroupcaribe.com'),
+                ('oli', bcrypt.hashpw(oli_pass.encode(), bcrypt.gensalt()).decode(), 'admin', 'Oli', 'oli@ariasgroupcaribe.com'),
+            ]
+            for u in users:
+                db.execute('INSERT INTO users (username, password_hash, role, full_name, email, created_at) VALUES (?,?,?,?,?,?)',
+                           (*u, now_tz))
 
     db.commit()
 
@@ -836,7 +918,7 @@ def login():
         if user and bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
             login_user(User(user['id'], user['username'], user['role']))
             flash(f'Bienvenido/a, {user["full_name"] or user["username"]}.')
-            next_page = request.args.get('next')
+            next_page = _safe_next_url(request.args.get('next'))
             return redirect(next_page or url_for('dashboard'))
         flash('Usuario o contraseña incorrectos.')
     return render_template('login.html')
@@ -1955,6 +2037,18 @@ def presupuestos():
     db = get_db()
     offers = db.execute('SELECT * FROM pending_offers ORDER BY created_at DESC').fetchall()
     offers_data = [dict(o) for o in offers]
+    # Adjuntar factory_order y logistics_order vinculados (auto-creados al aprobar).
+    fo_rows = db.execute(
+        'SELECT offer_id, name, state, sent_to_factory_at, confirmed_at FROM factory_orders'
+    ).fetchall()
+    lo_rows = db.execute(
+        'SELECT offer_id, name, state, departure_date, eta_date, delivered_at FROM logistics_orders'
+    ).fetchall()
+    fo_by_offer = {r['offer_id']: dict(r) for r in fo_rows}
+    lo_by_offer = {r['offer_id']: dict(r) for r in lo_rows}
+    for o in offers_data:
+        o['factory_order'] = fo_by_offer.get(o['id'])
+        o['logistics_order'] = lo_by_offer.get(o['id'])
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     return render_template('presupuestos.html', offers=offers_data, routes=[dict(r) for r in routes])
 
@@ -2306,6 +2400,44 @@ def delete_offer():
     return jsonify({'ok': True})
 
 
+def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | None:
+    """Crea una factory_order para la oferta si no existe ya. Idempotente."""
+    existing = db.execute(
+        'SELECT id, name FROM factory_orders WHERE offer_id = ?', (offer['id'],)
+    ).fetchone()
+    if existing:
+        return {'id': existing['id'], 'name': existing['name'], 'created': False}
+    name = next_sequence(db, 'PO')
+    db.execute(
+        '''INSERT INTO factory_orders (offer_id, name, state, partner_ref, created_at)
+           VALUES (?, ?, 'draft', 'FASSA', ?)''',
+        (offer['id'], name, now_iso())
+    )
+    fo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
+              f'{name} ← {offer["offer_number"]}')
+    return {'id': fo_id, 'name': name, 'created': True}
+
+
+def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | None:
+    """Crea una logistics_order para la oferta si no existe ya. Idempotente."""
+    existing = db.execute(
+        'SELECT id, name FROM logistics_orders WHERE offer_id = ?', (offer['id'],)
+    ).fetchone()
+    if existing:
+        return {'id': existing['id'], 'name': existing['name'], 'created': False}
+    name = next_sequence(db, 'OUT')
+    db.execute(
+        '''INSERT INTO logistics_orders (offer_id, name, state, route_id, created_at)
+           VALUES (?, ?, 'draft', ?, ?)''',
+        (offer['id'], name, offer['route_id'], now_iso())
+    )
+    lo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
+              f'{name} ← {offer["offer_number"]}')
+    return {'id': lo_id, 'name': name, 'created': True}
+
+
 @app.route('/api/offer-status', methods=['POST'])
 @login_required
 def offer_status():
@@ -2322,8 +2454,173 @@ def offer_status():
                (new_status, now_iso(), offer_id))
     log_audit(db, offer_id, f'STATUS_{new_status.upper()}',
               f'{offer["offer_number"]} → {new_status}')
+
+    # Auto-trigger: al aprobar, generar preorden Fassa + orden logística (idempotente).
+    factory_order = None
+    logistics_order = None
+    if new_status == 'approved':
+        factory_order = _ensure_factory_order(db, offer)
+        logistics_order = _ensure_logistics_order(db, offer)
+
     db.commit()
-    return jsonify({'ok': True, 'status': new_status})
+    return jsonify({
+        'ok': True,
+        'status': new_status,
+        'factory_order': factory_order,
+        'logistics_order': logistics_order,
+    })
+
+
+# ── Export JSON: contrato común para migración futura a Odoo/NetSuite/SAP ──
+# Schema documentado en HANDOFF.md §4. Naming alineado con convenciones Odoo
+# (res.partner, sale.order, purchase.order, stock.picking) para que un import
+# al ERP comercial sea trivial el día que se decida migrar.
+
+# Mapeo legacy.status → Odoo sale.order.state
+_OFFER_STATUS_TO_ODOO = {
+    'pending':  'sent',     # cotización enviada al cliente
+    'approved': 'sale',     # cliente confirmó / venta cerrada
+    'rejected': 'cancel',   # cliente rechazó
+}
+
+EXPORT_SCHEMA_VERSION = '1.0'
+
+
+@app.route('/api/export/cotizacion/<int:offer_id>')
+@login_required
+def export_cotizacion(offer_id: int):
+    """Devuelve la cotización en el contrato JSON canonical (HANDOFF.md §4)."""
+    db = get_db()
+    offer = db.execute('SELECT * FROM pending_offers WHERE id = ?', (offer_id,)).fetchone()
+    if not offer:
+        return jsonify({'ok': False, 'error': 'Oferta no encontrada'}), 404
+
+    client = db.execute(
+        'SELECT * FROM clients WHERE name = ? OR company = ? LIMIT 1',
+        (offer['client_name'], offer['client_name'])
+    ).fetchone()
+
+    lines = db.execute(
+        'SELECT * FROM order_lines WHERE offer_id = ? ORDER BY id', (offer_id,)
+    ).fetchall()
+
+    route = None
+    if offer['route_id']:
+        route = db.execute(
+            'SELECT * FROM shipping_routes WHERE id = ?', (offer['route_id'],)
+        ).fetchone()
+
+    factory = db.execute(
+        'SELECT * FROM factory_orders WHERE offer_id = ?', (offer_id,)
+    ).fetchone()
+    logistics = db.execute(
+        'SELECT * FROM logistics_orders WHERE offer_id = ?', (offer_id,)
+    ).fetchone()
+
+    audit_rows = db.execute(
+        'SELECT action, detail, username, created_at FROM audit_log WHERE offer_id = ? ORDER BY id',
+        (offer_id,)
+    ).fetchall()
+
+    fx = offer['fx_rate'] or 1.085
+    total_eur = offer['total_final_eur'] or 0
+
+    payload = {
+        '$schema_version': EXPORT_SCHEMA_VERSION,
+        'exported_at': now_iso(),
+        'source_system': 'arias-app-v1',
+        'source_offer_id': offer['id'],
+
+        'partner': {
+            'name': (client['company'] if client and client['company'] else offer['client_name']),
+            'is_company': bool(client and client['company']) if client else True,
+            'vat': (client['rnc'] if client else None),         # Odoo: res.partner.vat
+            'country_code': (client['country'] if client else None),
+            'phone': (client['phone'] if client else None),
+            'email': (client['email'] if client else None),
+            'street': (client['address'] if client else None),
+        },
+
+        'sale_order': {
+            'name': offer['offer_number'],                       # Odoo: sale.order.name
+            'state': _OFFER_STATUS_TO_ODOO.get(offer['status'], 'draft'),
+            'date_order': (offer['created_at'] or '')[:10],
+            'currency_id': 'EUR',
+            'pricelist_currency': 'USD',
+            'fx_rate': fx,
+            'incoterm': offer['incoterm'] or 'EXW',
+
+            'order_line': [
+                {
+                    'default_code': l['sku'],                    # Odoo: product.product.default_code
+                    'name': l['name'],
+                    'product_uom_qty': l['qty_input'],           # Odoo: sale.order.line.product_uom_qty
+                    'product_uom': l['unit'],
+                    'price_unit': l['price_unit_eur'],           # Odoo: sale.order.line.price_unit
+                    'x_family': l['family'],                     # extensión custom (Odoo Studio: x_*)
+                    'x_weight_kg': l['weight_total_kg'],
+                    'x_m2_total': l['m2_total'],
+                    'x_pallets_logistic': l['pallets_logistic'],
+                    'x_alerts': l['alerts_text'],
+                }
+                for l in lines
+            ],
+
+            'x_logistics': {
+                'container_count': offer['container_count'] or 0,
+                'route_origin': route['origin_port'] if route else None,
+                'route_destination': route['destination_port'] if route else None,
+                'carrier_name': route['carrier'] if route else None,
+                'transit_days': route['transit_days'] if route else None,
+            },
+
+            'x_economics': {
+                'amount_product_eur': offer['total_product_eur'],
+                'amount_logistic_eur': offer['total_logistic_eur'],
+                'amount_total_eur': total_eur,
+                'amount_total_usd': round(total_eur * fx, 2),
+                'margin_pct': offer['margin_pct'],
+                'waste_pct': offer['waste_pct'],
+            },
+        },
+
+        'purchase_order': (
+            {
+                'name': factory['name'],                          # Odoo: purchase.order.name
+                'state': factory['state'],
+                'partner_ref': factory['partner_ref'],
+                'date_planned': factory['date_planned'],
+                'sent_to_factory_at': factory['sent_to_factory_at'],
+                'confirmed_at': factory['confirmed_at'],
+            }
+            if factory else None
+        ),
+
+        'stock_picking': (
+            {
+                'name': logistics['name'],                        # Odoo: stock.picking.name
+                'state': logistics['state'],
+                'container_type': logistics['container_type'],
+                'booking_ref': logistics['booking_ref'],
+                'departure_date': logistics['departure_date'],
+                'eta_date': logistics['eta_date'],
+                'delivered_at': logistics['delivered_at'],
+            }
+            if logistics else None
+        ),
+
+        'audit': [
+            {
+                'action': a['action'],
+                'detail': a['detail'],
+                'user': a['username'],
+                'at': a['created_at'],
+            }
+            for a in audit_rows
+        ],
+    }
+
+    return jsonify(payload)
 
 
 # ── PDF for confirmed offer — professional 2-page document ──────────
@@ -3148,7 +3445,10 @@ def orden_logistica_pdf(offer_id):
 
 
 # ── Bot API endpoints ────────────────────────────────────────────
+# Estos endpoints autentican con BOT_API_TOKEN (Bearer-style), no con
+# sesión de cookies; por tanto se exentan de CSRF (no aplica al modelo).
 @app.route('/api/products', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_products():
     """Consulta productos por SKU, nombre o familia"""
@@ -3181,6 +3481,7 @@ def api_products():
 
 
 @app.route('/api/families', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_families():
     """Lista familias y subfamilias disponibles"""
@@ -3195,6 +3496,7 @@ def api_families():
 
 
 @app.route('/api/order', methods=['POST'])
+@csrf.exempt
 @bot_token_required
 def api_order():
     """Crea pedido desde bot. Usa el mismo motor que /api/save-offer."""
@@ -3286,6 +3588,7 @@ def api_order():
 
 
 @app.route('/api/orders', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_orders():
     """Lista pedidos de un cliente"""
@@ -3304,6 +3607,7 @@ def api_orders():
 
 
 @app.route('/api/ficha-tecnica/<sku>')
+@csrf.exempt
 @bot_token_required
 def api_ficha_tecnica(sku):
     """Devuelve ficha técnica del producto"""

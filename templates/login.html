@@ -7,6 +7,7 @@
   <img src="{{ url_for('static', filename='logos/arias_group_logo.svg') }}" alt="Arias Group" style="height:64px; margin-bottom:12px;">
   <h1 style="font-size:16px;">Fassa–Arias Group · Caribbean Ops</h1>
   <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="username">Usuario</label>
     <input type="text" id="username" name="username" required autofocus style="width:100%; margin-bottom:8px;">
     <label for="password">Contraseña</label>

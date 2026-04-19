@@ -12,6 +12,7 @@
 {% if tab == 'shipping' %}
 <h2>Nueva ruta</h2>
 <form method="POST">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="action" value="add_shipping">
   <div class="row">
     <div><label>Origen</label><input name="origin_port" placeholder="Valencia" required></div>
@@ -46,6 +47,7 @@
     <td>{{ r.valid_until or '—' }}</td>
     <td>
       <form method="POST" class="inline" onsubmit="return confirm('¿Eliminar?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="delete_shipping">
         <input type="hidden" name="id" value="{{ r.id }}">
         <button type="submit">borrar</button>
@@ -61,6 +63,7 @@
 {% elif tab == 'customs' %}
 <h2>Nuevo arancel</h2>
 <form method="POST">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="action" value="add_customs">
   <div class="row">
     <div><label>País</label><input name="country" required></div>
@@ -90,6 +93,7 @@
     <td>{{ c.notes or '' }}</td>
     <td>
       <form method="POST" class="inline" onsubmit="return confirm('¿Eliminar?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="delete_customs">
         <input type="hidden" name="id" value="{{ c.id }}">
         <button type="submit">borrar</button>
@@ -105,6 +109,7 @@
 {% elif tab == 'fx' %}
 <h2>Nuevo tipo de cambio</h2>
 <form method="POST">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="action" value="add_fx">
   <div class="row">
     <div><label>Base</label><select name="base_currency"><option>EUR</option><option>USD</option></select></div>
@@ -128,6 +133,7 @@
     <td>{{ f.source }}</td>
     <td>
       <form method="POST" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="update_fx">
         <input type="hidden" name="id" value="{{ f.id }}">
         <input name="rate" type="number" step="0.0001" value="{{ f.rate }}" style="width:90px;">
