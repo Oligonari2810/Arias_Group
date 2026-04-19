@@ -6,10 +6,11 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -64,7 +65,43 @@ if not _secret:
     _secret = 'dev-secret-key-fassa-2026'
 app.config['SECRET_KEY'] = _secret
 app.config['DATABASE'] = str(DB_PATH)
+# Session cookie hardening — Secure flag solo en producción (HTTPS).
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = not _debug
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
+
+
+def _safe_next_url(target: str | None) -> str | None:
+    """Permite solo paths internos relativos. Bloquea open redirect a otros hosts."""
+    if not target:
+        return None
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    if not target.startswith('/') or target.startswith('//'):
+        return None
+    return target
+
+
+# Identificadores SQLite seguros para migraciones de columnas en init_db().
+_SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+_SAFE_COLUMN_TYPES = frozenset({
+    'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
+    'REAL DEFAULT 50', 'INTEGER DEFAULT 99',
+})
+
+
+def _safe_add_column(db: sqlite3.Connection, table: str, col: str, typ: str) -> None:
+    """ALTER TABLE seguro: valida identifier y tipo contra allowlist."""
+    if not _SAFE_IDENTIFIER_RE.match(table):
+        raise ValueError(f"Identifier inseguro de tabla: {table!r}")
+    if not _SAFE_IDENTIFIER_RE.match(col):
+        raise ValueError(f"Identifier inseguro de columna: {col!r}")
+    if typ not in _SAFE_COLUMN_TYPES:
+        raise ValueError(f"Tipo de columna no permitido: {typ!r}")
+    db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def now_iso() -> str:
@@ -374,24 +411,24 @@ def init_db() -> None:
         );
         """
     )
-    # Migraciones para DBs existentes
+    # Migraciones para DBs existentes — usa _safe_add_column (allowlist valida col + tipo).
     prod_cols = {r[1] for r in db.execute("PRAGMA table_info(products)").fetchall()}
     for col, typ in [('subfamily', 'TEXT'), ('pvp_per_m2', 'REAL'), ('precio_arias_m2', 'REAL'),
                      ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
                      ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
                      ('discount_pct', 'REAL DEFAULT 50')]:
         if col not in prod_cols:
-            db.execute(f"ALTER TABLE products ADD COLUMN {col} {typ}")
+            _safe_add_column(db, 'products', col, typ)
     client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
     for col, typ in [('rnc', 'TEXT'), ('address', 'TEXT')]:
         if col not in client_cols:
-            db.execute(f"ALTER TABLE clients ADD COLUMN {col} {typ}")
+            _safe_add_column(db, 'clients', col, typ)
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
-        db.execute("ALTER TABLE pending_offers ADD COLUMN raw_hash TEXT")
+        _safe_add_column(db, 'pending_offers', 'raw_hash', 'TEXT')
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
-        db.execute("ALTER TABLE family_defaults ADD COLUMN display_order INTEGER DEFAULT 99")
+        _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
     db.commit()
 
 
@@ -465,16 +502,23 @@ def seed_db() -> None:
         for f in fx:
             db.execute('INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source) VALUES (?,?,?,?,?)', f)
 
-    # Seed users if empty
+    # Seed users if empty — passwords vienen de variables de entorno (NO hardcodear).
     if db.execute('SELECT COUNT(*) AS c FROM users').fetchone()['c'] == 0:
-        now_tz = now_iso()
-        users = [
-            ('ana', bcrypt.hashpw('Arias2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Ana Mar Pérez', 'amperez@ariasgroupcaribe.com'),
-            ('oli', bcrypt.hashpw('Fassa2026!'.encode(), bcrypt.gensalt()).decode(), 'admin', 'Oli', 'oli@ariasgroupcaribe.com'),
-        ]
-        for u in users:
-            db.execute('INSERT INTO users (username, password_hash, role, full_name, email, created_at) VALUES (?,?,?,?,?,?)',
-                       (*u, now_tz))
+        ana_pass = os.environ.get('SEED_ANA_PASSWORD')
+        oli_pass = os.environ.get('SEED_OLI_PASSWORD')
+        if not ana_pass or not oli_pass:
+            print('⚠ No hay usuarios y SEED_ANA_PASSWORD / SEED_OLI_PASSWORD no están configurados.')
+            print('  Define ambas en .env y reinicia, o crea el primer admin manualmente:')
+            print('  python -c "import bcrypt;print(bcrypt.hashpw(b\'TUPASS\',bcrypt.gensalt()).decode())"')
+        else:
+            now_tz = now_iso()
+            users = [
+                ('ana', bcrypt.hashpw(ana_pass.encode(), bcrypt.gensalt()).decode(), 'admin', 'Ana Mar Pérez', 'amperez@ariasgroupcaribe.com'),
+                ('oli', bcrypt.hashpw(oli_pass.encode(), bcrypt.gensalt()).decode(), 'admin', 'Oli', 'oli@ariasgroupcaribe.com'),
+            ]
+            for u in users:
+                db.execute('INSERT INTO users (username, password_hash, role, full_name, email, created_at) VALUES (?,?,?,?,?,?)',
+                           (*u, now_tz))
 
     db.commit()
 
@@ -836,7 +880,7 @@ def login():
         if user and bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
             login_user(User(user['id'], user['username'], user['role']))
             flash(f'Bienvenido/a, {user["full_name"] or user["username"]}.')
-            next_page = request.args.get('next')
+            next_page = _safe_next_url(request.args.get('next'))
             return redirect(next_page or url_for('dashboard'))
         flash('Usuario o contraseña incorrectos.')
     return render_template('login.html')
