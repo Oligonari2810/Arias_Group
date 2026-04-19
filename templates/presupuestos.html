@@ -107,6 +107,8 @@
     | <strong>Logística:</strong>
     <a href="/api/orden-logistica-pdf/{{ offer['id'] }}" target="_blank">Ver</a>
     · <a href="/api/orden-logistica-pdf/{{ offer['id'] }}?download=1">Descargar</a>
+    | <strong>Export:</strong>
+    <a href="/api/export/cotizacion/{{ offer['id'] }}" target="_blank" title="Contrato JSON Odoo-compatible (HANDOFF §4)">JSON</a>
     {% if offer['status'] == 'pending' %}
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'approved'); return false;" style="color:green;font-weight:bold;">✓ Aprobar</a>
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'rejected'); return false;" style="color:#a23;">✗ Rechazar</a>

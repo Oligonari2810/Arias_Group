@@ -2471,6 +2471,158 @@ def offer_status():
     })
 
 
+# ── Export JSON: contrato común para migración futura a Odoo/NetSuite/SAP ──
+# Schema documentado en HANDOFF.md §4. Naming alineado con convenciones Odoo
+# (res.partner, sale.order, purchase.order, stock.picking) para que un import
+# al ERP comercial sea trivial el día que se decida migrar.
+
+# Mapeo legacy.status → Odoo sale.order.state
+_OFFER_STATUS_TO_ODOO = {
+    'pending':  'sent',     # cotización enviada al cliente
+    'approved': 'sale',     # cliente confirmó / venta cerrada
+    'rejected': 'cancel',   # cliente rechazó
+}
+
+EXPORT_SCHEMA_VERSION = '1.0'
+
+
+@app.route('/api/export/cotizacion/<int:offer_id>')
+@login_required
+def export_cotizacion(offer_id: int):
+    """Devuelve la cotización en el contrato JSON canonical (HANDOFF.md §4)."""
+    db = get_db()
+    offer = db.execute('SELECT * FROM pending_offers WHERE id = ?', (offer_id,)).fetchone()
+    if not offer:
+        return jsonify({'ok': False, 'error': 'Oferta no encontrada'}), 404
+
+    client = db.execute(
+        'SELECT * FROM clients WHERE name = ? OR company = ? LIMIT 1',
+        (offer['client_name'], offer['client_name'])
+    ).fetchone()
+
+    lines = db.execute(
+        'SELECT * FROM order_lines WHERE offer_id = ? ORDER BY id', (offer_id,)
+    ).fetchall()
+
+    route = None
+    if offer['route_id']:
+        route = db.execute(
+            'SELECT * FROM shipping_routes WHERE id = ?', (offer['route_id'],)
+        ).fetchone()
+
+    factory = db.execute(
+        'SELECT * FROM factory_orders WHERE offer_id = ?', (offer_id,)
+    ).fetchone()
+    logistics = db.execute(
+        'SELECT * FROM logistics_orders WHERE offer_id = ?', (offer_id,)
+    ).fetchone()
+
+    audit_rows = db.execute(
+        'SELECT action, detail, username, created_at FROM audit_log WHERE offer_id = ? ORDER BY id',
+        (offer_id,)
+    ).fetchall()
+
+    fx = offer['fx_rate'] or 1.085
+    total_eur = offer['total_final_eur'] or 0
+
+    payload = {
+        '$schema_version': EXPORT_SCHEMA_VERSION,
+        'exported_at': now_iso(),
+        'source_system': 'arias-app-v1',
+        'source_offer_id': offer['id'],
+
+        'partner': {
+            'name': (client['company'] if client and client['company'] else offer['client_name']),
+            'is_company': bool(client and client['company']) if client else True,
+            'vat': (client['rnc'] if client else None),         # Odoo: res.partner.vat
+            'country_code': (client['country'] if client else None),
+            'phone': (client['phone'] if client else None),
+            'email': (client['email'] if client else None),
+            'street': (client['address'] if client else None),
+        },
+
+        'sale_order': {
+            'name': offer['offer_number'],                       # Odoo: sale.order.name
+            'state': _OFFER_STATUS_TO_ODOO.get(offer['status'], 'draft'),
+            'date_order': (offer['created_at'] or '')[:10],
+            'currency_id': 'EUR',
+            'pricelist_currency': 'USD',
+            'fx_rate': fx,
+            'incoterm': offer['incoterm'] or 'EXW',
+
+            'order_line': [
+                {
+                    'default_code': l['sku'],                    # Odoo: product.product.default_code
+                    'name': l['name'],
+                    'product_uom_qty': l['qty_input'],           # Odoo: sale.order.line.product_uom_qty
+                    'product_uom': l['unit'],
+                    'price_unit': l['price_unit_eur'],           # Odoo: sale.order.line.price_unit
+                    'x_family': l['family'],                     # extensión custom (Odoo Studio: x_*)
+                    'x_weight_kg': l['weight_total_kg'],
+                    'x_m2_total': l['m2_total'],
+                    'x_pallets_logistic': l['pallets_logistic'],
+                    'x_alerts': l['alerts_text'],
+                }
+                for l in lines
+            ],
+
+            'x_logistics': {
+                'container_count': offer['container_count'] or 0,
+                'route_origin': route['origin_port'] if route else None,
+                'route_destination': route['destination_port'] if route else None,
+                'carrier_name': route['carrier'] if route else None,
+                'transit_days': route['transit_days'] if route else None,
+            },
+
+            'x_economics': {
+                'amount_product_eur': offer['total_product_eur'],
+                'amount_logistic_eur': offer['total_logistic_eur'],
+                'amount_total_eur': total_eur,
+                'amount_total_usd': round(total_eur * fx, 2),
+                'margin_pct': offer['margin_pct'],
+                'waste_pct': offer['waste_pct'],
+            },
+        },
+
+        'purchase_order': (
+            {
+                'name': factory['name'],                          # Odoo: purchase.order.name
+                'state': factory['state'],
+                'partner_ref': factory['partner_ref'],
+                'date_planned': factory['date_planned'],
+                'sent_to_factory_at': factory['sent_to_factory_at'],
+                'confirmed_at': factory['confirmed_at'],
+            }
+            if factory else None
+        ),
+
+        'stock_picking': (
+            {
+                'name': logistics['name'],                        # Odoo: stock.picking.name
+                'state': logistics['state'],
+                'container_type': logistics['container_type'],
+                'booking_ref': logistics['booking_ref'],
+                'departure_date': logistics['departure_date'],
+                'eta_date': logistics['eta_date'],
+                'delivered_at': logistics['delivered_at'],
+            }
+            if logistics else None
+        ),
+
+        'audit': [
+            {
+                'action': a['action'],
+                'detail': a['detail'],
+                'user': a['username'],
+                'at': a['created_at'],
+            }
+            for a in audit_rows
+        ],
+    }
+
+    return jsonify(payload)
+
+
 # ── PDF for confirmed offer — professional 2-page document ──────────
 @app.route('/api/offer-pdf/<int:offer_id>')
 @login_required
