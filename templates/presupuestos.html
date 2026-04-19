@@ -24,6 +24,29 @@
     </div>
   </div>
 
+  {% if offer['factory_order'] or offer['logistics_order'] %}
+  <div style="margin-top:4px; font-size:11px; color:#444; background:#f6f6f6; padding:3px 6px; border:1px solid #ddd;">
+    {% if offer['factory_order'] %}
+      <span title="Auto-creada al aprobar. Estado tipo Odoo purchase.order.state.">
+        🏭 <b>{{ offer['factory_order']['name'] }}</b>
+        <span class="badge">{{ offer['factory_order']['state'] }}</span>
+        {% if offer['factory_order']['sent_to_factory_at'] %} · enviada {{ offer['factory_order']['sent_to_factory_at'][:10] }}{% endif %}
+        {% if offer['factory_order']['confirmed_at'] %} · confirmada {{ offer['factory_order']['confirmed_at'][:10] }}{% endif %}
+      </span>
+    {% endif %}
+    {% if offer['factory_order'] and offer['logistics_order'] %} | {% endif %}
+    {% if offer['logistics_order'] %}
+      <span title="Auto-creada al aprobar. Estado tipo Odoo stock.picking.state.">
+        🚢 <b>{{ offer['logistics_order']['name'] }}</b>
+        <span class="badge">{{ offer['logistics_order']['state'] }}</span>
+        {% if offer['logistics_order']['departure_date'] %} · sale {{ offer['logistics_order']['departure_date'][:10] }}{% endif %}
+        {% if offer['logistics_order']['eta_date'] %} · ETA {{ offer['logistics_order']['eta_date'][:10] }}{% endif %}
+        {% if offer['logistics_order']['delivered_at'] %} · entregada {{ offer['logistics_order']['delivered_at'][:10] }}{% endif %}
+      </span>
+    {% endif %}
+  </div>
+  {% endif %}
+
   <details style="margin-top:6px;">
     <summary style="cursor:pointer; font-size:12px;">
       Ver detalle ({{ lines|length }} líneas · {{ offer['container_count'] or 0 }} cont.
@@ -113,7 +136,16 @@ function changeStatus(id, status) {
   fetch('/api/offer-status', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({id: id, status: status})
-  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); else alert(data.error || 'Error'); });
+  }).then(r => r.json()).then(data => {
+    if (!data.ok) { alert(data.error || 'Error'); return; }
+    // Si al aprobar se crearon preorden Fassa + orden logística, avisar.
+    if (status === 'approved' && data.factory_order && data.factory_order.created) {
+      alert('✓ Aprobada.\n\nGeneradas automáticamente:\n  🏭 ' +
+            data.factory_order.name + ' (preorden Fassa)\n  🚢 ' +
+            data.logistics_order.name + ' (orden logística)');
+    }
+    location.reload();
+  });
 }
 </script>
 {% endblock %}

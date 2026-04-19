@@ -377,6 +377,41 @@ def init_db() -> None:
             last_number INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Mirror de purchase.order Odoo: una orden a fábrica (Fassa) por oferta aprobada.
+        CREATE TABLE IF NOT EXISTS factory_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER NOT NULL,
+            name TEXT NOT NULL,                          -- "PO-0001" (Odoo: purchase.order.name)
+            state TEXT NOT NULL DEFAULT 'draft',         -- draft, sent, to_approve, purchase, done, cancel
+            partner_ref TEXT NOT NULL DEFAULT 'FASSA',
+            date_planned TEXT,                           -- ready_date estimada Fassa
+            sent_to_factory_at TEXT,
+            confirmed_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(offer_id) REFERENCES pending_offers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_factory_orders_offer ON factory_orders(offer_id);
+
+        -- Mirror de stock.picking Odoo: una orden logística por oferta aprobada.
+        CREATE TABLE IF NOT EXISTS logistics_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offer_id INTEGER NOT NULL,
+            name TEXT NOT NULL,                          -- "OUT-0001" (Odoo: stock.picking.name)
+            state TEXT NOT NULL DEFAULT 'draft',         -- draft, waiting, confirmed, assigned, done, cancel
+            route_id INTEGER,
+            container_type TEXT,                         -- 20' / 40' / 40HC
+            booking_ref TEXT,                            -- BL naviera
+            departure_date TEXT,
+            eta_date TEXT,
+            delivered_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(offer_id) REFERENCES pending_offers(id) ON DELETE CASCADE,
+            FOREIGN KEY(route_id) REFERENCES shipping_routes(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_logistics_orders_offer ON logistics_orders(offer_id);
+
         CREATE TABLE IF NOT EXISTS pickup_pricing (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
@@ -2002,6 +2037,18 @@ def presupuestos():
     db = get_db()
     offers = db.execute('SELECT * FROM pending_offers ORDER BY created_at DESC').fetchall()
     offers_data = [dict(o) for o in offers]
+    # Adjuntar factory_order y logistics_order vinculados (auto-creados al aprobar).
+    fo_rows = db.execute(
+        'SELECT offer_id, name, state, sent_to_factory_at, confirmed_at FROM factory_orders'
+    ).fetchall()
+    lo_rows = db.execute(
+        'SELECT offer_id, name, state, departure_date, eta_date, delivered_at FROM logistics_orders'
+    ).fetchall()
+    fo_by_offer = {r['offer_id']: dict(r) for r in fo_rows}
+    lo_by_offer = {r['offer_id']: dict(r) for r in lo_rows}
+    for o in offers_data:
+        o['factory_order'] = fo_by_offer.get(o['id'])
+        o['logistics_order'] = lo_by_offer.get(o['id'])
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     return render_template('presupuestos.html', offers=offers_data, routes=[dict(r) for r in routes])
 
@@ -2353,6 +2400,44 @@ def delete_offer():
     return jsonify({'ok': True})
 
 
+def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | None:
+    """Crea una factory_order para la oferta si no existe ya. Idempotente."""
+    existing = db.execute(
+        'SELECT id, name FROM factory_orders WHERE offer_id = ?', (offer['id'],)
+    ).fetchone()
+    if existing:
+        return {'id': existing['id'], 'name': existing['name'], 'created': False}
+    name = next_sequence(db, 'PO')
+    db.execute(
+        '''INSERT INTO factory_orders (offer_id, name, state, partner_ref, created_at)
+           VALUES (?, ?, 'draft', 'FASSA', ?)''',
+        (offer['id'], name, now_iso())
+    )
+    fo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
+              f'{name} ← {offer["offer_number"]}')
+    return {'id': fo_id, 'name': name, 'created': True}
+
+
+def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | None:
+    """Crea una logistics_order para la oferta si no existe ya. Idempotente."""
+    existing = db.execute(
+        'SELECT id, name FROM logistics_orders WHERE offer_id = ?', (offer['id'],)
+    ).fetchone()
+    if existing:
+        return {'id': existing['id'], 'name': existing['name'], 'created': False}
+    name = next_sequence(db, 'OUT')
+    db.execute(
+        '''INSERT INTO logistics_orders (offer_id, name, state, route_id, created_at)
+           VALUES (?, ?, 'draft', ?, ?)''',
+        (offer['id'], name, offer['route_id'], now_iso())
+    )
+    lo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
+              f'{name} ← {offer["offer_number"]}')
+    return {'id': lo_id, 'name': name, 'created': True}
+
+
 @app.route('/api/offer-status', methods=['POST'])
 @login_required
 def offer_status():
@@ -2369,8 +2454,21 @@ def offer_status():
                (new_status, now_iso(), offer_id))
     log_audit(db, offer_id, f'STATUS_{new_status.upper()}',
               f'{offer["offer_number"]} → {new_status}')
+
+    # Auto-trigger: al aprobar, generar preorden Fassa + orden logística (idempotente).
+    factory_order = None
+    logistics_order = None
+    if new_status == 'approved':
+        factory_order = _ensure_factory_order(db, offer)
+        logistics_order = _ensure_logistics_order(db, offer)
+
     db.commit()
-    return jsonify({'ok': True, 'status': new_status})
+    return jsonify({
+        'ok': True,
+        'status': new_status,
+        'factory_order': factory_order,
+        'logistics_order': logistics_order,
+    })
 
 
 # ── PDF for confirmed offer — professional 2-page document ──────────
