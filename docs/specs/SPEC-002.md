@@ -5,8 +5,17 @@
 **Autor (CTO):** Claude
 **Ejecutor (Lead Dev):** Qwen-Coder
 **Product Owner:** Oliver
-**Estado:** Pendiente — depende de SPEC-001 mergeada
+**Estado:** Lista para ejecutar (SPEC-001 mergeada 2026-04-19)
 **Branch objetivo:** `feature/spec-002-postgres-migration`
+
+---
+
+## Changelog
+
+| Fecha | Versión | Cambio |
+|---|---|---|
+| 2026-04-19 | v1.0 | Versión inicial |
+| 2026-04-19 | v1.1 | **§5.20:** lista de stages reales del pipeline corregida (extraída de `app.py:29-56` — Qwen las hardcoded en el MVP inicial). PO reconoce que meter los 26 en `projects.stage` es un error de modelado porque mezcla ciclos de vida de 5 entidades distintas (cliente, cotización, pedido, envío, postventa). **Decisión:** migración verbatim en SPEC-002 (preserva comportamiento); la descomposición va en SPEC-003 (Domain Cleanup). No mezclar migración de infra con remodelado de dominio en el mismo PR. |
 
 ---
 
@@ -211,17 +220,28 @@ Migraciones versionadas, reversibles, diffables en git. Matamos las `ALTER TABLE
 - `value JSONB NOT NULL` (hoy es TEXT — muchos valores son numéricos/JSON)
 - Aportar wrapper `get_setting(key, default)` que cast según tipo
 
-#### 5.20 Enum `project_stage_enum` (26 stages Fassa)
-Los 26 stages deben listarse explícitamente en la migración Alembic. **Acción para Qwen:** extraer de `app.py` (buscar constante o `CHECK` existente; si no hay enum declarado, consultar a Oliver antes de inventar). Propuesta provisional según briefing:
+#### 5.20 Enum `project_stage_enum` — 26 stages reales (Fassa-Arias)
+
+Confirmado con el PO (2026-04-19): se migran **verbatim** los 26 stages que
+hoy existen en `app.py:29-56` (constante `STAGES`). La lista mezcla ciclos de
+vida de 5 entidades distintas (cliente, cotización, pedido, envío, postventa);
+**ese fallo de modelado no se arregla en esta SPEC.** La descomposición en
+entidades correctas queda planificada en **SPEC-003 (Domain Cleanup)** para
+evitar mezclar migración de infraestructura con remodelado de dominio.
+
+Lista oficial que debe ir en la migración Alembic `0001_initial_schema.py`:
 
 ```
-'OPORTUNIDAD', 'CÁLCULO DETALLADO', 'OFERTA ENVIADA', 'NEGOCIACIÓN',
-'CONTRATO', 'PROFORMA', 'ANTICIPO RECIBIDO', 'PRODUCCIÓN',
-'LISTO_PARA_DESPACHO', 'EN_CONTENEDOR', 'EMBARCADO', 'EN_TRÁNSITO',
-'EN_ADUANA_ORIGEN', 'EN_ADUANA_DESTINO', 'LIBERADO', 'EN_RUTA',
-'EN_ALMACÉN', 'PREPARANDO_ENTREGA', 'ENTREGADO', 'FIRMADO_POD',
-'FACTURADO', 'PAGO_PENDIENTE', 'PAGADO', 'POSTVENTA',
-'CERRADO_GANADO', 'CERRADO_PERDIDO'
+'CLIENTE', 'OPORTUNIDAD', 'FILTRO GO / NO-GO', 'PRE-CÁLCULO RÁPIDO',
+'CÁLCULO DETALLADO', 'OFERTA V1/V2', 'VALIDACIÓN TÉCNICA',
+'VALIDACIÓN CLIENTE', 'CIERRE', 'CONTRATO + CONDICIONES',
+'PREPAGO VALIDADO', 'ORDEN BLOQUEADA', 'CHECK INTERNO',
+'LOGÍSTICA VALIDADA', 'BOOKING NAVIERA', 'PEDIDO A FASSA',
+'CONFIRMACIÓN FÁBRICA', 'READY DATE', 'EXPEDICIÓN (BL)',
+'TRACKING + CONTROL ETA', 'ADUANA',
+'LIQUIDACIÓN ADUANERA + COSTES FINALES',
+'INSPECCIÓN / CONTROL DAÑOS', 'ENTREGA', 'POSTVENTA',
+'RECOMPRA / REFERIDOS / ESCALA'
 ```
 
 **Importante:** Qwen no hardcodea esto sin confirmación. Si `app.py` tiene otra lista, prevalece esa.
