@@ -31,14 +31,14 @@ TARGETS = {
 # Line ranges (inclusive) matching app.py as-shipped on feature branch.
 # If the motor is refactored, update these ranges.
 FUNCTION_LINE_RANGES = {
-    '_num':                 (508, 512),
-    'detect_family':        (515, 516),
-    'compute_line':         (519, 575),
-    '_container_result':    (578, 594),
-    'estimate_containers':  (597, 631),
-    'compute_totals':       (634, 654),
-    'dedup_alerts':         (657, 665),
-    'calculate_quote':      (737, 823),
+    '_num':                 (532, 536),
+    'detect_family':        (539, 540),
+    'compute_line':         (543, 599),
+    '_container_result':    (602, 618),
+    'estimate_containers':  (621, 655),
+    'compute_totals':       (658, 678),
+    'dedup_alerts':         (681, 689),
+    'calculate_quote':      (761, 847),
 }
 
 
