@@ -5,8 +5,17 @@
 **Autor (CTO):** Claude
 **Ejecutor (Lead Dev):** Qwen-Coder
 **Product Owner:** Oliver
-**Estado:** Pendiente
+**Estado:** En ejecución (Qwen en branch)
 **Branch objetivo:** `feature/spec-001-calc-engine-tests`
+
+---
+
+## Changelog
+
+| Fecha | Versión | Cambio |
+|---|---|---|
+| 2026-04-19 | v1.0 | Versión inicial |
+| 2026-04-19 | v1.1 | **Patch tras primera iteración de Qwen.** (1) Se aclara que el objetivo de coverage ≥85% aplica a las 8 funciones del motor de cálculo, NO a `app.py` entero. (2) Se corrige el fixture `conftest.py` del §5 para usar `tempfile` en vez de `:memory:` (problema real encontrado: `:memory:` abre DB distinta por conexión). (3) Se añade llamada a `seed_db()` en el fixture — los tests de integración de `calculate_quote` necesitan sistemas + componentes seed. (4) Se reemplaza `--cov-fail-under=85` global por un gate por función (§6.4 nuevo). (5) Se rephrase §7 sin ambigüedad. |
 
 ---
 
@@ -173,17 +182,26 @@ No añadir a `requirements.txt` — dev deps aparte.
 ## 5. Fixtures y helpers
 
 ### `conftest.py`
+
+**⚠️ Importante (v1.1):** NO usar `':memory:'`. Cada `sqlite3.connect(':memory:')` abre una DB aislada, y Flask abre una conexión nueva por request, por lo que las tablas creadas en `init_db()` no son visibles en el request bajo test. Usar archivo temporal.
+
 ```python
+import os
+import tempfile
 import pytest
-from app import app as flask_app, init_db, get_db
+from app import app as flask_app, init_db, seed_db, get_db
 
 @pytest.fixture
 def app():
+    db_fd, db_path = tempfile.mkstemp(suffix='.db')
     flask_app.config['TESTING'] = True
-    flask_app.config['DATABASE'] = ':memory:'
+    flask_app.config['DATABASE'] = db_path
     with flask_app.app_context():
         init_db()
-        yield flask_app
+        seed_db()   # ← necesario para tests de integración (systems, system_components, clients, etc.)
+    yield flask_app
+    os.close(db_fd)
+    os.unlink(db_path)
 
 @pytest.fixture
 def db(app):
@@ -217,14 +235,17 @@ Usar datos realistas del seed actual en `seed_db()` (línea 398). NO inventar SK
 ## 6. Configuración
 
 ### `pytest.ini`
+
+**⚠️ Cambio v1.1:** quitado `--cov-fail-under=85` global (daba falso negativo: `app.py` tiene 3.331 líneas y la mayoría son rutas/PDF ajenas al motor). El gate ahora es por función en §6.4.
+
 ```ini
 [pytest]
 testpaths = tests
 python_files = test_*.py
-addopts = -ra --strict-markers --cov=app --cov-report=term-missing --cov-report=html --cov-fail-under=85
+addopts = -ra --strict-markers --cov=app --cov-report=term-missing --cov-report=html --cov-report=json
 markers =
     unit: tests unitarios puros
-    integration: tests con DB en memoria
+    integration: tests con DB en archivo temporal
 ```
 
 ### `.coveragerc`
@@ -234,6 +255,7 @@ source = app
 omit =
     tests/*
     */__init__.py
+    scripts/*
 
 [report]
 exclude_lines =
@@ -241,6 +263,80 @@ exclude_lines =
     raise NotImplementedError
     if __name__ == .__main__.:
 ```
+
+### 6.4 Coverage gate por función (NUEVO v1.1)
+
+Fichero: `tests/test_coverage_gate.py`
+
+```python
+"""Gate de cobertura específico del motor de cálculo.
+
+Lee coverage.json generado por pytest-cov y valida:
+  - Cada función del motor tiene ≥85% cobertura
+  - `calculate_quote` tiene ≥90%
+"""
+import json
+import pathlib
+import pytest
+
+TARGETS = {
+    '_num':                 0.85,
+    'detect_family':        0.85,
+    'compute_line':         0.85,
+    '_container_result':    0.85,
+    'estimate_containers':  0.85,
+    'compute_totals':       0.85,
+    'dedup_alerts':         0.85,
+    'calculate_quote':      0.90,   # orquestador crítico
+}
+
+# Rangos de líneas aproximados por función en app.py (confirmar con pygrep al implementar)
+# Si Qwen añade refactors que muevan líneas, actualizar aquí.
+FUNCTION_LINE_RANGES = {
+    '_num':                 (508, 513),
+    'detect_family':        (515, 517),
+    'compute_line':         (519, 576),
+    '_container_result':    (578, 595),
+    'estimate_containers':  (597, 631),
+    'compute_totals':       (634, 654),
+    'dedup_alerts':         (657, 665),
+    'calculate_quote':      (737, 823),
+}
+
+def _load_coverage_for_file(path: str):
+    cov_path = pathlib.Path('coverage.json')
+    if not cov_path.exists():
+        pytest.skip('coverage.json no existe — ejecuta pytest con --cov-report=json primero')
+    data = json.loads(cov_path.read_text())
+    file_data = data['files'].get(path)
+    if file_data is None:
+        pytest.fail(f'No hay datos de cobertura para {path}')
+    return set(file_data['executed_lines']), set(file_data['missing_lines'])
+
+def test_coverage_gate_per_function():
+    executed, missing = _load_coverage_for_file('app.py')
+    failures = []
+    for fn, threshold in TARGETS.items():
+        start, end = FUNCTION_LINE_RANGES[fn]
+        fn_lines = set(range(start, end + 1))
+        covered = len(fn_lines & executed)
+        total = len(fn_lines - (fn_lines - executed - missing))   # líneas ejecutables
+        if total == 0:
+            failures.append(f'{fn}: 0 líneas ejecutables detectadas')
+            continue
+        pct = covered / total
+        if pct < threshold:
+            failures.append(f'{fn}: {pct:.1%} < {threshold:.0%} (cubierto {covered}/{total})')
+    assert not failures, '\n'.join(failures)
+```
+
+**Ejecución local:**
+```bash
+pytest                    # genera coverage.json
+pytest tests/test_coverage_gate.py   # valida gate
+```
+
+En el PR, Qwen pega la salida de ambos comandos.
 
 ### `.github/workflows/tests.yml`
 ```yaml
@@ -269,17 +365,18 @@ jobs:
 
 ---
 
-## 7. Criterios de aceptación (checklist de merge)
+## 7. Criterios de aceptación (checklist de merge) — v1.1
 
-- [ ] `pytest` pasa 100% en local
-- [ ] Coverage global ≥85% sobre las 8 funciones listadas en §2
-- [ ] Coverage ≥90% en `calculate_quote` (es el orquestador crítico)
+- [ ] `pytest` pasa 100% en local (unit + integración)
+- [ ] Fixture de `conftest.py` usa tempfile (no `:memory:`) y llama `seed_db()`
+- [ ] Los 8 tests de integración de `test_calculate_quote.py` pasan
+- [ ] **Gate por función (§6.4) pasa:** cada una de las 8 funciones del motor ≥85%, `calculate_quote` ≥90%
 - [ ] Todos los casos de §4 implementados (mínimo)
 - [ ] GitHub Actions workflow verde en el PR
 - [ ] No se modifica lógica de `app.py` — SOLO se añaden tests + dev deps + CI
 - [ ] `requirements-dev.txt` creado (no tocar `requirements.txt`)
 - [ ] README actualizado con sección "Running tests: `pip install -r requirements-dev.txt && pytest`"
-- [ ] PR descripción incluye salida de `pytest --cov` y captura del HTML coverage
+- [ ] PR descripción incluye: salida `pytest --cov --cov-report=term-missing`, salida `pytest tests/test_coverage_gate.py -v`, captura del HTML coverage
 
 ---
 
