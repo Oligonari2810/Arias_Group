@@ -82,19 +82,22 @@ def test_compute_line_zero_qty_yields_zero_totals(product_factory):
     assert result['pallets_logistic'] == 0
 
 
-def test_compute_line_accepts_sqlite_row(app):
-    """prod is often a sqlite3.Row in production — compute_line must cast it."""
-    with app.app_context():
-        conn = sqlite3.connect(':memory:')
-        conn.row_factory = sqlite3.Row
-        conn.execute('CREATE TABLE p (sku TEXT, name TEXT, category TEXT, unit TEXT, '
-                     'unit_price_eur REAL, kg_per_unit REAL, units_per_pallet REAL, '
-                     'sqm_per_pallet REAL)')
-        conn.execute("INSERT INTO p VALUES ('X', 'N', 'placas', 'board', 1.0, 1.0, 10, 10)")
-        row = conn.execute('SELECT * FROM p').fetchone()
-        result = compute_line(row, qty=20)
-        assert result['ok'] is True
-        assert result['cost_exw_eur'] == 20.0
+def test_compute_line_accepts_sqlite_row():
+    """prod is often a sqlite3.Row in production — compute_line must cast it.
+
+    Uses a standalone in-memory SQLite (no Flask context needed); this verifies
+    compute_line handles the Row type regardless of which connection created it.
+    """
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute('CREATE TABLE p (sku TEXT, name TEXT, category TEXT, unit TEXT, '
+                 'unit_price_eur REAL, kg_per_unit REAL, units_per_pallet REAL, '
+                 'sqm_per_pallet REAL)')
+    conn.execute("INSERT INTO p VALUES ('X', 'N', 'placas', 'board', 1.0, 1.0, 10, 10)")
+    row = conn.execute('SELECT * FROM p').fetchone()
+    result = compute_line(row, qty=20)
+    assert result['ok'] is True
+    assert result['cost_exw_eur'] == 20.0
 
 
 def test_compute_line_unit_m2_sets_m2_total_directly(product_factory):
@@ -119,6 +122,8 @@ def test_compute_line_units_rounding_per_unit_type(product_factory):
 
 def test_compute_line_units_m2_keeps_decimals(product_factory):
     prod = product_factory(unit='m2', sqm_per_pallet=0, units_per_pallet=0)
+    # round(12.345, 2) in CPython 3.9+ yields 12.35 (banker's rounding rounds
+    # .5 to nearest even; here the representable float is slightly >12.345 so
+    # it rounds up regardless).
     result = compute_line(prod, qty=12.345)
-    # for m2/ml units the code does round(qty, 2)
-    assert result['units'] == 12.34 or result['units'] == 12.35  # banker's rounding tolerance
+    assert result['units'] == 12.35
