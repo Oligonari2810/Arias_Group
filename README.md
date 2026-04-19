@@ -75,6 +75,25 @@ Desde el detalle de cualquier proyecto → sección Ofertas → botón **Descarg
 
 Genera documento con cabecera Fassa–Arias Group, tabla de materiales, resumen económico y condiciones EXW.
 
+## Running tests
+
+```bash
+# Install dev deps
+pip install -r requirements.txt -r requirements-dev.txt
+
+# Full test run with coverage (writes coverage.json)
+pytest
+
+# Validate per-function coverage gate (SPEC-001 §6.4)
+pytest tests/test_coverage_gate.py --no-cov -v -s
+```
+
+El test suite cubre el motor de cálculo de cotización (`_num`, `detect_family`,
+`compute_line`, `_container_result`, `estimate_containers`, `compute_totals`,
+`dedup_alerts`, `calculate_quote`) con ≥85% de cobertura por función y ≥90% en
+`calculate_quote`. El workflow CI (`.github/workflows/tests.yml`) corre ambos
+comandos en cada push y pull request.
+
 ## Próximos pasos
 
 1. Autenticación de usuarios (Oli / Ana / roles)
