@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_wtf.csrf import CSRFProtect
 import bcrypt
 import openpyxl
 from reportlab.lib.pagesizes import A4
@@ -70,6 +71,8 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = not _debug
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.config['WTF_CSRF_TIME_LIMIT'] = None  # token vive lo que la sesión
+csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
 
 
@@ -3192,7 +3195,10 @@ def orden_logistica_pdf(offer_id):
 
 
 # ── Bot API endpoints ────────────────────────────────────────────
+# Estos endpoints autentican con BOT_API_TOKEN (Bearer-style), no con
+# sesión de cookies; por tanto se exentan de CSRF (no aplica al modelo).
 @app.route('/api/products', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_products():
     """Consulta productos por SKU, nombre o familia"""
@@ -3225,6 +3231,7 @@ def api_products():
 
 
 @app.route('/api/families', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_families():
     """Lista familias y subfamilias disponibles"""
@@ -3239,6 +3246,7 @@ def api_families():
 
 
 @app.route('/api/order', methods=['POST'])
+@csrf.exempt
 @bot_token_required
 def api_order():
     """Crea pedido desde bot. Usa el mismo motor que /api/save-offer."""
@@ -3330,6 +3338,7 @@ def api_order():
 
 
 @app.route('/api/orders', methods=['GET'])
+@csrf.exempt
 @bot_token_required
 def api_orders():
     """Lista pedidos de un cliente"""
@@ -3348,6 +3357,7 @@ def api_orders():
 
 
 @app.route('/api/ficha-tecnica/<sku>')
+@csrf.exempt
 @bot_token_required
 def api_ficha_tecnica(sku):
     """Devuelve ficha técnica del producto"""
