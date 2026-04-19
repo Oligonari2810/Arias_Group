@@ -75,11 +75,40 @@ Desde el detalle de cualquier proyecto → sección Ofertas → botón **Descarg
 
 Genera documento con cabecera Fassa–Arias Group, tabla de materiales, resumen económico y condiciones EXW.
 
+## Local Postgres dev environment (SPEC-002a)
+
+A `docker-compose.yml` in the repo provides two Postgres 16 containers:
+
+```bash
+docker compose up -d postgres postgres-test    # start both
+docker compose down -v                         # stop + wipe dev volume
+```
+
+- `postgres`     → host port **5434**, persistent volume, DB `arias_dev`
+- `postgres-test` → host port **5433**, volatile tmpfs, DB `arias_test`
+
+Copy `.env.example` to `.env`, adjust the `DATABASE_URL` and `TEST_DATABASE_URL`
+if you change ports. App code does **not** use Postgres yet (that comes in
+SPEC-002c); only the new `db/` skeleton, Alembic and the integration tests
+under `tests/integration/test_db_skeleton.py` talk to it today.
+
+Alembic baseline commands (no migrations landed until SPEC-002b):
+
+```bash
+alembic current
+alembic history
+alembic upgrade head    # no-op while versions/ is empty
+```
+
 ## Running tests
 
 ```bash
 # Install dev deps
 pip install -r requirements.txt -r requirements-dev.txt
+
+# Ensure Postgres test container is up (needed for db/ skeleton tests)
+docker compose up -d postgres-test
+export TEST_DATABASE_URL=postgresql+psycopg://arias:arias@localhost:5433/arias_test
 
 # Full test run with coverage (writes coverage.json)
 pytest
