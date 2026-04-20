@@ -158,6 +158,7 @@
       <th class="num">Precio $</th>
       <th class="num">Cant.</th>
       <th class="num">Margen %</th>
+      <th class="num">PVP $</th>
       <th class="num">Venta €</th>
       <th class="num">Venta $</th>
       <th></th>
@@ -539,6 +540,7 @@ function recalcAll() {
           style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
       <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
           style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
+      <td class="num">${fmtN((lineSale / qtyW) * fx)}</td>
       <td class="num">${fmtN(lineSale)}</td>
       <td class="num">${fmtN(lineSale * fx)}</td>
       <td><button type="button" onclick="removeLine(${i})">×</button></td>
