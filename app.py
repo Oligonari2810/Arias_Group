@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+# Carga .env si existe (dev local). En producción las env vars ya están
+# inyectadas por el runtime (Render, Docker, etc.) y override=False respeta
+# esos valores sin pisarlos.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
