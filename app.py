@@ -3626,10 +3626,26 @@ def api_ficha_tecnica(sku):
     return jsonify({'ok': True, 'ficha': ficha})
 
 
-if __name__ == '__main__':
+def _bootstrap_db() -> None:
+    """Idempotent: CREATE TABLE IF NOT EXISTS + seed solo si tablas vacías."""
     with app.app_context():
         init_db()
         seed_db()
+
+
+# Bootstrap on import cuando se sirve bajo WSGI (waitress/gunicorn en Render).
+# `python app.py` sigue pasando por __main__ más abajo. Tests no setean el flag.
+if os.environ.get('RUN_INIT_ON_IMPORT') == '1':
+    try:
+        _bootstrap_db()
+    except Exception as e:
+        import traceback
+        print(f'[bootstrap] init/seed falló: {e}')
+        traceback.print_exc()
+
+
+if __name__ == '__main__':
+    _bootstrap_db()
     host = os.environ.get('FLASK_HOST', '127.0.0.1')
     port = int(os.environ.get('FLASK_PORT', '5001'))
     app.run(debug=_debug, host=host, port=port)
