@@ -3628,9 +3628,18 @@ def api_ficha_tecnica(sku):
 
 def _bootstrap_db() -> None:
     """Idempotent: CREATE TABLE IF NOT EXISTS + seed solo si tablas vacías."""
+    db_path = Path(app.config['DATABASE'])
+    parent = db_path.parent
+    print(f'[bootstrap] DB_PATH={db_path}')
+    print(f'[bootstrap] parent={parent} exists={parent.exists()}')
+    # En Render la carpeta del Disk puede existir pero la app necesita crear
+    # subdirectorios propios; mkdir -p es no-op si ya existe.
+    parent.mkdir(parents=True, exist_ok=True)
+    print(f'[bootstrap] parent writable={os.access(parent, os.W_OK)}')
     with app.app_context():
         init_db()
         seed_db()
+    print(f'[bootstrap] init/seed OK → db_exists={db_path.exists()} size={db_path.stat().st_size if db_path.exists() else 0}')
 
 
 # Bootstrap on import cuando se sirve bajo WSGI (waitress/gunicorn en Render).
