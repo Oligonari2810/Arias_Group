@@ -155,9 +155,11 @@
       <th>Familia</th>
       <th>Unidad</th>
       <th class="num">Precio €</th>
+      <th class="num">Precio $</th>
       <th class="num">Cant.</th>
       <th class="num">Margen %</th>
       <th class="num">Venta €</th>
+      <th class="num">Venta $</th>
       <th></th>
     </tr>
   </thead>
@@ -532,11 +534,13 @@ function recalcAll() {
       <td>${escapeHtml(line.family)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td class="num">${fmtN(line.price)}</td>
+      <td class="num">${fmtN(line.price * fx)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
           style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
       <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
           style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
       <td class="num">${fmtN(lineSale)}</td>
+      <td class="num">${fmtN(lineSale * fx)}</td>
       <td><button type="button" onclick="removeLine(${i})">×</button></td>
     </tr>`;
   });
