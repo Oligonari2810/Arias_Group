@@ -25,16 +25,16 @@ from pathlib import Path
 # Si aparece un país fuera de este set, la auditoría marca warn (necesita mapeo manual).
 COUNTRY_TO_ISO2 = {
     'república dominicana': 'DO', 'republica dominicana': 'DO', 'dominicana': 'DO',
-    'dominican republic': 'DO',
-    'haití': 'HT', 'haiti': 'HT',
-    'puerto rico': 'PR',
-    'jamaica': 'JM',
-    'cuba': 'CU',
-    'españa': 'ES', 'spain': 'ES',
-    'estados unidos': 'US', 'usa': 'US', 'united states': 'US',
-    'méxico': 'MX', 'mexico': 'MX',
-    'colombia': 'CO',
-    'panamá': 'PA', 'panama': 'PA',
+    'dominican republic': 'DO', 'rd': 'DO', 'do': 'DO',
+    'haití': 'HT', 'haiti': 'HT', 'ht': 'HT',
+    'puerto rico': 'PR', 'pr': 'PR',
+    'jamaica': 'JM', 'jm': 'JM',
+    'cuba': 'CU', 'cu': 'CU',
+    'españa': 'ES', 'spain': 'ES', 'es': 'ES',
+    'estados unidos': 'US', 'usa': 'US', 'united states': 'US', 'us': 'US',
+    'méxico': 'MX', 'mexico': 'MX', 'mx': 'MX',
+    'colombia': 'CO', 'co': 'CO',
+    'panamá': 'PA', 'panama': 'PA', 'pa': 'PA',
 }
 
 VALID_OFFER_STATES = {'pending', 'approved', 'rejected', 'draft', 'sent', 'sale', 'done', 'cancel'}
