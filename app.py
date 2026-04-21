@@ -643,7 +643,7 @@ def seed_db() -> None:
     if db.execute('SELECT COUNT(*) AS c FROM pallet_profiles').fetchone()['c'] == 0:
         pallets = [
             # category, L, W, H, levels, allow_mix, notes
-            ('PLACAS',     2.50, 1.20, 0.30, 3, 0, 'Palé placa yeso 1200x2500 — apilable 3 niveles, no mezcla suelo'),
+            ('PLACAS',     2.50, 1.20, 0.30, 3, 1, 'Palé placa yeso 1200x2500 — apilable 3 niveles, el hueco lateral (1.15m) y los pisos superiores admiten mezcla'),
             ('PERFILES',   3.00, 0.80, 0.35, 2, 1, 'Palé perfiles metálicos — apilable 2 niveles, mezcla suelo OK'),
             ('TORNILLOS',  1.20, 0.80, 1.00, 2, 1, 'Palé cajas de tornillería'),
             ('CINTAS',     1.20, 0.80, 1.00, 2, 1, 'Palé cintas y mallas'),
@@ -655,6 +655,11 @@ def seed_db() -> None:
                 (category, pallet_length_m, pallet_width_m, pallet_height_m,
                  stackable_levels, allow_mix_floor, notes)
                 VALUES (?,?,?,?,?,?,?)''', pr)
+
+    # Fix idempotente: PLACAS debe admitir mezcla de suelo (regla Arias) incluso
+    # si una versión previa del seed la marcó en 0.
+    db.execute("UPDATE pallet_profiles SET allow_mix_floor = 1 "
+               "WHERE category = 'PLACAS' AND allow_mix_floor = 0")
 
     # Seed FX rates
     if db.execute('SELECT COUNT(*) AS c FROM fx_rates').fetchone()['c'] == 0:
