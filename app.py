@@ -101,7 +101,7 @@ def _safe_next_url(target: str | None) -> str | None:
 _SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 _SAFE_COLUMN_TYPES = frozenset({
     'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
-    'REAL DEFAULT 50', 'INTEGER DEFAULT 99',
+    'REAL DEFAULT 50', 'REAL DEFAULT 5', 'INTEGER DEFAULT 99',
 })
 
 
@@ -215,7 +215,8 @@ def init_db() -> None:
             pack_size TEXT,
             pvp_eur_unit REAL,
             precio_arias_eur_unit REAL,
-            discount_pct REAL DEFAULT 50
+            discount_pct REAL DEFAULT 50,
+            discount_extra_pct REAL
         );
         CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
         CREATE INDEX IF NOT EXISTS idx_products_subfamily ON products(subfamily);
@@ -434,6 +435,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS family_defaults (
             category TEXT PRIMARY KEY,
             discount_pct REAL NOT NULL DEFAULT 50,
+            discount_extra_pct REAL NOT NULL DEFAULT 5,
             display_order INTEGER DEFAULT 99,
             notes TEXT
         );
@@ -463,7 +465,8 @@ def init_db() -> None:
     for col, typ in [('subfamily', 'TEXT'), ('pvp_per_m2', 'REAL'), ('precio_arias_m2', 'REAL'),
                      ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
                      ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
-                     ('discount_pct', 'REAL DEFAULT 50')]:
+                     ('discount_pct', 'REAL DEFAULT 50'),
+                     ('discount_extra_pct', 'REAL')]:
         if col not in prod_cols:
             _safe_add_column(db, 'products', col, typ)
     client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
@@ -476,7 +479,55 @@ def init_db() -> None:
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
         _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
+    if fd_cols and 'discount_extra_pct' not in fd_cols:
+        _safe_add_column(db, 'family_defaults', 'discount_extra_pct', 'REAL DEFAULT 5')
     db.commit()
+    # Migración one-shot: aplicar descuento compuesto (base + extra) a precio_arias.
+    # Se marca en app_settings para no volver a correr en restarts posteriores.
+    _apply_compound_discount_once(db)
+
+
+def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
+    """Recalcula precio_arias_eur_unit usando descuento compuesto (base × extra).
+
+    Fórmula: precio_arias = pvp × (1 - base/100) × (1 - extra/100)
+    Solo corre una vez (flag en app_settings). Las ofertas ya guardadas no
+    se tocan: guardan su propio precio congelado en lines_json.
+    """
+    flag = db.execute("SELECT value FROM app_settings WHERE key = 'compound_discount_applied_v1'").fetchone()
+    if flag:
+        return
+    rows = db.execute(
+        '''SELECT p.id, p.pvp_eur_unit, p.discount_pct, p.discount_extra_pct,
+                  p.precio_arias_eur_unit, p.pvp_per_m2,
+                  fd.discount_extra_pct AS fd_extra
+           FROM products p
+           LEFT JOIN family_defaults fd ON fd.category = p.category'''
+    ).fetchall()
+    updated = 0
+    for r in rows:
+        pvp = r['pvp_eur_unit']
+        if pvp is None:
+            continue
+        base = r['discount_pct'] if r['discount_pct'] is not None else 50
+        extra_override = r['discount_extra_pct']
+        fd_extra = r['fd_extra'] if r['fd_extra'] is not None else 5
+        extra = extra_override if extra_override is not None else fd_extra
+        new_arias = round(float(pvp) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4)
+        pvp_m2 = r['pvp_per_m2']
+        new_arias_m2 = round(float(pvp_m2) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4) if pvp_m2 else None
+        db.execute(
+            'UPDATE products SET precio_arias_eur_unit = ?, unit_price_eur = ?, precio_arias_m2 = ? WHERE id = ?',
+            (new_arias, new_arias, new_arias_m2, r['id'])
+        )
+        updated += 1
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('compound_discount_applied_v1', str(updated), now_iso())
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] descuento compuesto aplicado a {updated} productos')
 
 
 def seed_db() -> None:
@@ -1096,14 +1147,16 @@ def products():
     # Resumen
     totals = {cat: sum(len(v) for v in subs.values()) for cat, subs in groups.items()}
     missing = sum(1 for r in rows if r['pvp_eur_unit'] is None)
-    fam_defaults = {r['category']: r['discount_pct']
-                    for r in db.execute('SELECT category, discount_pct FROM family_defaults').fetchall()}
+    fd_rows = db.execute('SELECT category, discount_pct, discount_extra_pct FROM family_defaults').fetchall()
+    fam_defaults = {r['category']: r['discount_pct'] for r in fd_rows}
+    fam_extras = {r['category']: (r['discount_extra_pct'] if r['discount_extra_pct'] is not None else 5) for r in fd_rows}
     return render_template('products.html',
                            groups=groups,
                            totals=totals,
                            grand_total=len(rows),
                            missing=missing,
                            fam_defaults=fam_defaults,
+                           fam_extras=fam_extras,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 
@@ -1130,7 +1183,7 @@ def api_update_product(product_id: int):
     data = request.get_json() or {}
     # Campos editables
     editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
-                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
                 'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet', 'notes']
     changes = []
     sets = []
@@ -1141,7 +1194,7 @@ def api_update_product(product_id: int):
         new_v = data[f]
         old_v = existing[f]
         # normalizar números
-        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
                  'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet'):
             new_v = float(new_v) if new_v not in (None, '') else None
         if new_v == old_v:
@@ -1151,14 +1204,27 @@ def api_update_product(product_id: int):
         changes.append((f, old_v, new_v))
     if not sets:
         return jsonify({'ok': True, 'changed': 0, 'message': 'sin cambios'})
-    # Auto-sync: si cambió pvp_eur_unit o discount_pct y no envió precio_arias_eur_unit explícito, recalcular
+    # Auto-sync: si cambió pvp_eur_unit, discount_pct o discount_extra_pct
+    # y no envió precio_arias_eur_unit explícito, recalcular con compuesto.
     if 'precio_arias_eur_unit' not in data:
         pvp_new = next((v for f, _, v in changes if f == 'pvp_eur_unit'), None)
         disc_new = next((v for f, _, v in changes if f == 'discount_pct'), None)
+        extra_new = next((v for f, _, v in changes if f == 'discount_extra_pct'), None)
         pvp = pvp_new if pvp_new is not None else existing['pvp_eur_unit']
         disc = disc_new if disc_new is not None else (existing['discount_pct'] or 50)
+        # Efectivo extra: override del producto > default de la familia > 0
+        try:
+            existing_extra = existing['discount_extra_pct']
+        except (IndexError, KeyError):
+            existing_extra = None
+        extra_override = extra_new if extra_new is not None else existing_extra
+        if extra_override is None:
+            fd = db.execute('SELECT discount_extra_pct FROM family_defaults WHERE category = ?',
+                            (existing['category'],)).fetchone()
+            extra_override = (fd['discount_extra_pct'] if fd and fd['discount_extra_pct'] is not None else 0)
+        extra = float(extra_override)
         if pvp is not None:
-            arias = round(float(pvp) * (1 - float(disc) / 100), 4)
+            arias = round(float(pvp) * (1 - float(disc) / 100) * (1 - extra / 100), 4)
             if arias != existing['precio_arias_eur_unit']:
                 sets.append('precio_arias_eur_unit = ?')
                 vals.append(arias)
