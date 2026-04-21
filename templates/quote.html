@@ -568,9 +568,13 @@ function recalcAll() {
     const qtyW = Math.ceil(line.qty * (1 + wastePct));
     const logPerUnit = parseFloat(line.logUnitCost) || 0;
     const logLine = logPerUnit * qtyW;
-    const lineCost = (line.price + logPerUnit) * qtyW;
+    // Margen se aplica SOLO sobre coste de producto.
+    // Logística pasa como pass-through: se suma a venta pero no genera margen.
+    const costProduct = line.price * qtyW;
     const m = (line.margin || 0) / 100;
-    const lineSale = m < 1 ? lineCost / (1 - m) : lineCost;
+    const saleProduct = m < 1 ? costProduct / (1 - m) : costProduct;
+    const lineSale = saleProduct + logLine;
+    const lineCost = costProduct + logLine;
     totalCost += lineCost;
     totalSale += lineSale;
     totalLogistics += logLine;
@@ -627,6 +631,13 @@ function recalcAll() {
   document.getElementById('logisticTotal').textContent = fmtN(effectiveLogistic);
   document.getElementById('costProduct').textContent = fmtN(totalCostFinal);
   document.getElementById('marginEur').textContent = fmtN(marginEur);
+  // Si el motor imputó, sobrescribimos el display "Coste logístico" con su cifra
+  // (el lump legacy calculaba con tipo de contenedor distinto — discrepancia).
+  if (useLogImputed) {
+    const perCont = containerCount > 0 ? (totalLogistics / containerCount) : 0;
+    document.getElementById('logisticCostDisplay').textContent =
+      fmtN(perCont) + ' €/cont × ' + containerCount + ' = € ' + fmtN(totalLogistics);
+  }
   document.getElementById('marginPctLabel').textContent = avgMargin.toFixed(0);
   document.getElementById('totalEur').textContent = fmtN(totalSaleWithLogistic);
   document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
