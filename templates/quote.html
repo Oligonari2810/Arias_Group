@@ -187,12 +187,12 @@
     <thead>
       <tr>
         <th>SKU</th>
-        <th class="num">Venta €/ud</th>
-        <th class="num">Competencia €/ud</th>
-        <th class="num">Dif €/ud</th>
+        <th class="num">Venta $/ud</th>
+        <th class="num">Competencia $/ud</th>
+        <th class="num">Dif $/ud</th>
         <th class="num">Dif %</th>
-        <th class="num">Venta línea €</th>
-        <th class="num">Comp línea €</th>
+        <th class="num">Venta línea $</th>
+        <th class="num">Comp línea $</th>
       </tr>
     </thead>
     <tbody id="compBody"></tbody>
@@ -203,12 +203,12 @@
         <td class="num">—</td>
         <td class="num" id="compTotalDifUnit">—</td>
         <td class="num" id="compTotalDifPct">—</td>
-        <td class="num" id="compTotalSale">€ 0.00</td>
-        <td class="num" id="compTotalComp">€ 0.00</td>
+        <td class="num" id="compTotalSale">$ 0.00</td>
+        <td class="num" id="compTotalComp">$ 0.00</td>
       </tr>
     </tfoot>
   </table>
-  <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima.</p>
+  <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima. <b>Precios en USD</b>; la app sigue calculando internamente en EUR y convierte con el FX EUR/USD del input superior.</p>
 </details>
 
 <div style="margin-top:8px;">
@@ -682,60 +682,67 @@ function recalcAll() {
 function renderCompetitionPanel(lines, wastePct, fx) {
   const body = document.getElementById('compBody');
   body.innerHTML = '';
-  let sumSale = 0, sumComp = 0, skusBelow = 0, skusAbove = 0, skusSet = 0;
+  let sumSaleUsd = 0, sumCompUsd = 0, skusBelow = 0, skusAbove = 0, skusSet = 0;
   lines.forEach((line, i) => {
     const qtyW = Math.ceil(line.qty * (1 + wastePct));
     const logPerUnit = parseFloat(line.logUnitCost) || 0;
     const costProduct = line.price * qtyW;
     const m = (line.margin || 0) / 100;
     const saleProduct = m < 1 ? costProduct / (1 - m) : costProduct;
-    const lineSale = saleProduct + (logPerUnit * qtyW);
-    const unitSale = qtyW > 0 ? (lineSale / qtyW) : 0;
-    const comp = parseFloat(line.competitorPrice) || 0;
-    const compLine = comp * qtyW;
-    const difUnit = comp > 0 ? (comp - unitSale) : null;
-    const difPct = comp > 0 ? ((comp - unitSale) / comp * 100) : null;
-    sumSale += lineSale;
-    sumComp += compLine;
-    if (comp > 0) {
+    const lineSaleEur = saleProduct + (logPerUnit * qtyW);
+    const lineSaleUsd = lineSaleEur * fx;
+    const unitSaleUsd = qtyW > 0 ? (lineSaleUsd / qtyW) : 0;
+    // line.competitorPrice se guarda en EUR (legacy), aquí lo expresamos en USD.
+    const compEur = parseFloat(line.competitorPrice) || 0;
+    const compUsd = compEur * fx;
+    const compLineUsd = compUsd * qtyW;
+    const difUnitUsd = compUsd > 0 ? (compUsd - unitSaleUsd) : null;
+    const difPct = compUsd > 0 ? ((compUsd - unitSaleUsd) / compUsd * 100) : null;
+    sumSaleUsd += lineSaleUsd;
+    sumCompUsd += compLineUsd;
+    if (compUsd > 0) {
       skusSet++;
-      if (difUnit > 0) skusBelow++;
-      else if (difUnit < 0) skusAbove++;
+      if (difUnitUsd > 0) skusBelow++;
+      else if (difUnitUsd < 0) skusAbove++;
     }
-    const color = difUnit == null ? '#888' : (difUnit >= 0 ? '#060' : '#a23');
-    const arrow = difUnit == null ? '' : (difUnit >= 0 ? ' ▼' : ' ▲');
+    const color = difUnitUsd == null ? '#888' : (difUnitUsd >= 0 ? '#060' : '#a23');
+    const arrow = difUnitUsd == null ? '' : (difUnitUsd >= 0 ? ' ▼' : ' ▲');
     body.innerHTML += `<tr>
       <td class="mono">${escapeHtml(line.sku)}</td>
-      <td class="num">${fmtN(unitSale)}</td>
-      <td class="num"><input type="number" value="${comp > 0 ? comp.toFixed(4) : ''}" min="0" step="0.01"
+      <td class="num">${fmtN(unitSaleUsd)}</td>
+      <td class="num"><input type="number" value="${compUsd > 0 ? compUsd.toFixed(4) : ''}" min="0" step="0.01"
           placeholder="—" style="width:90px; text-align:right;"
           onchange="updateLineCompetitor(${i}, this.value)"></td>
-      <td class="num" style="color:${color};">${difUnit == null ? '—' : fmtN(difUnit) + arrow}</td>
+      <td class="num" style="color:${color};">${difUnitUsd == null ? '—' : fmtN(difUnitUsd) + arrow}</td>
       <td class="num" style="color:${color};">${difPct == null ? '—' : difPct.toFixed(1) + '%'}</td>
-      <td class="num">${fmtN(lineSale)}</td>
-      <td class="num">${compLine > 0 ? fmtN(compLine) : '—'}</td>
+      <td class="num">${fmtN(lineSaleUsd)}</td>
+      <td class="num">${compLineUsd > 0 ? fmtN(compLineUsd) : '—'}</td>
     </tr>`;
   });
-  const totalDif = sumComp - sumSale;
-  const totalDifPct = sumComp > 0 ? (totalDif / sumComp * 100) : null;
-  const tColor = totalDif >= 0 ? '#060' : '#a23';
-  document.getElementById('compTotalSale').textContent = '€ ' + fmtN(sumSale);
-  document.getElementById('compTotalComp').textContent = sumComp > 0 ? ('€ ' + fmtN(sumComp)) : '—';
-  document.getElementById('compTotalDifUnit').textContent = sumComp > 0 ? ('€ ' + fmtN(totalDif)) : '—';
-  document.getElementById('compTotalDifUnit').style.color = sumComp > 0 ? tColor : '';
+  const totalDifUsd = sumCompUsd - sumSaleUsd;
+  const totalDifPct = sumCompUsd > 0 ? (totalDifUsd / sumCompUsd * 100) : null;
+  const tColor = totalDifUsd >= 0 ? '#060' : '#a23';
+  document.getElementById('compTotalSale').textContent = '$ ' + fmtN(sumSaleUsd);
+  document.getElementById('compTotalComp').textContent = sumCompUsd > 0 ? ('$ ' + fmtN(sumCompUsd)) : '—';
+  document.getElementById('compTotalDifUnit').textContent = sumCompUsd > 0 ? ('$ ' + fmtN(totalDifUsd)) : '—';
+  document.getElementById('compTotalDifUnit').style.color = sumCompUsd > 0 ? tColor : '';
   document.getElementById('compTotalDifPct').textContent = totalDifPct == null ? '—' : totalDifPct.toFixed(1) + '%';
-  document.getElementById('compTotalDifPct').style.color = sumComp > 0 ? tColor : '';
+  document.getElementById('compTotalDifPct').style.color = sumCompUsd > 0 ? tColor : '';
   const summary = document.getElementById('compSummary');
   if (skusSet === 0) {
-    summary.textContent = '(sin datos de competencia — rellena precios para ver el análisis)';
+    summary.textContent = '(sin datos de competencia — rellena precios en USD para ver el análisis)';
   } else {
     summary.textContent = `(${skusSet} SKUs · ${skusBelow} bajo · ${skusAbove} sobre · dif total ${totalDifPct == null ? '—' : totalDifPct.toFixed(1) + '%'})`;
   }
 }
 
 function updateLineCompetitor(i, val) {
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
   const v = parseFloat(val);
-  lines[i].competitorPrice = isNaN(v) || v <= 0 ? 0 : v;
+  // Input está en USD, lo convertimos a EUR para guardar (el field histórico
+  // del modelo es competitor_price_eur). Si mañana flippeamos el resto a USD
+  // base, este conversor desaparece.
+  lines[i].competitorPrice = isNaN(v) || v <= 0 ? 0 : v / fx;
   recalcAll();
 }
 
