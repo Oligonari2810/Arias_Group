@@ -120,6 +120,22 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_current_fx_eur_usd() -> float:
+    db = get_db()
+    row = db.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' "
+        "ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return float(row['rate'])
+    row = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
+    return float(row['value']) if row else 1.085
+
+
+def eur_to_usd(amount_eur: float, fx_rate: float) -> float:
+    return round(amount_eur * fx_rate, 2)
+
+
 def bot_token_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -1221,6 +1237,7 @@ def products():
     fd_rows = db.execute('SELECT category, discount_pct, discount_extra_pct FROM family_defaults').fetchall()
     fam_defaults = {r['category']: r['discount_pct'] for r in fd_rows}
     fam_extras = {r['category']: (r['discount_extra_pct'] if r['discount_extra_pct'] is not None else 5) for r in fd_rows}
+    fx_eur_usd = get_current_fx_eur_usd()
     return render_template('products.html',
                            groups=groups,
                            totals=totals,
@@ -1228,6 +1245,7 @@ def products():
                            missing=missing,
                            fam_defaults=fam_defaults,
                            fam_extras=fam_extras,
+                           fx_eur_usd=fx_eur_usd,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 

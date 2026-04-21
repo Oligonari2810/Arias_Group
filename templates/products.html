@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Catálogo (base de datos)</h1>
-<p class="muted">{{ grand_total }} SKUs · {{ groups|length }} familias{% if missing %} · <span style="color:#a23;">{{ missing }} sin PVP/Arias</span>{% endif %} · Admin: {{ 'sí' if is_admin else 'no' }}</p>
+<p class="muted">{{ grand_total }} SKUs · {{ groups|length }} familias{% if missing %} · <span style="color:#a23;">{{ missing }} sin PVP/Arias</span>{% endif %} · Admin: {{ 'sí' if is_admin else 'no' }} · FX EUR→USD: <strong>{{ '%.3f'|format(fx_eur_usd) }}</strong></p>
 
 <div style="margin:8px 0;">
   <input id="search" type="search" placeholder="Buscar SKU, nombre o subfamilia…"
@@ -29,10 +29,12 @@
           <th>Embalaje</th>
           <th>Unidad</th>
           <th class="num">PVP €/ud</th>
+          <th class="num" title="PVP convertido a USD al tipo de cambio actual">PVP $/ud</th>
           <th class="num">Arias €/ud</th>
           <th class="num">Desc%</th>
           <th class="num" title="Descuento extra de fábrica (compuesto sobre el base)">Extra%</th>
           <th class="num">€/m² PVP</th>
+          <th class="num" title="PVP por m² convertido a USD">$/m² PVP</th>
           <th class="num">€/m² Arias</th>
           <th class="num">Ud/palé</th>
           <th class="num">m²/palé</th>
@@ -49,10 +51,12 @@
           <td>{{ p['pack_size'] or '—' }}</td>
           <td>{{ p['unit'] }}</td>
           <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</td>
+          <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit'] * fx_eur_usd) }}{% else %}—{% endif %}</td>
           <td class="num"><strong>{% if p['precio_arias_eur_unit'] is not none %}{{ '%.2f'|format(p['precio_arias_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</strong></td>
           <td class="num">{{ (p['discount_pct'] or 50)|int }}%</td>
           <td class="num">{% if p['discount_extra_pct'] is not none %}{{ '%.1f'|format(p['discount_extra_pct']) }}%{% else %}<span class="muted" style="font-style:italic;" title="Hereda de la familia">{{ '%.1f'|format(fam_extras.get(p['category'], 5)) }}%*</span>{% endif %}</td>
           <td class="num">{% if p['pvp_per_m2'] %}{{ '%.2f'|format(p['pvp_per_m2']) }}{% else %}—{% endif %}</td>
+          <td class="num">{% if p['pvp_per_m2'] %}{{ '%.2f'|format(p['pvp_per_m2'] * fx_eur_usd) }}{% else %}—{% endif %}</td>
           <td class="num">{% if p['precio_arias_m2'] %}{{ '%.2f'|format(p['precio_arias_m2']) }}{% else %}—{% endif %}</td>
           <td class="num">{{ p['units_per_pallet'] or '—' }}</td>
           <td class="num">{{ p['sqm_per_pallet'] or '—' }}</td>
