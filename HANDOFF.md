@@ -270,7 +270,7 @@ Cuando llegue: el endpoint `/api/export/*` (§4) entrega los datos al ERP. Las c
 ## 8. Decisiones de diseño que se mantienen
 
 - **SQLite hasta ~1000 cotizaciones/año.** Suficiente. El skeleton Postgres en `db/` está listo si se necesita.
-- **Excel master como fuente de verdad del catálogo.** `load_catalog.py` re-sincroniza. No tocar SKUs en la DB directamente.
+- **DB SQLite como fuente de verdad del catálogo** (revisado 2026-04-21). La DB divergió del Excel original: 60 SKUs añadidos, precios actualizados, campos logísticos del motor de contenedores. El Excel queda archivado en `old/` y `load_catalog.py` deprecated — correrlo hoy sería destructivo. Export xlsx bajo demanda vía `/api/export/catalog.xlsx` + snapshot diario en `docs/exports/`.
 - **`@login_required` en todo `/`, `@admin_required` en mutaciones críticas.** Mantener.
 - **Bcrypt para passwords, autoescape Jinja, queries parametrizadas.** Buenos cimientos, no romper.
 - **PDF generation con ReportLab.** Suficiente para los 3 documentos (oferta, preorden Fassa, orden logística).
