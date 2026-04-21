@@ -2533,6 +2533,150 @@ def config_delete():
     return jsonify({'ok': True})
 
 
+# ── API: Compute logistics (motor nuevo — fase C spec logística) ────
+@app.route('/api/compute-logistics', methods=['POST'])
+@login_required
+def api_compute_logistics():
+    """Calcula contenedores + imputación de coste por SKU usando el motor
+    de logistics/engine.py. Reemplaza la estimación lump-sum del motor viejo.
+
+    Payload esperado:
+      {
+        "lines": [{"sku": "...", "qty": 120, "waste_pct": 5}, ...],
+        "container_type": "40HC",
+        "cost_per_container_eur": 5500.0
+      }
+
+    Respuesta:
+      {
+        "ok": true,
+        "n_containers": 5,
+        "dominant_family": "PLACAS",
+        "dominant_driver": "pallets",
+        "total_cost_eur": 27500,
+        "per_sku": [
+          {"sku": "...", "unit_log_cost_eur": 3.54, "m2_log_cost_eur": 1.18,
+           "pallets": 10, "weight_total_kg": 12500}
+        ]
+      }
+    """
+    from logistics.engine import ContainerProfile, PalletProfile, SkuInput, compute_logistics
+
+    db = get_db()
+    data = request.get_json() or {}
+    lines_in = data.get('lines') or []
+    container_type = data.get('container_type') or '40HC'
+    cost_per_container = float(data.get('cost_per_container_eur') or 0)
+
+    if not lines_in:
+        return jsonify({'ok': False, 'error': 'sin líneas'}), 400
+
+    # Container profile.
+    cp_row = db.execute(
+        'SELECT * FROM container_profiles WHERE type = ?', (container_type,)
+    ).fetchone()
+    if not cp_row:
+        return jsonify({'ok': False, 'error': f'container_type {container_type!r} no existe'}), 400
+    container = ContainerProfile(
+        type=cp_row['type'],
+        inner_length_m=cp_row['inner_length_m'],
+        inner_width_m=cp_row['inner_width_m'],
+        inner_height_m=cp_row['inner_height_m'],
+        payload_kg=cp_row['payload_kg'],
+        door_clearance_m=cp_row['door_clearance_m'],
+        stowage_factor=cp_row['stowage_factor'],
+    )
+
+    # Pallet profiles por familia.
+    pallet_profiles: dict[str, PalletProfile] = {}
+    for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
+        pallet_profiles[r['category']] = PalletProfile(
+            category=r['category'],
+            length_m=r['pallet_length_m'],
+            width_m=r['pallet_width_m'],
+            height_m=r['pallet_height_m'],
+            stackable_levels=r['stackable_levels'],
+            allow_mix_floor=bool(r['allow_mix_floor']),
+        )
+
+    # Build SkuInputs: completa metadata faltante desde la tabla products.
+    skus: list[SkuInput] = []
+    for ln in lines_in:
+        sku = str(ln.get('sku') or '').strip()
+        if not sku:
+            continue
+        waste_pct = float(ln.get('waste_pct') or 0) / 100
+        qty_raw = float(ln.get('qty') or 0)
+        qty = math.ceil(qty_raw * (1 + waste_pct))
+        if qty <= 0:
+            continue
+        # Pull product metadata.
+        p = db.execute(
+            'SELECT category, unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet, '
+            'pallet_length_m, pallet_width_m, pallet_height_m, pallet_weight_kg, '
+            'stackable_levels, allow_mix_floor '
+            'FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not p:
+            continue
+        category = p['category']
+        if category not in pallet_profiles:
+            continue  # familia sin perfil — skip silencioso
+        upp = p['units_per_pallet'] or 0
+        sqm_pp = p['sqm_per_pallet']
+        unit_area_m2 = (float(sqm_pp) / float(upp)) if (upp and sqm_pp) else 0
+        skus.append(SkuInput(
+            sku=sku,
+            category=category,
+            qty=qty,
+            unit_weight_kg=float(p['kg_per_unit'] or 0),
+            unit_area_m2=unit_area_m2,
+            units_per_pallet=float(upp) if upp else 1,
+            pallet_length_m=p['pallet_length_m'],
+            pallet_width_m=p['pallet_width_m'],
+            pallet_height_m=p['pallet_height_m'],
+            pallet_weight_kg=p['pallet_weight_kg'],
+            stackable_levels=p['stackable_levels'],
+        ))
+
+    if not skus:
+        return jsonify({'ok': False, 'error': 'ningún SKU válido'}), 400
+
+    try:
+        result = compute_logistics(skus, container, pallet_profiles, cost_per_container)
+    except KeyError as e:
+        return jsonify({'ok': False, 'error': f'familia sin perfil: {e}'}), 400
+
+    return jsonify({
+        'ok': True,
+        'n_containers': result.n_containers,
+        'dominant_family': result.dominant_family,
+        'dominant_driver': result.dominant_driver,
+        'total_cost_eur': result.total_cost_eur,
+        'extra_containers_by_family': result.extra_containers_by_family,
+        'families': {
+            cat: {
+                'total_pallets': fr.total_pallets,
+                'total_weight_kg': fr.total_weight_kg,
+                'total_cbm': fr.total_cbm,
+                'cap_geo_per_container': fr.cap_geo_per_container,
+                'n_alone': fr.n_alone,
+                'dominant_driver': fr.dominant_driver,
+            } for cat, fr in result.families.items()
+        },
+        'per_sku': [
+            {
+                'sku': s.sku,
+                'category': s.category,
+                'pallets': s.pallets,
+                'weight_total_kg': s.weight_total_kg,
+                'unit_log_cost_eur': s.unit_log_cost_eur,
+                'm2_log_cost_eur': s.m2_log_cost_eur,
+            } for s in result.skus
+        ],
+    })
+
+
 # ── API: Delete offer ────────────────────────────────────────────
 @app.route('/api/delete-offer', methods=['POST'])
 @login_required

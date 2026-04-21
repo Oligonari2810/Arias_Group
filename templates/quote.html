@@ -142,6 +142,10 @@
     <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="recalcAll()"></div>
     <div><label>Margen logística %</label><input type="number" id="logMarginInput" value="0" min="0" max="50" step="1" oninput="recalcAll()"></div>
     <div><label>Coste logístico</label><div id="logisticCostDisplay" class="mono">€ 0.00</div></div>
+    <div style="align-self:end;">
+      <button type="button" onclick="recomputeLogistics()" title="Usa el motor nuevo con drivers físicos (geometría + peso + volumen)">🔄 Calcular logística</button>
+      <div id="logisticsState" class="muted" style="font-size:0.85em; margin-top:2px;">no calculado</div>
+    </div>
   </div>
 </div>
 
@@ -157,6 +161,7 @@
       <th class="num">Precio €</th>
       <th class="num">Precio $</th>
       <th class="num">Cant.</th>
+      <th class="num" title="Coste logístico por unidad. Editable: override manual de la imputación del motor.">Log €/ud</th>
       <th class="num">Margen %</th>
       <th class="num">PVP $</th>
       <th class="num">Venta €</th>
@@ -422,6 +427,54 @@ function addSystem() {
 function removeLine(i) { lines.splice(i, 1); recalcAll(); }
 function clearAll() { lines.length = 0; recalcAll(); document.getElementById('offerBanner').style.display = 'none'; }
 
+function updateLineLogCost(i, val) {
+  const v = parseFloat(val);
+  lines[i].logUnitCost = isNaN(v) ? 0 : v;
+  lines[i].logCostManual = true;
+  recalcAll();
+}
+
+async function recomputeLogistics() {
+  if (lines.length === 0) { alert('Añade al menos un producto.'); return; }
+  const wasteInput = parseFloat(document.getElementById('wasteInput').value);
+  const wastePct = isNaN(wasteInput) ? 5 : wasteInput;
+  const routeSel = document.getElementById('routeSelect');
+  const routeOpt = routeSel.options[routeSel.selectedIndex];
+  // Asumimos 40HC por defecto — el motor decidirá si el mix de pesos/geometrías lo justifica.
+  const containerType = '40HC';
+  const costPerCont = routeOpt && routeOpt.value
+    ? (parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0)
+    : 0;
+  const state = document.getElementById('logisticsState');
+  state.textContent = 'calculando…';
+  try {
+    const r = await fetch('/api/compute-logistics', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        lines: lines.map(l => ({ sku: l.sku, qty: l.qty, waste_pct: wastePct })),
+        container_type: containerType,
+        cost_per_container_eur: costPerCont,
+      }),
+    });
+    const j = await r.json();
+    if (!j.ok) { state.textContent = 'error: ' + (j.error || r.status); return; }
+    // Populate per-line log cost (respeta overrides manuales del usuario).
+    lines.forEach(l => {
+      if (l.logCostManual) return;  // no pisar ediciones manuales
+      const p = j.per_sku.find(x => x.sku === l.sku);
+      l.logUnitCost = p ? p.unit_log_cost_eur : 0;
+    });
+    // Update container count.
+    document.getElementById('containerCount').value = j.n_containers;
+    const drv = {'pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
+    state.innerHTML = `<b>${j.n_containers}×${containerType}</b> · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
+    recalcAll();
+  } catch (e) {
+    state.textContent = 'error de red: ' + e.message;
+  }
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function fmtN(n, dec) {
@@ -510,13 +563,17 @@ function recalcAll() {
   let totalCost = 0;
   let totalSale = 0;
 
+  let totalLogistics = 0;
   lines.forEach((line, i) => {
     const qtyW = Math.ceil(line.qty * (1 + wastePct));
-    const lineCost = line.price * qtyW;
+    const logPerUnit = parseFloat(line.logUnitCost) || 0;
+    const logLine = logPerUnit * qtyW;
+    const lineCost = (line.price + logPerUnit) * qtyW;
     const m = (line.margin || 0) / 100;
     const lineSale = m < 1 ? lineCost / (1 - m) : lineCost;
     totalCost += lineCost;
     totalSale += lineSale;
+    totalLogistics += logLine;
     // Alerta de embalaje: mostrar total uds cuando unit es caja/paquete
     const prod = products.find(p => p.sku === line.sku);
     let packAlert = '';
@@ -529,6 +586,7 @@ function recalcAll() {
         packAlert = `<div style="${color}font-size:0.8em;">${fmtQ(qtyW)} ${line.unit}s = ${fmtQ(totalUds)} uds</div>`;
       }
     }
+    const logInputStyle = line.logCostManual ? 'background:#fff4d6;' : '';
     body.innerHTML += `<tr>
       <td class="mono">${escapeHtml(line.sku)}</td>
       <td>${escapeHtml(line.name)}</td>
@@ -538,6 +596,10 @@ function recalcAll() {
       <td class="num">${fmtN(line.price * fx)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
           style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
+      <td class="num"><input type="number" value="${(logPerUnit || 0).toFixed(4)}" min="0" step="0.0001"
+          style="width:85px; text-align:right; ${logInputStyle}"
+          title="${line.logCostManual ? 'Override manual' : 'Imputación automática del motor'}"
+          onchange="updateLineLogCost(${i}, this.value)"></td>
       <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
           style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
       <td class="num">${fmtN((lineSale / qtyW) * fx)}</td>
@@ -547,15 +609,23 @@ function recalcAll() {
     </tr>`;
   });
 
-  const totalSaleWithLogistic = totalSale + logisticCost;
-  const marginEur = totalSaleWithLogistic - totalCost - logisticCost;
-  const avgMargin = totalSaleWithLogistic > 0 ? (marginEur / totalSaleWithLogistic * 100) : 0;
+  // Si el motor nuevo generó imputaciones per-SKU (totalLogistics > 0), éstas son
+  // la fuente autoritativa y ya vienen foldeadas en lineCost / lineSale. Si no, usamos
+  // el lump legacy (logisticCost) que no está imputado por línea.
+  const useLogImputed = totalLogistics > 0;
+  const effectiveLogistic = useLogImputed ? totalLogistics : logisticCost;
+  const totalSaleFinal = useLogImputed ? totalSale : totalSale + logisticCost;
+  const totalCostFinal = useLogImputed ? totalCost : totalCost + logisticCost;
+  const productsOnlyCost = useLogImputed ? totalCost - totalLogistics : totalCost;
+  const marginEur = totalSaleFinal - totalCostFinal;
+  const avgMargin = totalSaleFinal > 0 ? (marginEur / totalSaleFinal * 100) : 0;
+  const totalSaleWithLogistic = totalSaleFinal;
 
-  document.getElementById('subtotalProducts').textContent = fmtN(totalCost);
+  document.getElementById('subtotalProducts').textContent = fmtN(productsOnlyCost);
   const wpct = (wastePct * 100).toFixed(0);
   document.getElementById('wasteLabel').textContent = wastePct > 0 ? '(+' + wpct + '% desperdicio)' : '';
-  document.getElementById('logisticTotal').textContent = fmtN(logisticCost);
-  document.getElementById('costProduct').textContent = fmtN(totalCost + logisticCost);
+  document.getElementById('logisticTotal').textContent = fmtN(effectiveLogistic);
+  document.getElementById('costProduct').textContent = fmtN(totalCostFinal);
   document.getElementById('marginEur').textContent = fmtN(marginEur);
   document.getElementById('marginPctLabel').textContent = avgMargin.toFixed(0);
   document.getElementById('totalEur').textContent = fmtN(totalSaleWithLogistic);
@@ -605,7 +675,7 @@ function generateOffer() {
     logisticCost, containerCount: containers, routeId,
     totalPallets: Math.ceil(totalPallets),
     totalWeight: Math.round(totalWeight),
-    lines: lines.map(l => ({ sku: l.sku, name: l.name, family: l.family, unit: l.unit, price: l.price, qty: l.qty, margin: l.margin }))
+    lines: lines.map(l => ({ sku: l.sku, name: l.name, family: l.family, unit: l.unit, price: l.price, qty: l.qty, margin: l.margin, log_unit_cost: l.logUnitCost || 0, log_cost_manual: !!l.logCostManual }))
   };
   if (editId) offer.editId = parseInt(editId);
 
@@ -655,7 +725,9 @@ document.addEventListener('DOMContentLoaded', function() {
   (editData.lines || []).forEach(l => {
     lines.push({
       sku: l.sku, name: l.name, family: l.family, unit: l.unit,
-      price: l.price, qty: l.qty, margin: l.margin || editData.margin_pct || 20
+      price: l.price, qty: l.qty, margin: l.margin || editData.margin_pct || 20,
+      logUnitCost: l.log_unit_cost || 0,
+      logCostManual: !!l.log_cost_manual,
     });
   });
   // Try to select client
