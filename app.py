@@ -458,6 +458,30 @@ def init_db() -> None:
             value TEXT NOT NULL,
             updated_at TEXT
         );
+
+        -- Perfil físico de contenedor (§3 spec logística). Editable sin redeploy.
+        CREATE TABLE IF NOT EXISTS container_profiles (
+            type TEXT PRIMARY KEY,               -- '20', '40', '40HC'
+            inner_length_m REAL NOT NULL,
+            inner_width_m REAL NOT NULL,
+            inner_height_m REAL NOT NULL,
+            payload_kg REAL NOT NULL,
+            door_clearance_m REAL NOT NULL DEFAULT 0.30,
+            stowage_factor REAL NOT NULL DEFAULT 0.90,  -- 0.85-0.95 según estiba
+            notes TEXT
+        );
+
+        -- Perfil físico de palé por familia (§2 spec). Cada SKU puede overridear
+        -- en products.pallet_* si su embalaje difiere del default familiar.
+        CREATE TABLE IF NOT EXISTS pallet_profiles (
+            category TEXT PRIMARY KEY,           -- 'PLACAS', 'PERFILES', ...
+            pallet_length_m REAL NOT NULL,
+            pallet_width_m REAL NOT NULL,
+            pallet_height_m REAL NOT NULL,       -- altura del palé cargado
+            stackable_levels INTEGER NOT NULL DEFAULT 1,  -- niveles apilables dentro del contenedor
+            allow_mix_floor INTEGER NOT NULL DEFAULT 1,   -- bool: puede compartir suelo con otras familias
+            notes TEXT
+        );
         """
     )
     # Migraciones para DBs existentes — usa _safe_add_column (allowlist valida col + tipo).
@@ -466,7 +490,14 @@ def init_db() -> None:
                      ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
                      ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
                      ('discount_pct', 'REAL DEFAULT 50'),
-                     ('discount_extra_pct', 'REAL')]:
+                     ('discount_extra_pct', 'REAL'),
+                     # Fase A logística: overrides per-SKU sobre el pallet_profiles de la familia.
+                     ('pallet_length_m', 'REAL'),
+                     ('pallet_width_m', 'REAL'),
+                     ('pallet_height_m', 'REAL'),
+                     ('pallet_weight_kg', 'REAL'),
+                     ('stackable_levels', 'INTEGER'),
+                     ('allow_mix_floor', 'INTEGER')]:
         if col not in prod_cols:
             _safe_add_column(db, 'products', col, typ)
     client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
@@ -589,6 +620,41 @@ def seed_db() -> None:
             db.execute('''INSERT INTO customs_rates
                 (country, hs_code, category, dai_pct, itbis_pct, other_pct, notes)
                 VALUES (?,?,?,?,?,?,?)''', c)
+
+    # Seed perfiles físicos de contenedor (§3 spec logística).
+    # Dimensiones interiores estándar ISO. payload 40' = 28000 kg por criterio
+    # operativo Arias (industria típica 26500-26700; ajustable vía UI de config).
+    if db.execute('SELECT COUNT(*) AS c FROM container_profiles').fetchone()['c'] == 0:
+        profiles = [
+            # type, inner_length_m, inner_width_m, inner_height_m, payload_kg, door, stow, notes
+            ('20',   5.90,  2.35, 2.39, 21500, 0.30, 0.90, 'Contenedor 20 pies estándar'),
+            ('40',   12.03, 2.35, 2.39, 28000, 0.30, 0.90, 'Contenedor 40 pies estándar — payload operativo Arias'),
+            ('40HC', 12.03, 2.35, 2.69, 28000, 0.30, 0.90, 'Contenedor 40 High Cube — 30cm más alto que 40 estándar'),
+        ]
+        for p in profiles:
+            db.execute('''INSERT INTO container_profiles
+                (type, inner_length_m, inner_width_m, inner_height_m, payload_kg,
+                 door_clearance_m, stowage_factor, notes)
+                VALUES (?,?,?,?,?,?,?,?)''', p)
+
+    # Seed perfiles de palé por familia (§2 spec logística).
+    # Valores iniciales editables desde UI de masters; cada SKU puede overridear
+    # en products.pallet_* si su embalaje físico difiere del default familiar.
+    if db.execute('SELECT COUNT(*) AS c FROM pallet_profiles').fetchone()['c'] == 0:
+        pallets = [
+            # category, L, W, H, levels, allow_mix, notes
+            ('PLACAS',     2.50, 1.20, 0.30, 3, 0, 'Palé placa yeso 1200x2500 — apilable 3 niveles, no mezcla suelo'),
+            ('PERFILES',   3.00, 0.80, 0.35, 2, 1, 'Palé perfiles metálicos — apilable 2 niveles, mezcla suelo OK'),
+            ('TORNILLOS',  1.20, 0.80, 1.00, 2, 1, 'Palé cajas de tornillería'),
+            ('CINTAS',     1.20, 0.80, 1.00, 2, 1, 'Palé cintas y mallas'),
+            ('PASTAS',     1.20, 0.80, 1.20, 1, 1, 'Palé sacos de pasta — sin apilado (peso)'),
+            ('ACCESORIOS', 1.20, 0.80, 1.00, 2, 1, 'Palé accesorios varios'),
+        ]
+        for pr in pallets:
+            db.execute('''INSERT INTO pallet_profiles
+                (category, pallet_length_m, pallet_width_m, pallet_height_m,
+                 stackable_levels, allow_mix_floor, notes)
+                VALUES (?,?,?,?,?,?,?)''', pr)
 
     # Seed FX rates
     if db.execute('SELECT COUNT(*) AS c FROM fx_rates').fetchone()['c'] == 0:
