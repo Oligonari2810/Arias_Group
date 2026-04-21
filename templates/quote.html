@@ -401,7 +401,13 @@ function updateLineQty(i, val) {
   const v = parseFloat(val);
   if (isNaN(v) || v <= 0) return;
   lines[i].qty = v;
-  document.getElementById('containerCount').value = 0;
+  // NO reseteamos containerCount a 0: el motor nuevo lo fija con Calcular
+  // logística y queremos que persista hasta que Ana vuelva a clicar.
+  // Marcamos la logística como "stale" visualmente.
+  const state = document.getElementById('logisticsState');
+  if (state && !state.textContent.includes('stale')) {
+    state.innerHTML = '<span style="color:#a23;">⚠ stale — vuelve a Calcular logística</span>';
+  }
   recalcAll();
 }
 
@@ -508,13 +514,11 @@ function recalcAll() {
   lines.forEach(l => { famBreakdown[l.family] = (famBreakdown[l.family] || 0) + 1; });
   const containerRec = estimateContainersJS(palletsLogistic, totalWeight, famBreakdown);
 
-  // Container auto-calc: siempre actualizar con la recomendación
+  // Container auto-calc: el estimator VIEJO solo sirve como referencia del
+  // containerAdvice; NO pisa el input (eso es responsabilidad del botón
+  // Calcular logística que usa el motor nuevo con drivers físicos).
   const manualContainers = document.getElementById('containerCount');
   let containerCount = parseInt(manualContainers.value) || 0;
-  if (containerRec && containerRec.units > 0) {
-    containerCount = containerRec.units;
-    manualContainers.value = containerCount;
-  }
 
   // Show recommendation
   const advDiv = document.getElementById('containerAdvice');
