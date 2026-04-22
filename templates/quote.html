@@ -176,7 +176,7 @@
   <tr><td>Coste producto <span id="wasteLabel"></span></td><td class="num">€ <span id="subtotalProducts">0.00</span></td></tr>
   <tr><td>+ Logística (<span id="incotermLabel">EXW</span>)</td><td class="num">€ <span id="logisticTotal">0.00</span></td></tr>
   <tr><td>= Coste total</td><td class="num">€ <span id="costProduct">0.00</span></td></tr>
-  <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% medio)</td></tr>
+  <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% s/producto)</td></tr>
   <tr><th>TOTAL VENTA €</th><td class="num"><b>€ <span id="totalEur">0.00</span></b></td></tr>
   <tr><td>TOTAL VENTA USD</td><td class="num">$ <span id="totalUsd">0.00</span></td></tr>
 </table>
@@ -656,7 +656,10 @@ function recalcAll() {
   const totalCostFinal = useLogImputed ? totalCost : totalCost + logisticCost;
   const productsOnlyCost = useLogImputed ? totalCost - totalLogistics : totalCost;
   const marginEur = totalSaleFinal - totalCostFinal;
-  const avgMargin = totalSaleFinal > 0 ? (marginEur / totalSaleFinal * 100) : 0;
+  // Margen sobre producto (no sobre venta total). Coincide con el input del usuario
+  // y es coherente en EXW y CIF. La logística pasa pass-through (sin markup).
+  const salesProductsOnly = totalSaleFinal - effectiveLogistic;
+  const marginOnProductPct = salesProductsOnly > 0 ? ((salesProductsOnly - productsOnlyCost) / salesProductsOnly * 100) : 0;
   const totalSaleWithLogistic = totalSaleFinal;
 
   document.getElementById('subtotalProducts').textContent = fmtN(productsOnlyCost);
@@ -672,7 +675,7 @@ function recalcAll() {
     document.getElementById('logisticCostDisplay').textContent =
       fmtN(perCont) + ' €/cont × ' + containerCount + ' = € ' + fmtN(totalLogistics);
   }
-  document.getElementById('marginPctLabel').textContent = avgMargin.toFixed(0);
+  document.getElementById('marginPctLabel').textContent = marginOnProductPct.toFixed(0);
   document.getElementById('totalEur').textContent = fmtN(totalSaleWithLogistic);
   document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
 

@@ -120,6 +120,22 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def get_current_fx_eur_usd() -> float:
+    db = get_db()
+    row = db.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' "
+        "ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return float(row['rate'])
+    row = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
+    return float(row['value']) if row else 1.085
+
+
+def eur_to_usd(amount_eur: float, fx_rate: float) -> float:
+    return round(amount_eur * fx_rate, 2)
+
+
 def bot_token_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -1221,6 +1237,7 @@ def products():
     fd_rows = db.execute('SELECT category, discount_pct, discount_extra_pct FROM family_defaults').fetchall()
     fam_defaults = {r['category']: r['discount_pct'] for r in fd_rows}
     fam_extras = {r['category']: (r['discount_extra_pct'] if r['discount_extra_pct'] is not None else 5) for r in fd_rows}
+    fx_eur_usd = get_current_fx_eur_usd()
     return render_template('products.html',
                            groups=groups,
                            totals=totals,
@@ -1228,6 +1245,7 @@ def products():
                            missing=missing,
                            fam_defaults=fam_defaults,
                            fam_extras=fam_extras,
+                           fx_eur_usd=fx_eur_usd,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 
@@ -2946,7 +2964,7 @@ def offer_pdf(offer_id):
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
         leftMargin=15*mm, rightMargin=15*mm,
-        topMargin=15*mm, bottomMargin=15*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
     )
     
     # Paleta oficial Arias Group (de la factura proforma real)
@@ -2977,12 +2995,14 @@ def offer_pdf(offer_id):
         'brand': S('brand', fontSize=8, textColor=GOLD, fontName='Helvetica-Bold', leading=10),
         'subtitle': S('sub', fontSize=9, textColor=NAVY, fontName='Helvetica', leading=12),
         'systems': S('sys', fontSize=8, textColor=MGRAY, fontName='Helvetica', leading=10),
-        'h1': S('h1', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', leading=11),
+        'h1': S('h1', fontSize=11, textColor=NAVY, fontName='Helvetica-Bold', leading=13, spaceAfter=2),
         'p': S('p', fontSize=7.5, textColor=INK, fontName='Helvetica', leading=11),
         'small': S('small', fontSize=7, textColor=MGRAY, fontName='Helvetica', leading=9),
         'bold': S('bold', fontSize=7.5, textColor=NAVY, fontName='Helvetica-Bold', leading=11),
         'right': S('right', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_RIGHT, leading=11),
         'center': S('center', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_CENTER, leading=11),
+        'th_c': S('thc', fontSize=7.5, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER, leading=11),
+        'th_r': S('thr', fontSize=7.5, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT, leading=11),
         'cond': S('cond', fontSize=7, textColor=INK, fontName='Helvetica', leading=10),
         'total_l': S('tl', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
         'total_v': S('tv', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
@@ -3002,31 +3022,31 @@ def offer_pdf(offer_id):
     # Header: logo sobre fondo blanco + barra navy con texto
     logo_path = str(BASE_DIR / 'static' / 'logos' / 'arias_group_logo_1000px.png')
     if os.path.exists(logo_path):
-        logo_row = Table([[RLImage(logo_path, width=55*mm, height=20*mm, kind='proportional'), '']],
+        logo_row = Table([[RLImage(logo_path, width=45*mm, height=16*mm, kind='proportional'), '']],
                          colWidths=[W*0.4, W*0.6])
         logo_row.setStyle(TableStyle([
             ('LEFTPADDING', (0,0), (0,0), 0),
             ('TOPPADDING', (0,0), (-1,-1), 0),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 1),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ]))
         story.append(logo_row)
     hdr = [[
-        Paragraph('ARIAS GROUP CARIBE', S('brand_h', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
-        Paragraph('PROPUESTA TÉCNICA Y COMERCIAL', S('pt', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h', fontSize=10, textColor=WHITE, fontName='Helvetica-Bold', leading=12)),
+        Paragraph('PROPUESTA ECONÓMICA', S('pt', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr_tbl = Table(hdr, colWidths=[W*0.3, W*0.7])
     hdr_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), NAVY),
-        ('TOPPADDING', (0,0), (-1,-1), 10),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
         ('LEFTPADDING', (0,0), (0,0), 14),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
     story.append(hdr_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('Sistemas Constructivos Fassa Bortolo', sty['systems']))
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 3*mm))
     
     # Reference block
     ref_data = [
@@ -3044,35 +3064,44 @@ def offer_pdf(offer_id):
     ref_tbl = Table(ref_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
     ref_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), LGRAY),
-        ('TOPPADDING', (0,0), (-1,-1), 3),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
         ('LEFTPADDING', (0,0), (-1,-1), 5),
         ('RIGHTPADDING', (0,0), (-1,-1), 5),
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CCCCCC')),
     ]))
     story.append(ref_tbl)
-    story.append(Spacer(1, 5*mm))
-    
+    story.append(Spacer(1, 4*mm))
+
     # Section 1
     story.append(Paragraph('1.  OBJETO Y ALCANCE', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('La presente propuesta cubre el suministro de materiales del sistema <b>Suministro completo</b>, fabricados por Fassa Bortolo (Italia/España), para el proyecto <b>{}</b>. Arias Group Caribe SRL actúa como distribuidor técnico exclusivo para República Dominicana y el Caribe.'.format(offer['project_name']), sty['p']))
     story.append(Paragraph('Alcance específico: Suministro de materiales — ver detalle hoja 2', sty['p']))
     story.append(Spacer(1, 4*mm))
-    
-    # Section 2 — RESUMEN (sin listar líneas; detalle completo va en Hoja 2)
+
+    # Section 2 — RESUMEN (precalcula totales logísticos para dar contexto)
     story.append(Paragraph('2.  RESUMEN ECONÓMICO', sty['h1']))
-    story.append(Spacer(1, 2*mm))
     n_lineas = len(lines)
-    total_prod_eur = offer['total_product_eur'] or 0
-    total_log_eur = offer['total_logistic_eur'] or 0
+    agg_for_summary = _aggregate_lines_by_sku(lines)
+    sum_units = 0
+    sum_pallets = 0
+    sum_kg = 0.0
+    for _l in agg_for_summary:
+        q_w = math.ceil(_l['qty'] * (1 + offer['waste_pct']/100))
+        sum_units += q_w
+        _p = db.execute('SELECT units_per_pallet, kg_per_unit FROM products WHERE sku = ?', (_l['sku'],)).fetchone()
+        if _p and _p['units_per_pallet'] and _p['units_per_pallet'] > 0:
+            sum_pallets += math.ceil(q_w / _p['units_per_pallet'])
+        if _p and _p['kg_per_unit']:
+            sum_kg += q_w * _p['kg_per_unit']
     econ_data = [
-        [Paragraph('<b>Concepto</b>', sty['center']), Paragraph('<b>Importe</b>', sty['center'])],
-        [Paragraph(f'Nº de referencias incluidas', sty['p']), Paragraph(f'{n_lineas}', sty['right'])],
-        [Paragraph('Subtotal productos (EUR)', sty['p']), Paragraph(f'€ {total_prod_eur:,.2f}', sty['right'])],
-        [Paragraph('Logística (EUR)', sty['p']), Paragraph(f'€ {total_log_eur:,.2f}', sty['right'])],
-        [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (EUR)</b>', sty['bold']), Paragraph(f'<b>€ {total_eur:,.2f}</b>', sty['right'])],
-        [Paragraph(f'Tipo de cambio EUR/USD', sty['p']), Paragraph(f'{fx:.4f}', sty['right'])],
+        [Paragraph('Concepto', sty['th_c']), Paragraph('Detalle', sty['th_c'])],
+        [Paragraph('Nº de referencias', sty['p']), Paragraph(f'{n_lineas}', sty['right'])],
+        [Paragraph('Unidades totales', sty['p']), Paragraph(f'{sum_units:,}', sty['right'])],
+        [Paragraph('Palés totales', sty['p']), Paragraph(f'{sum_pallets:,}' if sum_pallets else '—', sty['right'])],
+        [Paragraph('Peso bruto aproximado', sty['p']), Paragraph(f'{sum_kg:,.0f} kg' if sum_kg else '—', sty['right'])],
+        [Paragraph('Moneda', sty['p']), Paragraph('USD (dólares estadounidenses)', sty['right'])],
         [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (USD)</b>', sty['bold']), Paragraph(f'<b>$ {total_usd:,.2f}</b>', sty['right'])],
     ]
     econ_tbl = Table(econ_data, colWidths=[W*0.65, W*0.35])
@@ -3080,9 +3109,7 @@ def offer_pdf(offer_id):
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
         ('BACKGROUND', (0,-1), (-1,-1), GOLD_SOFT),
-        ('BACKGROUND', (0,-3), (-1,-3), BONE),
         ('LINEABOVE', (0,-1), (-1,-1), 1, GOLD),
-        ('LINEABOVE', (0,-3), (-1,-3), 0.5, GOLD),
         ('LINEBELOW', (0,0), (-1,-2), 0.3, colors.HexColor('#CCCCCC')),
         ('TOPPADDING', (0,0), (-1,-1), 4),
         ('BOTTOMPADDING', (0,0), (-1,-1), 4),
@@ -3090,13 +3117,13 @@ def offer_pdf(offer_id):
         ('RIGHTPADDING', (0,0), (-1,-1), 6),
     ]))
     story.append(econ_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('* Importes sujetos a confirmación de pedido formal. No incluyen impuestos locales ni gastos de aduana en destino. Detalle línea-a-línea en Hoja 2.', sty['small']))
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 3
     story.append(Paragraph('3.  CONDICIONES COMERCIALES', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     conds = [
         ('Pago', '100% prepago por transferencia bancaria antes de emisión de orden de producción.'),
         ('Validez de oferta', f"{int(offer['margin_pct'])} días calendario desde la fecha de emisión."),
@@ -3105,7 +3132,7 @@ def offer_pdf(offer_id):
         ('Incoterm aplicable', f"{offer['incoterm'] or 'EXW'} — riesgo y responsabilidad se transfieren al comprador."),
         ('Divisa', 'USD (dólares estadounidenses)'),
     ]
-    cond_data = [[Paragraph('<b>Concepto</b>', sty['center']), Paragraph('<b>Detalle</b>', sty['center'])]]
+    cond_data = [[Paragraph('Concepto', sty['th_c']), Paragraph('Detalle', sty['th_c'])]]
     for label, detail in conds:
         cond_data.append([Paragraph(f"<b>{label}</b>", sty['bold']), Paragraph(detail, sty['p'])])
     cond_tbl = Table(cond_data, colWidths=[W*0.25, W*0.75])
@@ -3114,17 +3141,17 @@ def offer_pdf(offer_id):
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
         ('BACKGROUND', (0,1), (0,-1), LGRAY),
         ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
-        ('TOPPADDING', (0,0), (-1,-1), 3),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
         ('LEFTPADDING', (0,0), (-1,-1), 5),
         ('RIGHTPADDING', (0,0), (-1,-1), 5),
     ]))
     story.append(cond_tbl)
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 4
     story.append(Paragraph('4.  OBSERVACIONES TÉCNICAS', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     obs = [
         'Los materiales ofertados cuentan con marcado CE y están fabricados bajo estándares europeos (EN, ETA según aplique).',
         'Producto de origen europeo (Italia/España) con trazabilidad de lote.',
@@ -3134,13 +3161,13 @@ def offer_pdf(offer_id):
     for o in obs:
         story.append(Paragraph(f"•  {o}", sty['cond']))
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 5
     story.append(Paragraph('5.  ACEPTACIÓN Y FIRMA', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('Para confirmar esta propuesta, el cliente deberá firmar y devolver este documento. La firma implica aceptación de las condiciones comerciales indicadas.', sty['p']))
-    story.append(Spacer(1, 4*mm))
-    
+    story.append(Spacer(1, 3*mm))
+
     sig_data = [[
         Paragraph('<b>ARIAS GROUP CARIBE SRL</b><br/>RNC: 1-33-63109-1<br/>Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203<br/>Santo Domingo, D.N.<br/><br/>___________________________<br/>Director Comercial<br/>Fecha: _______________', sty['sig']),
         Paragraph(f'<b>{client_company}</b><br/>RNC: {client_rnc}<br/>{offer["client_name"]}<br/><br/>___________________________<br/>Firma y sello<br/>Fecha: _______________', sty['sig']),
@@ -3148,11 +3175,11 @@ def offer_pdf(offer_id):
     sig_tbl = Table(sig_data, colWidths=[W*0.5, W*0.5])
     sig_tbl.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
     ]))
     story.append(sig_tbl)
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 2*mm))
     story.append(Paragraph('Esta propuesta es de carácter confidencial y está dirigida exclusivamente al destinatario indicado.', sty['footer']))
     story.append(PageBreak())
     
@@ -3172,8 +3199,8 @@ def offer_pdf(offer_id):
         ]))
         story.append(logo_row2)
     hdr2 = [[
-        Paragraph('ARIAS GROUP CARIBE', S('brand_h2', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
-        Paragraph('DETALLE DE PRODUCTOS', S('dp', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h2', fontSize=10, textColor=WHITE, fontName='Helvetica-Bold', leading=12)),
+        Paragraph('DESGLOSE PRESUPUESTO', S('dp', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr2_tbl = Table(hdr2, colWidths=[W*0.3, W*0.7])
     hdr2_tbl.setStyle(TableStyle([
@@ -3188,25 +3215,27 @@ def offer_pdf(offer_id):
     story.append(Paragraph(f'{offer["project_name"]}  ·  Ref. {offer["offer_number"]}', sty['systems']))
     story.append(Spacer(1, 6*mm))
     
-    # Products table with auto-calculated pallets/m2
+    # Products table — desglose cara-cliente (sin palés/m²; ir a resumen log. si CIF)
     prod_data = [[
-        Paragraph('<b>Descripción producto</b>', sty['center']),
-        Paragraph('<b>Ref. Fassa</b>', sty['center']),
-        Paragraph('<b>Ud.</b>', sty['center']),
-        Paragraph('<b>Cantidad</b>', sty['center']),
-        Paragraph('<b>Palés</b>', sty['center']),
-        Paragraph('<b>M²</b>', sty['center']),
-        Paragraph('<b>Precio/ud (€)</b>', sty['right']),
-        Paragraph('<b>Total (€)</b>', sty['right']),
+        Paragraph('Descripción producto', sty['th_c']),
+        Paragraph('Ref. Fassa', sty['th_c']),
+        Paragraph('Ud.', sty['th_c']),
+        Paragraph('Cantidad', sty['th_c']),
+        Paragraph('Precio/ud ($)', sty['th_r']),
+        Paragraph('Total ($)', sty['th_r']),
     ]]
     total_pal = 0
     total_m2 = 0
     total_kg = 0
     # Agregar líneas con mismo SKU para la tabla de detalle (evita duplicados)
     detail_lines = _aggregate_lines_by_sku(lines)
+    # Venta por línea prorrateada del total para que la suma cuadre con TOTAL (EXW y CIF)
+    product_cost_eur = offer['total_product_eur'] or 0
     for line in detail_lines:
         qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
-        sub = line['price'] * qty_waste
+        cost_line_eur = line['price'] * qty_waste
+        sale_line_eur = (cost_line_eur / product_cost_eur * total_eur) if product_cost_eur > 0 else 0
+        price_unit_sale_usd = (sale_line_eur / qty_waste * fx) if qty_waste else 0
 
         # Lookup product for pallet/m2/kg data
         prod = db.execute('SELECT units_per_pallet, sqm_per_pallet, kg_per_unit FROM products WHERE sku = ?',
@@ -3228,29 +3257,22 @@ def offer_pdf(offer_id):
             Paragraph(line['sku'], sty['center']),
             Paragraph(line.get('unit', 'ud'), sty['center']),
             Paragraph(f'{qty_waste:,}', sty['center']),
-            Paragraph(str(pal) if pal else '—', sty['center']),
-            Paragraph(f'{m2:,.0f}' if m2 else '—', sty['center']),
-            Paragraph(f"€ {line['price']:,.2f}", sty['right']),
-            Paragraph(f"€ {sub:,.2f}", sty['right']),
+            Paragraph(f"$ {price_unit_sale_usd:,.2f}", sty['right']),
+            Paragraph(f"$ {sale_line_eur * fx:,.2f}", sty['right']),
         ])
-    
-    prod_data.append(['', '', '', '', '', '',
+
+    prod_data.append(['', '', '', '',
         Paragraph('<b>TOTAL</b>', sty['bold']),
-        Paragraph(f"<b>€ {total_eur:,.2f}</b>", sty['right']),
+        Paragraph(f"<b>$ {total_usd:,.2f}</b>", sty['right']),
     ])
-    prod_data.append(['', '', '', '', '', '',
-        Paragraph(f'TC EUR/USD: {fx:.4f}', sty['small']),
-        Paragraph(f"<b>$ {total_usd:,.2f} USD</b>", sty['right']),
-    ])
-    
-    prod_tbl = Table(prod_data, colWidths=[W*0.30, W*0.14, W*0.06, W*0.09, W*0.06, W*0.10, W*0.11, W*0.14])
+
+    prod_tbl = Table(prod_data, colWidths=[W*0.38, W*0.16, W*0.08, W*0.12, W*0.12, W*0.14])
     prod_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-        ('BACKGROUND', (0,-2), (-1,-1), GOLD_SOFT),
-        ('BACKGROUND', (0,-3), (-1,-3), BONE),
-        ('LINEBELOW', (0,0), (-1,-4), 0.3, colors.HexColor('#CCCCCC')),
-        ('LINEABOVE', (0,-3), (-1,-3), 1, GOLD),
+        ('BACKGROUND', (0,-1), (-1,-1), GOLD_SOFT),
+        ('LINEBELOW', (0,0), (-1,-2), 0.3, colors.HexColor('#CCCCCC')),
+        ('LINEABOVE', (0,-1), (-1,-1), 1, GOLD),
         ('TOPPADDING', (0,0), (-1,-1), 3),
         ('BOTTOMPADDING', (0,0), (-1,-1), 3),
         ('LEFTPADDING', (0,0), (-1,-1), 4),
@@ -3258,33 +3280,37 @@ def offer_pdf(offer_id):
     ]))
     story.append(prod_tbl)
     story.append(Spacer(1, 6*mm))
-    
-    # Logistics summary
-    story.append(Paragraph('RESUMEN LOGÍSTICO', sty['h1']))
-    story.append(Spacer(1, 2*mm))
-    log_data = [
-        [Paragraph('<b>Puerto salida</b>', sty['bold']), Paragraph('Valencia, España', sty['p']),
-         Paragraph('<b>Puerto destino</b>', sty['bold']), Paragraph('Puerto Caucedo, R. Dominicana', sty['p'])],
-        [Paragraph('<b>Tipo contenedor</b>', sty['bold']), Paragraph("40' Standard", sty['p']),
-         Paragraph('<b>Nº contenedores</b>', sty['bold']), Paragraph(str(offer['container_count'] or 0), sty['p'])],
-        [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(f'{total_pal:,}' if total_pal else '—', sty['p']),
-         Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'{total_kg:,.0f} kg' if total_kg else '—', sty['p'])],
-        [Paragraph('<b>M² totales</b>', sty['bold']), Paragraph(f'{total_m2:,.0f} m²' if total_m2 else '—', sty['p']),
-         Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(offer['incoterm'] or 'EXW', sty['p'])],
-        [Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p']),
-         Paragraph('', sty['p']), Paragraph('', sty['p'])],
-    ]
-    log_tbl = Table(log_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
-    log_tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), LGRAY),
-        ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-        ('LEFTPADDING', (0,0), (-1,-1), 6),
-        ('RIGHTPADDING', (0,0), (-1,-1), 6),
-    ]))
-    story.append(log_tbl)
-    story.append(Spacer(1, 6*mm))
+
+    # Logistics summary — solo cuando el flete lo gestiona Arias (no-EXW).
+    # En EXW el cliente se encarga del transporte; incluir puerto destino,
+    # contenedores, etc. confunde porque no aplica al alcance del pedido.
+    incoterm_upper = (offer['incoterm'] or 'EXW').upper()
+    if incoterm_upper != 'EXW':
+        story.append(Paragraph('RESUMEN LOGÍSTICO', sty['h1']))
+        story.append(Spacer(1, 2*mm))
+        log_data = [
+            [Paragraph('<b>Puerto salida</b>', sty['bold']), Paragraph('Valencia, España', sty['p']),
+             Paragraph('<b>Puerto destino</b>', sty['bold']), Paragraph('Puerto Caucedo, R. Dominicana', sty['p'])],
+            [Paragraph('<b>Tipo contenedor</b>', sty['bold']), Paragraph("40' Standard", sty['p']),
+             Paragraph('<b>Nº contenedores</b>', sty['bold']), Paragraph(str(offer['container_count'] or 0), sty['p'])],
+            [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(f'{total_pal:,}' if total_pal else '—', sty['p']),
+             Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'{total_kg:,.0f} kg' if total_kg else '—', sty['p'])],
+            [Paragraph('<b>M² totales</b>', sty['bold']), Paragraph(f'{total_m2:,.0f} m²' if total_m2 else '—', sty['p']),
+             Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(incoterm_upper, sty['p'])],
+            [Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p']),
+             Paragraph('', sty['p']), Paragraph('', sty['p'])],
+        ]
+        log_tbl = Table(log_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
+        log_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), LGRAY),
+            ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(log_tbl)
+        story.append(Spacer(1, 6*mm))
     story.append(Paragraph('Arias Group Caribe SRL  ·  RNC 1-33-63109-1  ·  Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203, Santo Domingo, D.N.  ·  Distribución técnica Fassa Bortolo', sty['footer']))
     
     doc.build(story)
