@@ -3264,6 +3264,7 @@ def offer_pdf(offer_id):
         [Paragraph('Palés totales', sty['p']), Paragraph(f'{sum_pallets:,}' if sum_pallets else '—', sty['right'])],
         [Paragraph('Peso bruto aproximado', sty['p']), Paragraph(f'{sum_kg:,.0f} kg' if sum_kg else '—', sty['right'])],
         [Paragraph('Moneda', sty['p']), Paragraph('USD (dólares estadounidenses)', sty['right'])],
+        [Paragraph('Tipo de cambio aplicado', sty['p']), Paragraph(f'{fx:.3f} EUR/USD', sty['right'])],
         [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (USD)</b>', sty['bold']), Paragraph(f'<b>$ {total_usd:,.2f}</b>', sty['right'])],
     ]
     econ_tbl = Table(econ_data, colWidths=[W*0.65, W*0.35])
