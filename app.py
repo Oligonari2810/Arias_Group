@@ -540,6 +540,7 @@ def init_db() -> None:
     _audit_fixes_20260423(db)
     _audit_catalog_fixes_20260423(db)
     _audit_catalog_fixes_20260423_v2(db)
+    _audit_logistics_fixes_20260424(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -817,6 +818,81 @@ def _audit_catalog_fixes_20260423_v2(db: sqlite3.Connection) -> None:
             f'[migration] catálogo v2: {updated} SKUs actualizados '
             f'(STD Calliano / cintas / tornillos), {deleted} placas no comerciales eliminadas'
         )
+
+
+def _audit_logistics_fixes_20260424(db: sqlite3.Connection) -> None:
+    """Correcciones de datos logísticos detectadas tras la auditoría de catálogo.
+
+    1) STD origen Calliano — units_per_pallet y sqm_per_pallet estaban con
+       valores de Tarancón (carga original), pero al ser placas no servibles
+       desde Tarancón vienen de Calliano, donde la densidad de palé es
+       distinta (más placas por palé). Impacto: el motor estimate_containers
+       sobrestima palés cuando se pide una de estas 5 placas → contenedores
+       extra innecesarios en la oferta.
+
+       Tarifa Gypsotech Abril 2026, columna "N° PLACAS/PALÉ CALLIANO (L)":
+       - P00A000260A0 STD 10mm 2600: 48→66, 149,76→205,92 m²/palé
+       - P00A000270A0 STD 10mm 2700: 48→66, 155,52→213,84 m²/palé
+       - P00A003320A0 STD 13mm 3200: 36→40, 138,24→153,60 m²/palé
+       - P00A003360A0 STD 13mm 3600: 36→40, 155,52→172,80 m²/palé
+       - P00A008250A0 STD 18mm 2500: 24→34,  72,00→102,00 m²/palé
+
+    2) C367038269A Montante 70/37 Z1 — kg_per_unit calculado como si fuera
+       2990mm (2,09 kg) pero el SKU indica 2690mm. Corregido a 0,70 kg/ml ×
+       2,69 m = 1,88 kg (peso Fassa según anexo perfiles).
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_logistics_fixes_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+
+    # 1) STD Calliano — uds/palé y m²/palé correctos de origen Calliano.
+    std_pallet_fix = [
+        # (sku, old_upp, new_upp, new_sqm_per_pallet)
+        ('P00A000260A0', 48.0, 66.0, 205.92),
+        ('P00A000270A0', 48.0, 66.0, 213.84),
+        ('P00A003320A0', 36.0, 40.0, 153.60),
+        ('P00A003360A0', 36.0, 40.0, 172.80),
+        ('P00A008250A0', 24.0, 34.0, 102.00),
+    ]
+    for sku, expected_old, new_upp, new_sqm in std_pallet_fix:
+        row = db.execute(
+            'SELECT units_per_pallet FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['units_per_pallet'] is None:
+            continue
+        if abs(float(row['units_per_pallet']) - expected_old) > 0.01:
+            continue
+        db.execute(
+            '''UPDATE products
+               SET units_per_pallet = ?, sqm_per_pallet = ?
+               WHERE sku = ?''',
+            (new_upp, new_sqm, sku),
+        )
+        updated += 1
+
+    # 2) Montante 70/37 Z1 2690mm — peso correcto.
+    row = db.execute(
+        "SELECT kg_per_unit FROM products WHERE sku = 'C367038269A'"
+    ).fetchone()
+    if row and row['kg_per_unit'] is not None and abs(float(row['kg_per_unit']) - 2.09) < 0.01:
+        db.execute(
+            "UPDATE products SET kg_per_unit = 1.88 WHERE sku = 'C367038269A'"
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_logistics_fixes_20260424_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] logística 2026-04-24: {updated} SKUs corregidos (STD Calliano uds/palé + Montante 70/37 2690 peso)')
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
