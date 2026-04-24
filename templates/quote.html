@@ -557,12 +557,10 @@ function recalcAll() {
     const routeSel = document.getElementById('routeSelect');
     const routeOpt = routeSel.options[routeSel.selectedIndex];
     if (routeOpt && routeOpt.value) {
-      if (containerRec) {
-        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40hc';
-        oceanFreight = parseFloat(routeOpt.dataset[rateKey]) || parseFloat(routeOpt.dataset.c40hc) || 0;
-      } else {
-        oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
-      }
+      // Sin estimación previa se asume 40HC (el motor nuevo usa 40HC por
+      // defecto). Si el usuario luego cambia el tipo, recomputeLogistics
+      // recalcula con el contenedor real.
+      oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
     }
     const logBase = oceanFreight * containerCount;
     logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
@@ -615,7 +613,11 @@ function recalcAll() {
       <td class="num">${fmtN(line.price)}</td>
       <td class="num">${fmtN(line.price * fx)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
-          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
+          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${
+            wastePct > 0 && qtyW > line.qty
+              ? `<div style="font-size:0.75em; color:#666;" title="Incluye ${(wastePct*100).toFixed(0)}% de merma">+merma → ${fmtQ(qtyW)}</div>`
+              : ''
+          }${packAlert}</td>
       <td class="num"><input type="number" value="${(logPerUnit || 0).toFixed(4)}" min="0" step="0.0001"
           style="width:85px; text-align:right; ${logInputStyle}"
           title="${line.logCostManual ? 'Override manual' : 'Imputación automática del motor'}"

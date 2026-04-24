@@ -3907,6 +3907,13 @@ def offer_pdf(offer_id):
         ('RIGHTPADDING', (0,0), (-1,-1), 4),
     ]))
     story.append(prod_tbl)
+    waste_pct_int = int(round(offer['waste_pct'] or 0))
+    if waste_pct_int > 0:
+        story.append(Spacer(1, 1*mm))
+        story.append(Paragraph(
+            f'* Cantidades incluyen {waste_pct_int}% de merma sobre la necesidad neta del proyecto.',
+            sty['small'],
+        ))
     story.append(Spacer(1, 6*mm))
 
     # Logistics summary — solo cuando el flete lo gestiona Arias (no-EXW).
