@@ -148,7 +148,7 @@
         {% endfor %}
       </select>
     </div>
-    <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="recalcAll()"></div>
+    <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="onContainerCountChange()"></div>
     <div><label>Margen logística %</label><input type="number" id="logMarginInput" value="0" min="0" max="50" step="1" oninput="recalcAll()"></div>
     <div><label>Coste logístico</label><div id="logisticCostDisplay" class="mono">€ 0.00</div></div>
     <div style="align-self:end;">
@@ -510,14 +510,41 @@ async function recomputeLogistics() {
       const p = j.per_sku.find(x => x.sku === l.sku);
       l.logUnitCost = p ? p.unit_log_cost_eur : 0;
     });
-    // Update container count.
+    // Update container count. Guardamos N + coste/cont del motor para poder
+    // reescalar si el usuario cambia el contador después.
     document.getElementById('containerCount').value = j.n_containers;
+    window._motorCalc = {
+      nContainers: j.n_containers,
+      costPerContainer: costPerCont,
+    };
     const drv = {'pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
     state.innerHTML = `<b>${j.n_containers}×${containerType}</b> · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
     recalcAll();
   } catch (e) {
     state.textContent = 'error de red: ' + e.message;
   }
+}
+
+// Al cambiar manualmente el número de contenedores después de pulsar
+// "Calcular logística", reescalamos el logUnitCost por línea proporcional
+// al nuevo N (asume coste por contenedor constante). Las líneas con
+// override manual (logCostManual=true) no se tocan.
+function onContainerCountChange() {
+  const newN = parseInt(document.getElementById('containerCount').value) || 0;
+  const motor = window._motorCalc;
+  if (motor && motor.nContainers > 0 && newN > 0 && newN !== motor.nContainers) {
+    const ratio = newN / motor.nContainers;
+    lines.forEach(l => {
+      if (l.logCostManual) return;
+      l.logUnitCost = (l.logUnitCost || 0) * ratio;
+    });
+    motor.nContainers = newN;  // nueva referencia para futuras reescaladas
+    const state = document.getElementById('logisticsState');
+    if (state) {
+      state.innerHTML += ` · <span style="color:#b8860b;">ajustado a ${newN} cont.</span>`;
+    }
+  }
+  recalcAll();
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
