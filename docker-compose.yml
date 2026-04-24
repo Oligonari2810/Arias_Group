@@ -1,0 +1,48 @@
+# Local Postgres dev + test containers for Arias_Group.
+# See docs/specs/SPEC-002.md §15 / SPEC-002a.
+#
+#   docker compose up -d              # starts postgres (dev) + postgres-test
+#   docker compose logs -f postgres   # tail logs
+#   docker compose down -v            # stop & wipe volumes (dev data loss!)
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: arias-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: arias
+      POSTGRES_PASSWORD: arias
+      POSTGRES_DB: arias_dev
+    ports:
+      # Host port 5434 — 5432 is often taken by Homebrew Postgres on dev Macs.
+      - "5434:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arias -d arias_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-test:
+    image: postgres:16
+    container_name: arias-postgres-test
+    restart: "no"
+    environment:
+      POSTGRES_USER: arias
+      POSTGRES_PASSWORD: arias
+      POSTGRES_DB: arias_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data   # volatile: each restart is clean
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arias -d arias_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_dev_data:
+    name: arias_postgres_dev_data

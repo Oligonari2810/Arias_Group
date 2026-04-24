@@ -9,39 +9,29 @@ Sistema operativo comercial, técnico y logístico para la distribución de Fass
 - ReportLab (PDF)
 - openpyxl (lectura Excel)
 
-## Fuente maestra de datos
+## Fuente de verdad
 
-El catálogo de productos **se lee directamente** desde la hoja `PRODUCT` del archivo Excel:
+La **DB SQLite `fassa_ops.db` es la fuente de verdad** del catálogo, clientes, proyectos, cotizaciones y toda la operativa. Todas las ediciones (precios, nuevos SKUs, datos logísticos) se hacen desde la app vía `/products`, `/masters` y flujos relacionados.
 
-```
-Arias_Group_Master-System_v1.xlsx  ← fuente maestra (186 SKUs)
-```
+> ℹ️ Los Excel antiguos (`Arias_Group_Master-System_v1.xlsx`, `PRODUCT_AriasGroup_v4.xlsx`) y el script `load_catalog.py` quedan archivados en `old/`. La DB ya contiene 60 SKUs nuevos y campos logísticos (dimensiones de palé, apilabilidad, descuentos compuestos) que esos Excel no tienen — sincronizar desde Excel hoy sería destructivo.
 
-Cada vez que actualices precios, productos o datos logísticos en el Excel, **vuelve a ejecutar** `load_catalog.py`.
+## Exportar catálogo a Excel
+
+Para revisión humana, backup o futuro import a un ERP externo, el catálogo se exporta al vuelo desde la DB:
+
+- **Bajo demanda:** botón "Descargar catálogo" en `/products` o `GET /api/export/catalog.xlsx`.
+- **Snapshot diario automático:** `docs/exports/catalog_YYYY-MM-DD.xlsx`.
 
 ## Arranque rápido
 
 ```bash
-cd Mvp_Arias_Fassa
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python app.py                      # Inicializa DB + seed + arranca en :5000
+python app.py                      # Inicializa DB + seed + arranca en :5050
 ```
 
-Abrir → http://127.0.0.1:5000/
-
-## Sincronizar catálogo (cada vez que cambies el Excel)
-
-```bash
-python load_catalog.py
-```
-
-Este script lee las 186 filas de la hoja `PRODUCT` y las carga en la DB SQLite con:
-- SKU, nombre, categoría, unidad, precio
-- Peso neto por unidad
-- Uds/palet y m²/palet
-- HS Code + Norma en las notas
+Abrir → http://127.0.0.1:5050/
 
 ## Módulos
 
@@ -59,14 +49,12 @@ Este script lee las 186 filas de la hoja `PRODUCT` y las carga en la DB SQLite c
 ## Flujo de datos
 
 ```
-EXCEL PRODUCT (186 SKUs)
-        │
-        ▼  load_catalog.py
-   SQLite DB (fassa_ops.db)
+   SQLite DB (fassa_ops.db)   ← fuente de verdad
         │
         ├─► Web App → Catálogo / Cotización / PDF
         ├─► Calculadora → m² → SKUs → palés → contenedor
-        └─► Pipeline 26 etapas → CRM → Oferta → Entrega
+        ├─► Pipeline 26 etapas → CRM → Oferta → Entrega
+        └─► Export xlsx (bajo demanda + snapshot diario)
 ```
 
 ## Exportación PDF de oferta
@@ -74,6 +62,54 @@ EXCEL PRODUCT (186 SKUs)
 Desde el detalle de cualquier proyecto → sección Ofertas → botón **Descargar PDF**.
 
 Genera documento con cabecera Fassa–Arias Group, tabla de materiales, resumen económico y condiciones EXW.
+
+## Local Postgres dev environment (SPEC-002a)
+
+A `docker-compose.yml` in the repo provides two Postgres 16 containers:
+
+```bash
+docker compose up -d postgres postgres-test    # start both
+docker compose down -v                         # stop + wipe dev volume
+```
+
+- `postgres`     → host port **5434**, persistent volume, DB `arias_dev`
+- `postgres-test` → host port **5433**, volatile tmpfs, DB `arias_test`
+
+Copy `.env.example` to `.env`, adjust the `DATABASE_URL` and `TEST_DATABASE_URL`
+if you change ports. App code does **not** use Postgres yet (that comes in
+SPEC-002c); only the new `db/` skeleton, Alembic and the integration tests
+under `tests/integration/test_db_skeleton.py` talk to it today.
+
+Alembic baseline commands (no migrations landed until SPEC-002b):
+
+```bash
+alembic current
+alembic history
+alembic upgrade head    # no-op while versions/ is empty
+```
+
+## Running tests
+
+```bash
+# Install dev deps
+pip install -r requirements.txt -r requirements-dev.txt
+
+# Ensure Postgres test container is up (needed for db/ skeleton tests)
+docker compose up -d postgres-test
+export TEST_DATABASE_URL=postgresql+psycopg://arias:arias@localhost:5433/arias_test
+
+# Full test run with coverage (writes coverage.json)
+pytest
+
+# Validate per-function coverage gate (SPEC-001 §6.4)
+pytest tests/test_coverage_gate.py --no-cov -v -s
+```
+
+El test suite cubre el motor de cálculo de cotización (`_num`, `detect_family`,
+`compute_line`, `_container_result`, `estimate_containers`, `compute_totals`,
+`dedup_alerts`, `calculate_quote`) con ≥85% de cobertura por función y ≥90% en
+`calculate_quote`. El workflow CI (`.github/workflows/tests.yml`) corre ambos
+comandos en cada push y pull request.
 
 ## Próximos pasos
 
