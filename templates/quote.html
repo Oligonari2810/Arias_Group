@@ -219,6 +219,8 @@
   <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima. <b>Precios en USD</b>; la app sigue calculando internamente en EUR y convierte con el FX EUR/USD del input superior.</p>
 </details>
 
+<div id="preflightWarnings" style="display:none; margin-top:8px; padding:8px 12px; border:1px solid #b8860b; background:#fffbea; font-size:0.85em; border-radius:3px;"></div>
+
 <div style="margin-top:8px;">
   <button type="button" onclick="clearAll()">Limpiar</button>
   <button type="button" onclick="generateOffer()">Generar oferta → Logística</button>
@@ -664,6 +666,45 @@ function recalcAll() {
   document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
 
   renderCompetitionPanel(lines, wastePct, fx);
+  renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount);
+}
+
+// Avisos no bloqueantes antes de generar la oferta. Detecta condiciones
+// que casi siempre son errores de dedo (flete 0 en CIF, margen muy bajo,
+// línea con cantidad 0, etc.) y las muestra en una caja ámbar arriba del
+// botón Generar. No impiden guardar — solo llaman la atención.
+function renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount) {
+  const warns = [];
+  const globalMargin = parseFloat(document.getElementById('marginInput').value) || 0;
+  if (lines.length === 0) {
+    document.getElementById('preflightWarnings').style.display = 'none';
+    return;
+  }
+  if (globalMargin > 0 && globalMargin < 5) {
+    warns.push(`Margen base muy bajo (${globalMargin}%). Verifica que es intencional.`);
+  }
+  lines.forEach((l, i) => {
+    if (!l.qty || l.qty <= 0) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): cantidad 0.`);
+    }
+    if (l.margin !== undefined && l.margin !== '' && l.margin < 5) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): margen ${l.margin}% — confirmar que es correcto.`);
+    }
+  });
+  if (incoterm !== 'EXW' && !useLogImputed && effectiveLogistic <= 0) {
+    warns.push(`Incoterm ${incoterm} pero flete 0€. Pulsa "🔄 Calcular logística" o introduce coste manual.`);
+  }
+  if (incoterm !== 'EXW' && containerCount <= 0) {
+    warns.push(`Incoterm ${incoterm} sin contenedores definidos. Pulsa "🔄 Calcular logística".`);
+  }
+  const warnDiv = document.getElementById('preflightWarnings');
+  if (warns.length === 0) {
+    warnDiv.style.display = 'none';
+  } else {
+    warnDiv.innerHTML = '<b>⚠ Antes de emitir, revisa:</b><ul style="margin:4px 0 0 18px; padding:0;">'
+      + warns.map(w => `<li>${escapeHtml(w)}</li>`).join('') + '</ul>';
+    warnDiv.style.display = 'block';
+  }
 }
 
 function renderCompetitionPanel(lines, wastePct, fx) {
