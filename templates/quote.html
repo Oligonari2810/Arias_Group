@@ -33,7 +33,9 @@
   </div>
   <div>
     <label>Nº Oferta</label>
-    <input type="text" id="offerNumber" placeholder="2026-001">
+    <input type="text" id="offerNumber" placeholder="Se asigna al guardar" readonly
+           title="El número de oferta se asigna automáticamente al guardar para garantizar unicidad."
+           style="background:#f5f5f5; color:#666;">
   </div>
 </div>
 
@@ -116,7 +118,14 @@
 <div class="row" style="margin-top:6px;">
   <div><label>Desperdicio %</label><input type="number" id="wasteInput" value="5" min="0" max="50" step="1" oninput="recalcAll()"></div>
   <div><label>Margen base %</label><input type="number" id="marginInput" value="20" min="0" max="100" step="1" oninput="applyGlobalMargin()"></div>
-  <div><label>FX EUR/USD</label><input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001" oninput="recalcAll()"></div>
+  <div>
+    <label>FX EUR/USD</label>
+    <input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001"
+           oninput="recalcAll(); checkFxWarning();"
+           data-official="{{ fx_rate }}">
+    <div id="fxWarning" style="display:none; font-size:0.75em; color:#b8860b; margin-top:2px;"></div>
+  </div>
+  <div><label>Validez (días)</label><input type="number" id="validityInput" value="30" min="1" max="365" step="1"></div>
   <div>
     <label>Incoterm</label>
     <select id="incotermSelect" onchange="onIncotermChange()">
@@ -513,6 +522,22 @@ async function recomputeLogistics() {
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+function checkFxWarning() {
+  const input = document.getElementById('fxInput');
+  const warnDiv = document.getElementById('fxWarning');
+  if (!input || !warnDiv) return;
+  const official = parseFloat(input.dataset.official) || 0;
+  const current = parseFloat(input.value) || 0;
+  if (official <= 0 || current <= 0) { warnDiv.style.display = 'none'; return; }
+  const diffPct = Math.abs(current - official) / official * 100;
+  if (diffPct > 5) {
+    warnDiv.innerHTML = `⚠ FX ${current.toFixed(3)} difiere ${diffPct.toFixed(1)}% del oficial (${official.toFixed(3)}). Verifica antes de emitir.`;
+    warnDiv.style.display = 'block';
+  } else {
+    warnDiv.style.display = 'none';
+  }
+}
+
 function fmtN(n, dec) {
   if (dec === undefined) dec = 2;
   return Number(n).toLocaleString('es-ES', {minimumFractionDigits: dec, maximumFractionDigits: dec});
@@ -759,7 +784,9 @@ function generateOffer() {
   const projSel = document.getElementById('projectSelect');
   const projOpt = projSel.options[projSel.selectedIndex];
   const project = (projOpt && projOpt.value) ? projOpt.dataset.name : 'Proyecto sin nombre';
-  const offerNum = document.getElementById('offerNumber').value || '2026-' + Date.now().toString().slice(-4);
+  // En CREATE: dejamos que el backend asigne el número único (ignora lo que enviemos).
+  // En EDIT: respetamos el existente cargado desde la oferta.
+  const offerNum = document.getElementById('offerNumber').value || '';
 
   const _wg = parseFloat(document.getElementById('wasteInput').value);
   const wastePct = isNaN(_wg) ? 5 : _wg;
@@ -786,9 +813,11 @@ function generateOffer() {
   });
 
   const editId = document.getElementById('editOfferId').value;
+  const _vd = parseInt(document.getElementById('validityInput').value);
+  const validityDays = isNaN(_vd) || _vd < 1 ? 30 : _vd;
   const offer = {
     client, project, offerNumber: offerNum,
-    wastePct, margin, fx, incoterm,
+    wastePct, margin, fx, incoterm, validityDays,
     logisticCost, containerCount: containers, routeId,
     totalPallets: Math.ceil(totalPallets),
     totalWeight: Math.round(totalWeight),
@@ -806,8 +835,10 @@ function generateOffer() {
   .then(data => {
     if (data.ok) {
       const action = editId ? 'actualizada' : 'generada';
+      const assignedNum = data.offer_number || offerNum;
+      document.getElementById('offerNumber').value = assignedNum;
       const banner = document.getElementById('offerBanner');
-      banner.innerHTML = 'Oferta <b>' + escapeHtml(offerNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
+      banner.innerHTML = 'Oferta <b>' + escapeHtml(assignedNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
       banner.style.display = 'block';
       if (editId) {
         document.getElementById('editOfferId').value = '';
@@ -824,6 +855,7 @@ document.addEventListener('DOMContentLoaded', function() {
   onFamilyChange();
   onClientSelect();
   onIncotermChange();
+  checkFxWarning();
 
   {% if edit_offer %}
   const editData = {{ edit_offer|tojson }};
@@ -833,7 +865,11 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('offerNumber').value = editData.offer_number || '';
   document.getElementById('wasteInput').value = editData.waste_pct || 0;
   document.getElementById('marginInput').value = editData.margin_pct || 20;
-  if (editData.fx_rate) document.getElementById('fxInput').value = editData.fx_rate;
+  if (editData.validity_days) document.getElementById('validityInput').value = editData.validity_days;
+  if (editData.fx_rate) {
+    document.getElementById('fxInput').value = editData.fx_rate;
+    checkFxWarning();
+  }
   if (editData.incoterm) {
     document.getElementById('incotermSelect').value = editData.incoterm;
     onIncotermChange();

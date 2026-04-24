@@ -102,6 +102,7 @@ _SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 _SAFE_COLUMN_TYPES = frozenset({
     'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
     'REAL DEFAULT 50', 'REAL DEFAULT 5', 'INTEGER DEFAULT 99',
+    'INTEGER DEFAULT 30',
 })
 
 
@@ -362,6 +363,7 @@ def init_db() -> None:
             incoterm TEXT DEFAULT 'EXW',
             route_id INTEGER,
             container_count INTEGER DEFAULT 0,
+            validity_days INTEGER DEFAULT 30,
             created_at TEXT NOT NULL,
             updated_at TEXT
         );
@@ -523,6 +525,9 @@ def init_db() -> None:
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
         _safe_add_column(db, 'pending_offers', 'raw_hash', 'TEXT')
+    if 'validity_days' not in offer_cols:
+        _safe_add_column(db, 'pending_offers', 'validity_days', 'INTEGER DEFAULT 30')
+        db.execute('UPDATE pending_offers SET validity_days = 30 WHERE validity_days IS NULL')
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
         _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
@@ -532,6 +537,526 @@ def init_db() -> None:
     # Migración one-shot: aplicar descuento compuesto (base + extra) a precio_arias.
     # Se marca en app_settings para no volver a correr en restarts posteriores.
     _apply_compound_discount_once(db)
+    _audit_fixes_20260423(db)
+    _audit_catalog_fixes_20260423(db)
+    _audit_catalog_fixes_20260423_v2(db)
+    _audit_logistics_fixes_20260424(db)
+    _audit_catalog_completion_20260424(db)
+
+
+def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Migraciones one-shot derivadas de la auditoría 2026-04-23.
+
+    - Cancela la oferta duplicada id=18 (compartía offer_number 2026-8464 con #19).
+    - Alinea doc_sequences.OFR al máximo numérico existente para que
+      el backend genere a partir de ahí números únicos y secuenciales.
+
+    Idempotente: flag en app_settings para no re-ejecutar en restarts.
+    """
+    flag = db.execute("SELECT value FROM app_settings WHERE key = 'audit_fixes_20260423_applied'").fetchone()
+    if flag:
+        return
+
+    dup = db.execute(
+        "SELECT id, offer_number, status FROM pending_offers WHERE id = 18 AND offer_number = '2026-8464'"
+    ).fetchone()
+    if dup and dup['status'] == 'pending':
+        db.execute(
+            "UPDATE pending_offers SET status = 'cancelled', updated_at = ? WHERE id = 18",
+            (now_iso(),),
+        )
+        db.execute(
+            "INSERT INTO audit_log (offer_id, action, detail, username, created_at) VALUES (?,?,?,?,?)",
+            (
+                18,
+                'OFFER_CANCELLED',
+                'Auto-cancelada por auditoría 2026-04-23: offer_number 2026-8464 duplicado '
+                'con oferta #19 (Palmira V2). Esta era la versión previa con proyecto sin nombre.',
+                'audit-system',
+                now_iso(),
+            ),
+        )
+
+    max_num = 0
+    for row in db.execute("SELECT offer_number FROM pending_offers").fetchall():
+        n = row['offer_number'] or ''
+        parts = n.split('-')
+        if len(parts) == 2 and parts[1].isdigit():
+            max_num = max(max_num, int(parts[1]))
+    if max_num > 0:
+        existing = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+        if existing:
+            if existing['last_number'] < max_num:
+                db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (max_num,))
+        else:
+            db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (max_num,))
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_fixes_20260423_applied', now_iso(), now_iso()),
+    )
+    db.commit()
+    print('[migration] auditoría 2026-04-23 aplicada: duplicado #18 cancelado, secuencia OFR alineada')
+
+
+def _audit_catalog_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Correcciones de catálogo derivadas de la auditoría contra Tarifa Fassa
+    Hispania Abril 2026 + Tarifa Gypsotech Abril 2026 + Anexo Gypsotech Nov 2025.
+
+    Arias Group compra FCA Tarancón. Varios SKUs tenían cargado el precio del
+    punto de recogida de Fátima-PT o Antas, no Tarancón. Esto hacía que el
+    motor aplicara 50%+5% descuento sobre un PVP más bajo del real, dejando
+    menos margen del calculado en presupuestos.
+
+    También: bug numérico en pvp_per_m2 de AQUASUPER BA 13mm 1200×2700
+    (9.5473 en lugar de 7.1605). No afecta cálculos (se usa unit_price_eur)
+    pero sí la visualización si se expone pvp_per_m2.
+
+    Idempotente: flag audit_catalog_fixes_20260423_applied en app_settings.
+    Los precios nuevos aplican solo a ofertas futuras — lines_json congela
+    el precio vigente al emitir, las ofertas ya enviadas no se recalculan.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    # SKUs con punto de recogida corregido a Tarancón (PVP verificado contra
+    # Tarifa Fassa Hispania Abril 2026, columna "Tarancón/Madrid"). El
+    # precio_arias y unit_price se recalculan con descuento compuesto 50%+5%.
+    tarancon_fixes = [
+        # (sku, pvp_anterior, pvp_tarancon, nombre)
+        ('420Y1A',  3.99,  5.48,  'KI 7'),
+        ('1188F',   5.43,  7.14,  'FASSACOL ONE GRIS'),
+        ('1783Y1A', 5.73,  7.15,  'FASSACOL PRIME GRIS'),
+        ('1772Y1A', 11.45, 12.89, 'FASSACOL MULTI BLANCO'),
+        ('1774Y1A', 13.67, 14.85, 'FASSACOL FLEX BLANCO'),
+        ('1778Y1A', 24.09, 25.58, 'FASSACOL ULTRAFLEX S1 BLANCO'),
+        ('1779Y1A', 22.69, 24.19, 'FASSACOL ULTRAFLEX S1 GRIS'),
+        ('1077F',   17.03, 18.89, 'AQUAZIP GE 97 Comp A'),
+    ]
+    updated = 0
+    for sku, expected_old, new_pvp, _name in tarancon_fixes:
+        row = db.execute(
+            'SELECT pvp_eur_unit FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        current = row['pvp_eur_unit']
+        # Solo actualizar si el valor actual coincide con el que detectamos,
+        # por si alguien lo corrigió manualmente antes de esta migración.
+        if current is None or abs(float(current) - expected_old) > 0.01:
+            continue
+        new_arias = round(new_pvp * 0.475, 4)  # 50% + 5% compuesto
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, sku),
+        )
+        updated += 1
+
+    # Bug numérico pvp_per_m2 AQUASUPER BA 13mm 1200×2700 (P00W003270A0).
+    # PVP 23.20€ / (1.2 × 2.7) m² = 7.1605 €/m², no 9.5473.
+    row = db.execute(
+        "SELECT pvp_eur_unit, pvp_per_m2 FROM products WHERE sku = 'P00W003270A0'"
+    ).fetchone()
+    if row and row['pvp_per_m2'] and abs(float(row['pvp_per_m2']) - 9.5473) < 0.001:
+        correct_m2 = round(float(row['pvp_eur_unit']) / (1.2 * 2.7), 4)
+        db.execute(
+            'UPDATE products SET pvp_per_m2 = ? WHERE sku = ?',
+            (correct_m2, 'P00W003270A0'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] catálogo 2026-04-23: {updated} SKUs corregidos a precio Tarancón + bug pvp_per_m2 AQUASUPER 2700')
+
+
+def _audit_catalog_fixes_20260423_v2(db: sqlite3.Connection) -> None:
+    """Segunda tanda de correcciones de catálogo (decisión comercial 2026-04-23).
+
+    1) STD no-Tarancón → marcar como origen Calliano y ajustar PVP.
+       Las 5 placas STD fuera de Tarancón son comerciales para Arias (se
+       compran desde Calliano). Se mantiene el SKU actual (con prefijo P)
+       para no romper referencias históricas, pero se añade "(origen
+       Calliano)" al nombre y se actualiza PVP al precio Calliano €/m².
+
+    2) Placas no comerciales eliminadas: AQUASUPER 13mm 2700/2800,
+       AQUASUPER 18mm 2600, GypsoSILENS 13mm 2500/3000. Ninguna está
+       referenciada en order_lines ni pending_offers.lines_json
+       (verificado antes de la migración).
+
+    3) Descripciones de cintas guardavivos (304064, 304065) corregidas
+       a Tarifa Abril 2026 (45m y 153m; precios no cambian).
+
+    4) Dimensiones de tornillos Externa Light (301240/241/244/245)
+       corregidas a Tarifa Abril 2026 (Punta Clavo 30/40; Punta Broca
+       32/41). Precios no cambian.
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_v2_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    deleted = 0
+
+    # 1) STD no-Tarancón → origen Calliano (Gypsotech Abril 2026, columna Calliano €/m²).
+    std_calliano = [
+        # (sku, m2_per_placa, calliano_eur_m2, pvp_anterior_esperado)
+        ('P00A000260A0', 3.12, 5.59, 15.48),  # STD BA 10mm 1200×2600
+        ('P00A000270A0', 3.24, 5.59, 16.08),  # STD BA 10mm 1200×2700
+        ('P00A003320A0', 3.84, 4.55, 15.48),  # STD BA 13mm 1200×3200
+        ('P00A003360A0', 4.32, 4.55, 17.42),  # STD BA 13mm 1200×3600
+        ('P00A008250A0', 3.00, 7.15, 17.96),  # STD BA 18mm 1200×2500
+    ]
+    for sku, m2, rate, expected_old in std_calliano:
+        row = db.execute(
+            'SELECT pvp_eur_unit, name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['pvp_eur_unit'] is None:
+            continue
+        if abs(float(row['pvp_eur_unit']) - expected_old) > 0.01:
+            continue
+        new_pvp = round(m2 * rate, 2)
+        new_arias = round(new_pvp * 0.475, 4)
+        new_m2 = round(rate, 4)
+        new_name = row['name'] if '(origen Calliano)' in (row['name'] or '') \
+            else f"{row['name']} (origen Calliano)"
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?,
+                   pvp_per_m2 = ?, name = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, new_m2, new_name, sku),
+        )
+        updated += 1
+
+    # 2) Placas no comerciales eliminadas.
+    non_commercial = [
+        'P00W003270A0',  # AQUASUPER BA 13mm 1200×2700
+        'P00W003280A0',  # AQUASUPER BA 13mm 1200×2800
+        'P00W008260A0',  # AQUASUPER BA 18mm 1200×2600
+        'P00GS03250A0',  # GypsoSILENS BA 13mm 1200×2500
+        'P00GS03300A0',  # GypsoSILENS BA 13mm 1200×3000
+    ]
+    for sku in non_commercial:
+        in_orders = db.execute(
+            'SELECT 1 FROM order_lines WHERE sku = ? LIMIT 1', (sku,)
+        ).fetchone()
+        in_offers = db.execute(
+            "SELECT 1 FROM pending_offers WHERE lines_json LIKE ? LIMIT 1",
+            (f'%{sku}%',),
+        ).fetchone()
+        if in_orders or in_offers:
+            continue  # protección defensiva — no borrar si algo lo referencia
+        res = db.execute('DELETE FROM products WHERE sku = ?', (sku,))
+        if res.rowcount:
+            deleted += 1
+
+    # 3) Cintas guardavivos — descripciones Tarifa Abril 2026 (45m y 153m).
+    cintas_fix = [
+        ('304064',
+         'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×45m — 54 rollos/caja'),
+        ('304065',
+         'Cinta Guardavivos 50mm×30m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×153m — 12 rollos/caja'),
+    ]
+    for sku, old_name, new_name in cintas_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    # 4) Tornillos Externa Light — dimensiones Tarifa Abril 2026.
+    tornillos_fix = [
+        ('301240',
+         'Tornillo Exterior Ø4,0×42 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×30 — 1.000ud'),
+        ('301241',
+         'Tornillo Exterior Ø4,0×41 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×40 — 1.000ud'),
+        ('301244',
+         'Tornillo Exterior Ø4,0×42 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×32 — 500ud'),
+        ('301245',
+         'Tornillo Exterior Ø4,0×41 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×41 — 500ud'),
+    ]
+    for sku, old_name, new_name in tornillos_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_v2_applied',
+         f'updated={updated};deleted={deleted}', now_iso()),
+    )
+    db.commit()
+    if updated or deleted:
+        print(
+            f'[migration] catálogo v2: {updated} SKUs actualizados '
+            f'(STD Calliano / cintas / tornillos), {deleted} placas no comerciales eliminadas'
+        )
+
+
+def _audit_logistics_fixes_20260424(db: sqlite3.Connection) -> None:
+    """Correcciones de datos logísticos detectadas tras la auditoría de catálogo.
+
+    1) STD origen Calliano — units_per_pallet y sqm_per_pallet estaban con
+       valores de Tarancón (carga original), pero al ser placas no servibles
+       desde Tarancón vienen de Calliano, donde la densidad de palé es
+       distinta (más placas por palé). Impacto: el motor estimate_containers
+       sobrestima palés cuando se pide una de estas 5 placas → contenedores
+       extra innecesarios en la oferta.
+
+       Tarifa Gypsotech Abril 2026, columna "N° PLACAS/PALÉ CALLIANO (L)":
+       - P00A000260A0 STD 10mm 2600: 48→66, 149,76→205,92 m²/palé
+       - P00A000270A0 STD 10mm 2700: 48→66, 155,52→213,84 m²/palé
+       - P00A003320A0 STD 13mm 3200: 36→40, 138,24→153,60 m²/palé
+       - P00A003360A0 STD 13mm 3600: 36→40, 155,52→172,80 m²/palé
+       - P00A008250A0 STD 18mm 2500: 24→34,  72,00→102,00 m²/palé
+
+    2) C367038269A Montante 70/37 Z1 — kg_per_unit calculado como si fuera
+       2990mm (2,09 kg) pero el SKU indica 2690mm. Corregido a 0,70 kg/ml ×
+       2,69 m = 1,88 kg (peso Fassa según anexo perfiles).
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_logistics_fixes_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+
+    # 1) STD Calliano — uds/palé y m²/palé correctos de origen Calliano.
+    std_pallet_fix = [
+        # (sku, old_upp, new_upp, new_sqm_per_pallet)
+        ('P00A000260A0', 48.0, 66.0, 205.92),
+        ('P00A000270A0', 48.0, 66.0, 213.84),
+        ('P00A003320A0', 36.0, 40.0, 153.60),
+        ('P00A003360A0', 36.0, 40.0, 172.80),
+        ('P00A008250A0', 24.0, 34.0, 102.00),
+    ]
+    for sku, expected_old, new_upp, new_sqm in std_pallet_fix:
+        row = db.execute(
+            'SELECT units_per_pallet FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['units_per_pallet'] is None:
+            continue
+        if abs(float(row['units_per_pallet']) - expected_old) > 0.01:
+            continue
+        db.execute(
+            '''UPDATE products
+               SET units_per_pallet = ?, sqm_per_pallet = ?
+               WHERE sku = ?''',
+            (new_upp, new_sqm, sku),
+        )
+        updated += 1
+
+    # 2) Montante 70/37 Z1 2690mm — peso correcto.
+    row = db.execute(
+        "SELECT kg_per_unit FROM products WHERE sku = 'C367038269A'"
+    ).fetchone()
+    if row and row['kg_per_unit'] is not None and abs(float(row['kg_per_unit']) - 2.09) < 0.01:
+        db.execute(
+            "UPDATE products SET kg_per_unit = 1.88 WHERE sku = 'C367038269A'"
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_logistics_fixes_20260424_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] logística 2026-04-24: {updated} SKUs corregidos (STD Calliano uds/palé + Montante 70/37 2690 peso)')
+
+
+def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
+    """Completar datos logísticos de consumibles y añadir perfiles Z1 faltantes.
+
+    1) kg_per_unit estimado para 76 SKUs (tornillos, cintas, accesorios,
+       GypsoCOMETE, trampillas) que tenían peso NULL. Valores conservadores
+       basados en prácticas del sector (acero galvanizado, papel kraft,
+       PVC, aluminio o placa yeso alta densidad según material). Se
+       marcan como 'estimated' en notes para que se actualicen cuando
+       lleguen las fichas técnicas oficiales.
+
+    2) 14 nuevos SKUs de perfiles Z1 del Anexo Gypsotech Nov 2025 que no
+       estaban cargados: Montante 48/35 Z1 (7 longitudes), Montante 70/37
+       Z1 (4 longitudes faltantes además de 2690), Montante 90/40 Z1
+       (2 longitudes faltantes) y Perfil TC 47 Z1 de 5300mm. Precio €/ml
+       del anexo × longitud; kg = kg/ml × longitud.
+
+    3) Corrige un error de carga: C344836299B (Montante 48/35 Z2 2990mm)
+       tenía PVP 4,186€ (precio €/ml Z1 = 1,40) cuando le corresponde el
+       €/ml Z2 = 2,15 → PVP = 6,43€. Afecta precio_arias y unit_price.
+
+    Idempotente: INSERT OR IGNORE para no duplicar, flag en app_settings.
+    Las ofertas ya emitidas NO cambian (lines_json congela el precio).
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_completion_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    now = now_iso()
+    updated = 0
+    inserted = 0
+
+    # 1) Pesos estimados para consumibles sin kg_per_unit.
+    # Peso por UNIDAD DE VENTA (caja/rollo/ud/paquete), no por pieza.
+    estimated_weights = {
+        # TORNILLOS — cajas de tornillo fosfatado/cincado + embalaje
+        '304100': 1.00, '304101': 2.00, '304102': 10.00,   # PM Punta Clavo Ø3,5×25
+        '304103': 1.40, '304104': 2.80, '304105': 8.40,   # PM Punta Clavo Ø3,5×35
+        '304106': 3.60, '304107': 4.40,                    # PM Punta Clavo Ø3,5×45 / 55
+        '304108': 3.50, '304109': 4.00,                    # PM Ø4,2×70 / Ø4,8×90
+        '304115': 2.20, '304116': 3.00, '304117': 3.80,   # PM Punta Broca Ø3,5×25/35/45
+        '304123': 2.30, '304124': 3.20, '304125': 4.10,   # AD Ø3,9×25/35/45
+        '304126': 5.00, '304128': 3.50,                    # AD Ø3,9×55 / ×70
+        '304133': 0.50, '304134': 1.80, '304135': 2.50,   # MM Punta Broca
+        '301240': 3.00, '301241': 3.50,                    # Externa Light Punta Clavo
+        '301244': 1.70, '301245': 2.20,                    # Externa Light Punta Broca
+        # CINTAS Y MALLAS — peso por rollo
+        '304056': 0.20, '304057': 0.60, '304058': 1.20,   # Cinta juntas papel
+        '304064': 0.30, '304065': 1.00,                    # Cinta guardavivos
+        '304075': 0.50, '304076': 0.70,                    # Banda estanca
+        '304078': 0.15, '304079': 0.50,                    # Malla FV autoadhesiva
+        '301121': 1.50,                                    # Malla Externa Light
+        '700960': 9.00,                                    # Fassanet 160
+        # ACCESORIOS PERFILES — peso por caja/paquete completo
+        '304014': 3.50, '304015': 2.00,                    # Crucetas TC 47 / 60
+        '304021': 7.00, '304022': 10.00, '304023': 7.00,   # Suspensión TC 47 90/180/240
+        '304029': 8.00, '304030': 10.00,                   # Anclaje Directo 47/60 ×120
+        '304036': 5.00,                                    # Anclaje Universal Omega M6
+        '304049': 4.00, '304050': 6.00,                    # Aisladores acústicos
+        '304095': 18.00, '304096': 18.00,                  # Varilla roscada M6 1000/2000
+        '304097': 1.00,                                    # Manguito cilíndrico
+        '1091001Y': 15.00,                                 # Cantonera yeso 2600mm PVC
+        # GYPSOCOMETE — placa alta densidad + perfil aluminio + LED
+        '301600': 6.00, '301601': 8.00, '301602': 12.00,   # ANGLE/CROSS/STAR 18mm
+        '301600XL': 7.00, '301601XL': 9.00, '301602XL': 13.00, '301605XL': 25.00,
+        '301606': 0.50, '301607': 0.70, '301606XL': 1.00,  # Recambios pantalla
+        # TRAMPILLAS — acero lacado / aluminio / acero+placa fuego
+        '304081': 2.50, '304082': 4.00, '304083': 6.00, '304084': 8.00,
+        '304085': 2.00, '304086': 3.00, '304087': 5.00, '304088': 7.00,
+        '304089': 9.00, '304090': 17.00,
+        '301761': 8.00, '301762': 14.00, '301763': 17.00, '301764': 21.00,
+        '301461': 12.00, '301462': 22.00, '301463': 27.00, '301464': 33.00,
+    }
+    for sku, weight in estimated_weights.items():
+        row = db.execute(
+            'SELECT kg_per_unit, notes FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        if row['kg_per_unit'] is not None and float(row['kg_per_unit']) > 0:
+            continue  # ya tiene peso, respetar
+        new_notes = row['notes'] or ''
+        tag = '[peso estimado 2026-04-24]'
+        if tag not in new_notes:
+            new_notes = (new_notes + ' ' + tag).strip()
+        db.execute(
+            'UPDATE products SET kg_per_unit = ?, notes = ? WHERE sku = ?',
+            (weight, new_notes, sku),
+        )
+        updated += 1
+
+    # 2) Perfiles Z1 faltantes (Anexo Gypsotech Nov 2025).
+    # Estructura: (sku, name, longitud_m, eur_ml, kg_ml, uds_pallet, subfamily)
+    new_perfiles = [
+        ('C344836249A', 'Montante 48/35 Z1 — 2.490mm', 2.49, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836259A', 'Montante 48/35 Z1 — 2.590mm', 2.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836269A', 'Montante 48/35 Z1 — 2.690mm', 2.69, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836279A', 'Montante 48/35 Z1 — 2.790mm', 2.79, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836299A', 'Montante 48/35 Z1 — 2.990mm', 2.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836359A', 'Montante 48/35 Z1 — 3.590mm', 3.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836399A', 'Montante 48/35 Z1 — 3.990mm', 3.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C367038279A', 'Montante 70/37 Z1 — 2.790mm', 2.79, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038299A', 'Montante 70/37 Z1 — 2.990mm', 2.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038359A', 'Montante 70/37 Z1 — 3.590mm', 3.59, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038399A', 'Montante 70/37 Z1 — 3.990mm', 3.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C399041359A', 'Montante 90/40 Z1 — 3.590mm', 3.59, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C399041399A', 'Montante 90/40 Z1 — 3.990mm', 3.99, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C174717530A', 'Perfil TC 47 Z1 — 5.300mm',    5.30, 1.13, 0.44, 1080, 'TC 47'),
+    ]
+    for sku, name, longitud, eur_ml, kg_ml, upp, subfamily in new_perfiles:
+        exists = db.execute(
+            'SELECT 1 FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if exists:
+            continue
+        pvp = round(eur_ml * longitud, 4)
+        precio_arias = round(pvp * 0.475, 4)  # 50% + 5% compuesto
+        kg = round(kg_ml * longitud, 2)
+        db.execute(
+            '''INSERT INTO products
+               (sku, name, category, source_catalog, unit, unit_price_eur,
+                kg_per_unit, units_per_pallet, pvp_eur_unit,
+                precio_arias_eur_unit, discount_pct, discount_extra_pct,
+                subfamily, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (sku, name, 'PERFILES', 'ANEXO-Nov2025', 'barra',
+             precio_arias, kg, float(upp), pvp, precio_arias,
+             50.0, 5.0, subfamily,
+             '[añadido auditoría 2026-04-24]'),
+        )
+        inserted += 1
+
+    # 3) Corregir Montante 48/35 Z2 2990mm (cargado con precio Z1).
+    # PVP correcto: 2,15 €/ml × 2,99 m = 6,4285€.
+    row = db.execute(
+        "SELECT pvp_eur_unit FROM products WHERE sku = 'C344836299B'"
+    ).fetchone()
+    if row and row['pvp_eur_unit'] is not None and abs(float(row['pvp_eur_unit']) - 4.186) < 0.01:
+        new_pvp = 6.4285
+        new_arias = round(new_pvp * 0.475, 4)
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, 'C344836299B'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_completion_20260424_applied',
+         f'updated={updated};inserted={inserted}', now),
+    )
+    db.commit()
+    if updated or inserted:
+        print(
+            f'[migration] catálogo completado 2026-04-24: '
+            f'{updated} SKUs actualizados (pesos + Montante 48/35 Z2), '
+            f'{inserted} perfiles Z1 nuevos insertados'
+        )
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
@@ -860,6 +1385,63 @@ def estimate_containers(pallets_logistic: float, weight_kg: float,
     return best
 
 
+def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
+                              computed: list[dict[str, Any]],
+                              margin_global_pct: float,
+                              logistic_global_eur: float) -> tuple[float, float, float]:
+    """Calcula (product_cost, logistic_total, sale_total) aplicando margen y
+    flete por línea cuando el payload los trae, para coincidir con lo que el
+    cotizador muestra en pantalla.
+
+    Regla:
+      - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
+      - flete por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
+        Si NINGUNA línea trae log_unit_cost, el flete global del payload se
+        prorratea proporcional al coste de producto por línea (equivalente
+        matemáticamente al cálculo global previo).
+      - venta línea = cost_producto / (1 - margen_línea) + flete_línea
+        (flete es pass-through: no genera margen, igual que el frontend).
+
+    Devuelve valores redondeados a 2 decimales.
+    """
+    product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
+    if product_cost_total <= 0 or not computed:
+        return 0.0, 0.0, 0.0
+
+    has_per_line_log = any(_num(li.get('log_unit_cost', 0)) > 0 for li in raw_lines)
+    margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
+
+    total_product = 0.0
+    total_logistic = 0.0
+    total_sale = 0.0
+    for i, cl in enumerate(computed):
+        line_input = raw_lines[i] if i < len(raw_lines) else {}
+        cost_prod = _num(cl.get('cost_exw_eur'))
+        qty_w = _num(cl.get('qty_input'))
+
+        m_raw = line_input.get('margin')
+        if m_raw is None or m_raw == '':
+            margin_line = margin_global
+        else:
+            m_val = _num(m_raw)
+            margin_line = m_val / 100 if m_val >= 1 else m_val
+
+        if has_per_line_log:
+            log_line = _num(line_input.get('log_unit_cost', 0)) * qty_w
+        else:
+            share = cost_prod / product_cost_total
+            log_line = logistic_global_eur * share
+
+        sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
+        sale_line = sale_product + log_line
+
+        total_product += cost_prod
+        total_logistic += log_line
+        total_sale += sale_line
+
+    return round(total_product, 2), round(total_logistic, 2), round(total_sale, 2)
+
+
 def compute_totals(lines: list[dict[str, Any]]) -> dict[str, Any]:
     ok_lines = [l for l in lines if l.get('ok', True)]
     total_cost = sum(_num(l.get('cost_exw_eur')) for l in ok_lines)
@@ -961,6 +1543,35 @@ def next_sequence(db: sqlite3.Connection, prefix: str) -> str:
         n = 1
         db.execute('INSERT INTO doc_sequences (prefix, last_number) VALUES (?, ?)', (prefix, n))
     return f'{prefix}-{n:04d}'
+
+
+def generate_offer_number(db: sqlite3.Connection) -> str:
+    """Genera offer_number único y secuencial con formato YYYY-NNNN.
+
+    Usa doc_sequences.OFR como contador. A diferencia de next_sequence,
+    el prefijo es el año actual (no 'OFR-') para mantener continuidad
+    con el formato histórico '2026-XXXX' ya enviado a clientes.
+
+    Garantiza unicidad: itera el counter hasta que no exista un
+    offer_number idéntico en pending_offers (defensivo ante colisiones
+    con números ya emitidos antes de la auditoría).
+    """
+    year = datetime.now(timezone.utc).year
+    row = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+    n = (row['last_number'] + 1) if row else 1
+    while True:
+        candidate = f'{year}-{n:04d}'
+        exists = db.execute(
+            'SELECT 1 FROM pending_offers WHERE offer_number = ?', (candidate,)
+        ).fetchone()
+        if not exists:
+            break
+        n += 1
+    if row:
+        db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (n,))
+    else:
+        db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (n,))
+    return candidate
 
 
 def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, target_margin_pct: float, fx_rate: float) -> dict[str, Any]:
@@ -2326,17 +2937,27 @@ def save_offer():
             'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
             'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
             'margin': _num(li.get('margin', data.get('margin', 33))),
+            'log_unit_cost': _num(li.get('log_unit_cost', 0)),
+            'log_cost_manual': bool(li.get('log_cost_manual', False)),
+            'competitor_price_eur': _num(li.get('competitor_price_eur', 0)),
             'note': li.get('note'),
         })
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Totales con margen y flete por línea (coincide con lo que el cotizador
+    # muestra en pantalla). Fallback a cálculo global si el payload no trae
+    # log_unit_cost en ninguna línea.
+    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
+        input_lines, computed, margin_pct, logistic
+    )
 
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
-    offer_num = data.get('offerNumber') or next_sequence(db, 'OFR')
+    # offer_number SIEMPRE generado por backend con unicidad garantizada.
+    # Ignoramos data.get('offerNumber'): el frontend lo enviaba aleatorio
+    # ('2026-' + Date.now().slice(-4)), lo que causó colisiones históricas
+    # (p.ej. ofertas #18 y #19 con el mismo '2026-8464').
+    offer_num = generate_offer_number(db)
     raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
     dup = find_offer_by_hash(db, raw_hash)
     if dup:
@@ -2346,12 +2967,13 @@ def save_offer():
             'existing_offer_number': dup['offer_number'],
         }), 409
 
+    validity_days = int(_num(data.get('validityDays', 30)) or 30)
     db.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, raw_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+         status, incoterm, container_count, validity_days, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (
             offer_num,
             data.get('client', ''),
@@ -2361,11 +2983,12 @@ def save_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             'pending',
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             raw_hash,
             now_iso(),
         )
@@ -2461,18 +3084,20 @@ def update_full_offer():
         computed.append(line)
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Margen y flete por línea (coherente con UI).
+    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
+        input_lines, computed, margin_pct, logistic
+    )
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
+    validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
     db.execute(
         '''UPDATE pending_offers SET
            offer_number = ?, client_name = ?, project_name = ?,
            waste_pct = ?, margin_pct = ?, fx_rate = ?,
            lines_json = ?, total_product_eur = ?, total_logistic_eur = ?,
            total_final_eur = ?, incoterm = ?, container_count = ?,
-           raw_hash = ?, updated_at = ?
+           validity_days = ?, raw_hash = ?, updated_at = ?
            WHERE id = ?''',
         (
             data.get('offerNumber', existing['offer_number']),
@@ -2483,10 +3108,11 @@ def update_full_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
             now_iso(),
             edit_id,
@@ -3102,6 +3728,7 @@ def offer_pdf(offer_id):
         [Paragraph('Palés totales', sty['p']), Paragraph(f'{sum_pallets:,}' if sum_pallets else '—', sty['right'])],
         [Paragraph('Peso bruto aproximado', sty['p']), Paragraph(f'{sum_kg:,.0f} kg' if sum_kg else '—', sty['right'])],
         [Paragraph('Moneda', sty['p']), Paragraph('USD (dólares estadounidenses)', sty['right'])],
+        [Paragraph('Tipo de cambio aplicado', sty['p']), Paragraph(f'{fx:.3f} EUR/USD', sty['right'])],
         [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (USD)</b>', sty['bold']), Paragraph(f'<b>$ {total_usd:,.2f}</b>', sty['right'])],
     ]
     econ_tbl = Table(econ_data, colWidths=[W*0.65, W*0.35])
@@ -3124,9 +3751,10 @@ def offer_pdf(offer_id):
     # Section 3
     story.append(Paragraph('3.  CONDICIONES COMERCIALES', sty['h1']))
     story.append(Spacer(1, 1*mm))
+    validity = int(offer['validity_days']) if offer['validity_days'] else 30
     conds = [
         ('Pago', '100% prepago por transferencia bancaria antes de emisión de orden de producción.'),
-        ('Validez de oferta', f"{int(offer['margin_pct'])} días calendario desde la fecha de emisión."),
+        ('Validez de oferta', f"{validity} días calendario desde la fecha de emisión."),
         ('Plazo de entrega', 'Según confirmación de fábrica tras recepción de pago.'),
         ('Puerto de embarque', 'Valencia, España'),
         ('Incoterm aplicable', f"{offer['incoterm'] or 'EXW'} — riesgo y responsabilidad se transfieren al comprador."),
