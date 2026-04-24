@@ -538,6 +538,7 @@ def init_db() -> None:
     # Se marca en app_settings para no volver a correr en restarts posteriores.
     _apply_compound_discount_once(db)
     _audit_fixes_20260423(db)
+    _audit_catalog_fixes_20260423(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -593,6 +594,86 @@ def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
     )
     db.commit()
     print('[migration] auditoría 2026-04-23 aplicada: duplicado #18 cancelado, secuencia OFR alineada')
+
+
+def _audit_catalog_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Correcciones de catálogo derivadas de la auditoría contra Tarifa Fassa
+    Hispania Abril 2026 + Tarifa Gypsotech Abril 2026 + Anexo Gypsotech Nov 2025.
+
+    Arias Group compra FCA Tarancón. Varios SKUs tenían cargado el precio del
+    punto de recogida de Fátima-PT o Antas, no Tarancón. Esto hacía que el
+    motor aplicara 50%+5% descuento sobre un PVP más bajo del real, dejando
+    menos margen del calculado en presupuestos.
+
+    También: bug numérico en pvp_per_m2 de AQUASUPER BA 13mm 1200×2700
+    (9.5473 en lugar de 7.1605). No afecta cálculos (se usa unit_price_eur)
+    pero sí la visualización si se expone pvp_per_m2.
+
+    Idempotente: flag audit_catalog_fixes_20260423_applied en app_settings.
+    Los precios nuevos aplican solo a ofertas futuras — lines_json congela
+    el precio vigente al emitir, las ofertas ya enviadas no se recalculan.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    # SKUs con punto de recogida corregido a Tarancón (PVP verificado contra
+    # Tarifa Fassa Hispania Abril 2026, columna "Tarancón/Madrid"). El
+    # precio_arias y unit_price se recalculan con descuento compuesto 50%+5%.
+    tarancon_fixes = [
+        # (sku, pvp_anterior, pvp_tarancon, nombre)
+        ('420Y1A',  3.99,  5.48,  'KI 7'),
+        ('1188F',   5.43,  7.14,  'FASSACOL ONE GRIS'),
+        ('1783Y1A', 5.73,  7.15,  'FASSACOL PRIME GRIS'),
+        ('1772Y1A', 11.45, 12.89, 'FASSACOL MULTI BLANCO'),
+        ('1774Y1A', 13.67, 14.85, 'FASSACOL FLEX BLANCO'),
+        ('1778Y1A', 24.09, 25.58, 'FASSACOL ULTRAFLEX S1 BLANCO'),
+        ('1779Y1A', 22.69, 24.19, 'FASSACOL ULTRAFLEX S1 GRIS'),
+        ('1077F',   17.03, 18.89, 'AQUAZIP GE 97 Comp A'),
+    ]
+    updated = 0
+    for sku, expected_old, new_pvp, _name in tarancon_fixes:
+        row = db.execute(
+            'SELECT pvp_eur_unit FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        current = row['pvp_eur_unit']
+        # Solo actualizar si el valor actual coincide con el que detectamos,
+        # por si alguien lo corrigió manualmente antes de esta migración.
+        if current is None or abs(float(current) - expected_old) > 0.01:
+            continue
+        new_arias = round(new_pvp * 0.475, 4)  # 50% + 5% compuesto
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, sku),
+        )
+        updated += 1
+
+    # Bug numérico pvp_per_m2 AQUASUPER BA 13mm 1200×2700 (P00W003270A0).
+    # PVP 23.20€ / (1.2 × 2.7) m² = 7.1605 €/m², no 9.5473.
+    row = db.execute(
+        "SELECT pvp_eur_unit, pvp_per_m2 FROM products WHERE sku = 'P00W003270A0'"
+    ).fetchone()
+    if row and row['pvp_per_m2'] and abs(float(row['pvp_per_m2']) - 9.5473) < 0.001:
+        correct_m2 = round(float(row['pvp_eur_unit']) / (1.2 * 2.7), 4)
+        db.execute(
+            'UPDATE products SET pvp_per_m2 = ? WHERE sku = ?',
+            (correct_m2, 'P00W003270A0'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] catálogo 2026-04-23: {updated} SKUs corregidos a precio Tarancón + bug pvp_per_m2 AQUASUPER 2700')
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
