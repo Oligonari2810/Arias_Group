@@ -541,6 +541,7 @@ def init_db() -> None:
     _audit_catalog_fixes_20260423(db)
     _audit_catalog_fixes_20260423_v2(db)
     _audit_logistics_fixes_20260424(db)
+    _audit_catalog_completion_20260424(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -893,6 +894,169 @@ def _audit_logistics_fixes_20260424(db: sqlite3.Connection) -> None:
     db.commit()
     if updated:
         print(f'[migration] logística 2026-04-24: {updated} SKUs corregidos (STD Calliano uds/palé + Montante 70/37 2690 peso)')
+
+
+def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
+    """Completar datos logísticos de consumibles y añadir perfiles Z1 faltantes.
+
+    1) kg_per_unit estimado para 76 SKUs (tornillos, cintas, accesorios,
+       GypsoCOMETE, trampillas) que tenían peso NULL. Valores conservadores
+       basados en prácticas del sector (acero galvanizado, papel kraft,
+       PVC, aluminio o placa yeso alta densidad según material). Se
+       marcan como 'estimated' en notes para que se actualicen cuando
+       lleguen las fichas técnicas oficiales.
+
+    2) 14 nuevos SKUs de perfiles Z1 del Anexo Gypsotech Nov 2025 que no
+       estaban cargados: Montante 48/35 Z1 (7 longitudes), Montante 70/37
+       Z1 (4 longitudes faltantes además de 2690), Montante 90/40 Z1
+       (2 longitudes faltantes) y Perfil TC 47 Z1 de 5300mm. Precio €/ml
+       del anexo × longitud; kg = kg/ml × longitud.
+
+    3) Corrige un error de carga: C344836299B (Montante 48/35 Z2 2990mm)
+       tenía PVP 4,186€ (precio €/ml Z1 = 1,40) cuando le corresponde el
+       €/ml Z2 = 2,15 → PVP = 6,43€. Afecta precio_arias y unit_price.
+
+    Idempotente: INSERT OR IGNORE para no duplicar, flag en app_settings.
+    Las ofertas ya emitidas NO cambian (lines_json congela el precio).
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_completion_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    now = now_iso()
+    updated = 0
+    inserted = 0
+
+    # 1) Pesos estimados para consumibles sin kg_per_unit.
+    # Peso por UNIDAD DE VENTA (caja/rollo/ud/paquete), no por pieza.
+    estimated_weights = {
+        # TORNILLOS — cajas de tornillo fosfatado/cincado + embalaje
+        '304100': 1.00, '304101': 2.00, '304102': 10.00,   # PM Punta Clavo Ø3,5×25
+        '304103': 1.40, '304104': 2.80, '304105': 8.40,   # PM Punta Clavo Ø3,5×35
+        '304106': 3.60, '304107': 4.40,                    # PM Punta Clavo Ø3,5×45 / 55
+        '304108': 3.50, '304109': 4.00,                    # PM Ø4,2×70 / Ø4,8×90
+        '304115': 2.20, '304116': 3.00, '304117': 3.80,   # PM Punta Broca Ø3,5×25/35/45
+        '304123': 2.30, '304124': 3.20, '304125': 4.10,   # AD Ø3,9×25/35/45
+        '304126': 5.00, '304128': 3.50,                    # AD Ø3,9×55 / ×70
+        '304133': 0.50, '304134': 1.80, '304135': 2.50,   # MM Punta Broca
+        '301240': 3.00, '301241': 3.50,                    # Externa Light Punta Clavo
+        '301244': 1.70, '301245': 2.20,                    # Externa Light Punta Broca
+        # CINTAS Y MALLAS — peso por rollo
+        '304056': 0.20, '304057': 0.60, '304058': 1.20,   # Cinta juntas papel
+        '304064': 0.30, '304065': 1.00,                    # Cinta guardavivos
+        '304075': 0.50, '304076': 0.70,                    # Banda estanca
+        '304078': 0.15, '304079': 0.50,                    # Malla FV autoadhesiva
+        '301121': 1.50,                                    # Malla Externa Light
+        '700960': 9.00,                                    # Fassanet 160
+        # ACCESORIOS PERFILES — peso por caja/paquete completo
+        '304014': 3.50, '304015': 2.00,                    # Crucetas TC 47 / 60
+        '304021': 7.00, '304022': 10.00, '304023': 7.00,   # Suspensión TC 47 90/180/240
+        '304029': 8.00, '304030': 10.00,                   # Anclaje Directo 47/60 ×120
+        '304036': 5.00,                                    # Anclaje Universal Omega M6
+        '304049': 4.00, '304050': 6.00,                    # Aisladores acústicos
+        '304095': 18.00, '304096': 18.00,                  # Varilla roscada M6 1000/2000
+        '304097': 1.00,                                    # Manguito cilíndrico
+        '1091001Y': 15.00,                                 # Cantonera yeso 2600mm PVC
+        # GYPSOCOMETE — placa alta densidad + perfil aluminio + LED
+        '301600': 6.00, '301601': 8.00, '301602': 12.00,   # ANGLE/CROSS/STAR 18mm
+        '301600XL': 7.00, '301601XL': 9.00, '301602XL': 13.00, '301605XL': 25.00,
+        '301606': 0.50, '301607': 0.70, '301606XL': 1.00,  # Recambios pantalla
+        # TRAMPILLAS — acero lacado / aluminio / acero+placa fuego
+        '304081': 2.50, '304082': 4.00, '304083': 6.00, '304084': 8.00,
+        '304085': 2.00, '304086': 3.00, '304087': 5.00, '304088': 7.00,
+        '304089': 9.00, '304090': 17.00,
+        '301761': 8.00, '301762': 14.00, '301763': 17.00, '301764': 21.00,
+        '301461': 12.00, '301462': 22.00, '301463': 27.00, '301464': 33.00,
+    }
+    for sku, weight in estimated_weights.items():
+        row = db.execute(
+            'SELECT kg_per_unit, notes FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        if row['kg_per_unit'] is not None and float(row['kg_per_unit']) > 0:
+            continue  # ya tiene peso, respetar
+        new_notes = row['notes'] or ''
+        tag = '[peso estimado 2026-04-24]'
+        if tag not in new_notes:
+            new_notes = (new_notes + ' ' + tag).strip()
+        db.execute(
+            'UPDATE products SET kg_per_unit = ?, notes = ? WHERE sku = ?',
+            (weight, new_notes, sku),
+        )
+        updated += 1
+
+    # 2) Perfiles Z1 faltantes (Anexo Gypsotech Nov 2025).
+    # Estructura: (sku, name, longitud_m, eur_ml, kg_ml, uds_pallet, subfamily)
+    new_perfiles = [
+        ('C344836249A', 'Montante 48/35 Z1 — 2.490mm', 2.49, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836259A', 'Montante 48/35 Z1 — 2.590mm', 2.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836269A', 'Montante 48/35 Z1 — 2.690mm', 2.69, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836279A', 'Montante 48/35 Z1 — 2.790mm', 2.79, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836299A', 'Montante 48/35 Z1 — 2.990mm', 2.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836359A', 'Montante 48/35 Z1 — 3.590mm', 3.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836399A', 'Montante 48/35 Z1 — 3.990mm', 3.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C367038279A', 'Montante 70/37 Z1 — 2.790mm', 2.79, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038299A', 'Montante 70/37 Z1 — 2.990mm', 2.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038359A', 'Montante 70/37 Z1 — 3.590mm', 3.59, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038399A', 'Montante 70/37 Z1 — 3.990mm', 3.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C399041359A', 'Montante 90/40 Z1 — 3.590mm', 3.59, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C399041399A', 'Montante 90/40 Z1 — 3.990mm', 3.99, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C174717530A', 'Perfil TC 47 Z1 — 5.300mm',    5.30, 1.13, 0.44, 1080, 'TC 47'),
+    ]
+    for sku, name, longitud, eur_ml, kg_ml, upp, subfamily in new_perfiles:
+        exists = db.execute(
+            'SELECT 1 FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if exists:
+            continue
+        pvp = round(eur_ml * longitud, 4)
+        precio_arias = round(pvp * 0.475, 4)  # 50% + 5% compuesto
+        kg = round(kg_ml * longitud, 2)
+        db.execute(
+            '''INSERT INTO products
+               (sku, name, category, source_catalog, unit, unit_price_eur,
+                kg_per_unit, units_per_pallet, pvp_eur_unit,
+                precio_arias_eur_unit, discount_pct, discount_extra_pct,
+                subfamily, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (sku, name, 'PERFILES', 'ANEXO-Nov2025', 'barra',
+             precio_arias, kg, float(upp), pvp, precio_arias,
+             50.0, 5.0, subfamily,
+             '[añadido auditoría 2026-04-24]'),
+        )
+        inserted += 1
+
+    # 3) Corregir Montante 48/35 Z2 2990mm (cargado con precio Z1).
+    # PVP correcto: 2,15 €/ml × 2,99 m = 6,4285€.
+    row = db.execute(
+        "SELECT pvp_eur_unit FROM products WHERE sku = 'C344836299B'"
+    ).fetchone()
+    if row and row['pvp_eur_unit'] is not None and abs(float(row['pvp_eur_unit']) - 4.186) < 0.01:
+        new_pvp = 6.4285
+        new_arias = round(new_pvp * 0.475, 4)
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, 'C344836299B'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_completion_20260424_applied',
+         f'updated={updated};inserted={inserted}', now),
+    )
+    db.commit()
+    if updated or inserted:
+        print(
+            f'[migration] catálogo completado 2026-04-24: '
+            f'{updated} SKUs actualizados (pesos + Montante 48/35 Z2), '
+            f'{inserted} perfiles Z1 nuevos insertados'
+        )
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
