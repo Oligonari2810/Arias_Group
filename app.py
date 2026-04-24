@@ -537,6 +537,62 @@ def init_db() -> None:
     # Migración one-shot: aplicar descuento compuesto (base + extra) a precio_arias.
     # Se marca en app_settings para no volver a correr en restarts posteriores.
     _apply_compound_discount_once(db)
+    _audit_fixes_20260423(db)
+
+
+def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Migraciones one-shot derivadas de la auditoría 2026-04-23.
+
+    - Cancela la oferta duplicada id=18 (compartía offer_number 2026-8464 con #19).
+    - Alinea doc_sequences.OFR al máximo numérico existente para que
+      el backend genere a partir de ahí números únicos y secuenciales.
+
+    Idempotente: flag en app_settings para no re-ejecutar en restarts.
+    """
+    flag = db.execute("SELECT value FROM app_settings WHERE key = 'audit_fixes_20260423_applied'").fetchone()
+    if flag:
+        return
+
+    dup = db.execute(
+        "SELECT id, offer_number, status FROM pending_offers WHERE id = 18 AND offer_number = '2026-8464'"
+    ).fetchone()
+    if dup and dup['status'] == 'pending':
+        db.execute(
+            "UPDATE pending_offers SET status = 'cancelled', updated_at = ? WHERE id = 18",
+            (now_iso(),),
+        )
+        db.execute(
+            "INSERT INTO audit_log (offer_id, action, detail, username, created_at) VALUES (?,?,?,?,?)",
+            (
+                18,
+                'OFFER_CANCELLED',
+                'Auto-cancelada por auditoría 2026-04-23: offer_number 2026-8464 duplicado '
+                'con oferta #19 (Palmira V2). Esta era la versión previa con proyecto sin nombre.',
+                'audit-system',
+                now_iso(),
+            ),
+        )
+
+    max_num = 0
+    for row in db.execute("SELECT offer_number FROM pending_offers").fetchall():
+        n = row['offer_number'] or ''
+        parts = n.split('-')
+        if len(parts) == 2 and parts[1].isdigit():
+            max_num = max(max_num, int(parts[1]))
+    if max_num > 0:
+        existing = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+        if existing:
+            if existing['last_number'] < max_num:
+                db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (max_num,))
+        else:
+            db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (max_num,))
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_fixes_20260423_applied', now_iso(), now_iso()),
+    )
+    db.commit()
+    print('[migration] auditoría 2026-04-23 aplicada: duplicado #18 cancelado, secuencia OFR alineada')
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
@@ -966,6 +1022,35 @@ def next_sequence(db: sqlite3.Connection, prefix: str) -> str:
         n = 1
         db.execute('INSERT INTO doc_sequences (prefix, last_number) VALUES (?, ?)', (prefix, n))
     return f'{prefix}-{n:04d}'
+
+
+def generate_offer_number(db: sqlite3.Connection) -> str:
+    """Genera offer_number único y secuencial con formato YYYY-NNNN.
+
+    Usa doc_sequences.OFR como contador. A diferencia de next_sequence,
+    el prefijo es el año actual (no 'OFR-') para mantener continuidad
+    con el formato histórico '2026-XXXX' ya enviado a clientes.
+
+    Garantiza unicidad: itera el counter hasta que no exista un
+    offer_number idéntico en pending_offers (defensivo ante colisiones
+    con números ya emitidos antes de la auditoría).
+    """
+    year = datetime.now(timezone.utc).year
+    row = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+    n = (row['last_number'] + 1) if row else 1
+    while True:
+        candidate = f'{year}-{n:04d}'
+        exists = db.execute(
+            'SELECT 1 FROM pending_offers WHERE offer_number = ?', (candidate,)
+        ).fetchone()
+        if not exists:
+            break
+        n += 1
+    if row:
+        db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (n,))
+    else:
+        db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (n,))
+    return candidate
 
 
 def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, target_margin_pct: float, fx_rate: float) -> dict[str, Any]:
@@ -2341,7 +2426,11 @@ def save_offer():
 
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
-    offer_num = data.get('offerNumber') or next_sequence(db, 'OFR')
+    # offer_number SIEMPRE generado por backend con unicidad garantizada.
+    # Ignoramos data.get('offerNumber'): el frontend lo enviaba aleatorio
+    # ('2026-' + Date.now().slice(-4)), lo que causó colisiones históricas
+    # (p.ej. ofertas #18 y #19 con el mismo '2026-8464').
+    offer_num = generate_offer_number(db)
     raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
     dup = find_offer_by_hash(db, raw_hash)
     if dup:

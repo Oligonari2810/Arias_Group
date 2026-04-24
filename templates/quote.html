@@ -33,7 +33,9 @@
   </div>
   <div>
     <label>Nº Oferta</label>
-    <input type="text" id="offerNumber" placeholder="2026-001">
+    <input type="text" id="offerNumber" placeholder="Se asigna al guardar" readonly
+           title="El número de oferta se asigna automáticamente al guardar para garantizar unicidad."
+           style="background:#f5f5f5; color:#666;">
   </div>
 </div>
 
@@ -760,7 +762,9 @@ function generateOffer() {
   const projSel = document.getElementById('projectSelect');
   const projOpt = projSel.options[projSel.selectedIndex];
   const project = (projOpt && projOpt.value) ? projOpt.dataset.name : 'Proyecto sin nombre';
-  const offerNum = document.getElementById('offerNumber').value || '2026-' + Date.now().toString().slice(-4);
+  // En CREATE: dejamos que el backend asigne el número único (ignora lo que enviemos).
+  // En EDIT: respetamos el existente cargado desde la oferta.
+  const offerNum = document.getElementById('offerNumber').value || '';
 
   const _wg = parseFloat(document.getElementById('wasteInput').value);
   const wastePct = isNaN(_wg) ? 5 : _wg;
@@ -809,8 +813,10 @@ function generateOffer() {
   .then(data => {
     if (data.ok) {
       const action = editId ? 'actualizada' : 'generada';
+      const assignedNum = data.offer_number || offerNum;
+      document.getElementById('offerNumber').value = assignedNum;
       const banner = document.getElementById('offerBanner');
-      banner.innerHTML = 'Oferta <b>' + escapeHtml(offerNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
+      banner.innerHTML = 'Oferta <b>' + escapeHtml(assignedNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
       banner.style.display = 'block';
       if (editId) {
         document.getElementById('editOfferId').value = '';
