@@ -921,6 +921,63 @@ def estimate_containers(pallets_logistic: float, weight_kg: float,
     return best
 
 
+def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
+                              computed: list[dict[str, Any]],
+                              margin_global_pct: float,
+                              logistic_global_eur: float) -> tuple[float, float, float]:
+    """Calcula (product_cost, logistic_total, sale_total) aplicando margen y
+    flete por línea cuando el payload los trae, para coincidir con lo que el
+    cotizador muestra en pantalla.
+
+    Regla:
+      - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
+      - flete por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
+        Si NINGUNA línea trae log_unit_cost, el flete global del payload se
+        prorratea proporcional al coste de producto por línea (equivalente
+        matemáticamente al cálculo global previo).
+      - venta línea = cost_producto / (1 - margen_línea) + flete_línea
+        (flete es pass-through: no genera margen, igual que el frontend).
+
+    Devuelve valores redondeados a 2 decimales.
+    """
+    product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
+    if product_cost_total <= 0 or not computed:
+        return 0.0, 0.0, 0.0
+
+    has_per_line_log = any(_num(li.get('log_unit_cost', 0)) > 0 for li in raw_lines)
+    margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
+
+    total_product = 0.0
+    total_logistic = 0.0
+    total_sale = 0.0
+    for i, cl in enumerate(computed):
+        line_input = raw_lines[i] if i < len(raw_lines) else {}
+        cost_prod = _num(cl.get('cost_exw_eur'))
+        qty_w = _num(cl.get('qty_input'))
+
+        m_raw = line_input.get('margin')
+        if m_raw is None or m_raw == '':
+            margin_line = margin_global
+        else:
+            m_val = _num(m_raw)
+            margin_line = m_val / 100 if m_val >= 1 else m_val
+
+        if has_per_line_log:
+            log_line = _num(line_input.get('log_unit_cost', 0)) * qty_w
+        else:
+            share = cost_prod / product_cost_total
+            log_line = logistic_global_eur * share
+
+        sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
+        sale_line = sale_product + log_line
+
+        total_product += cost_prod
+        total_logistic += log_line
+        total_sale += sale_line
+
+    return round(total_product, 2), round(total_logistic, 2), round(total_sale, 2)
+
+
 def compute_totals(lines: list[dict[str, Any]]) -> dict[str, Any]:
     ok_lines = [l for l in lines if l.get('ok', True)]
     total_cost = sum(_num(l.get('cost_exw_eur')) for l in ok_lines)
@@ -2416,13 +2473,19 @@ def save_offer():
             'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
             'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
             'margin': _num(li.get('margin', data.get('margin', 33))),
+            'log_unit_cost': _num(li.get('log_unit_cost', 0)),
+            'log_cost_manual': bool(li.get('log_cost_manual', False)),
+            'competitor_price_eur': _num(li.get('competitor_price_eur', 0)),
             'note': li.get('note'),
         })
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Totales con margen y flete por línea (coincide con lo que el cotizador
+    # muestra en pantalla). Fallback a cálculo global si el payload no trae
+    # log_unit_cost en ninguna línea.
+    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
+        input_lines, computed, margin_pct, logistic
+    )
 
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
@@ -2456,7 +2519,7 @@ def save_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             'pending',
             data.get('incoterm', 'EXW'),
@@ -2557,9 +2620,10 @@ def update_full_offer():
         computed.append(line)
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Margen y flete por línea (coherente con UI).
+    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
+        input_lines, computed, margin_pct, logistic
+    )
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
     validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
@@ -2580,7 +2644,7 @@ def update_full_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
