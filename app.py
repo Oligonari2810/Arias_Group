@@ -1385,32 +1385,49 @@ def estimate_containers(pallets_logistic: float, weight_kg: float,
     return best
 
 
-def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
-                              computed: list[dict[str, Any]],
-                              margin_global_pct: float,
-                              logistic_global_eur: float) -> tuple[float, float, float]:
-    """Calcula (product_cost, logistic_total, sale_total) aplicando margen y
-    flete por línea cuando el payload los trae, para coincidir con lo que el
-    cotizador muestra en pantalla.
+def build_offer_breakdown(raw_lines: list[dict[str, Any]],
+                          computed: list[dict[str, Any]],
+                          margin_global_pct: float,
+                          logistic_global_eur: float) -> dict[str, Any]:
+    """Fuente única de verdad para el cálculo de un presupuesto.
+
+    Devuelve un breakdown por línea con TODOS los valores que necesitan los
+    consumidores (frontend preview, save_offer al persistir, offer_pdf al
+    renderizar, exports a Odoo/NetSuite, etc.) así nadie tiene que recalcular.
+
+    Estructura:
+      {
+        'lines': [
+          {sku, name, family, unit, qty_neta, qty_waste, price_arias_eur,
+           log_unit_eur, margin_pct, cost_line_eur, log_line_eur,
+           sale_line_eur, sale_unit_eur},
+          ...
+        ],
+        'totals': {product_cost_eur, logistic_eur, sale_eur},
+        'meta': {has_per_line_log, margin_global_pct},
+      }
 
     Regla:
       - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
       - flete por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
         Si NINGUNA línea trae log_unit_cost, el flete global del payload se
         prorratea proporcional al coste de producto por línea (equivalente
-        matemáticamente al cálculo global previo).
+        matemáticamente al cálculo global previo, mantiene compat con bot).
       - venta línea = cost_producto / (1 - margen_línea) + flete_línea
         (flete es pass-through: no genera margen, igual que el frontend).
-
-    Devuelve valores redondeados a 2 decimales.
     """
     product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
     if product_cost_total <= 0 or not computed:
-        return 0.0, 0.0, 0.0
+        return {
+            'lines': [],
+            'totals': {'product_cost_eur': 0.0, 'logistic_eur': 0.0, 'sale_eur': 0.0},
+            'meta': {'has_per_line_log': False, 'margin_global_pct': margin_global_pct},
+        }
 
     has_per_line_log = any(_num(li.get('log_unit_cost', 0)) > 0 for li in raw_lines)
     margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
 
+    breakdown_lines: list[dict[str, Any]] = []
     total_product = 0.0
     total_logistic = 0.0
     total_sale = 0.0
@@ -1418,6 +1435,8 @@ def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
         line_input = raw_lines[i] if i < len(raw_lines) else {}
         cost_prod = _num(cl.get('cost_exw_eur'))
         qty_w = _num(cl.get('qty_input'))
+        qty_neta = _num(cl.get('qty_original', cl.get('qty_input', 0)))
+        price_arias = _num(cl.get('price_unit_eur')) or (cost_prod / qty_w if qty_w else 0)
 
         m_raw = line_input.get('margin')
         if m_raw is None or m_raw == '':
@@ -1427,19 +1446,63 @@ def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
             margin_line = m_val / 100 if m_val >= 1 else m_val
 
         if has_per_line_log:
-            log_line = _num(line_input.get('log_unit_cost', 0)) * qty_w
+            log_unit = _num(line_input.get('log_unit_cost', 0))
+            log_line = log_unit * qty_w
         else:
             share = cost_prod / product_cost_total
             log_line = logistic_global_eur * share
+            log_unit = (log_line / qty_w) if qty_w else 0.0
 
         sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
         sale_line = sale_product + log_line
+        sale_unit = (sale_line / qty_w) if qty_w else 0.0
+
+        breakdown_lines.append({
+            'sku': cl.get('sku'),
+            'name': cl.get('name'),
+            'family': cl.get('family'),
+            'unit': cl.get('unit'),
+            'qty_neta': round(qty_neta, 2),
+            'qty_waste': round(qty_w, 2),
+            'price_arias_eur': round(price_arias, 4),
+            'log_unit_eur': round(log_unit, 4),
+            'margin_pct': round(margin_line * 100, 2),
+            'cost_line_eur': round(cost_prod, 2),
+            'log_line_eur': round(log_line, 2),
+            'sale_line_eur': round(sale_line, 2),
+            'sale_unit_eur': round(sale_unit, 4),
+        })
 
         total_product += cost_prod
         total_logistic += log_line
         total_sale += sale_line
 
-    return round(total_product, 2), round(total_logistic, 2), round(total_sale, 2)
+    return {
+        'lines': breakdown_lines,
+        'totals': {
+            'product_cost_eur': round(total_product, 2),
+            'logistic_eur': round(total_logistic, 2),
+            'sale_eur': round(total_sale, 2),
+        },
+        'meta': {
+            'has_per_line_log': has_per_line_log,
+            'margin_global_pct': margin_global_pct,
+        },
+    }
+
+
+def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
+                              computed: list[dict[str, Any]],
+                              margin_global_pct: float,
+                              logistic_global_eur: float) -> tuple[float, float, float]:
+    """Wrapper legacy: devuelve solo (product_cost, logistic, sale) como tuple.
+
+    Nuevo código debe usar build_offer_breakdown para tener acceso al detalle
+    por línea. Este wrapper se mantiene para no romper callers existentes.
+    """
+    r = build_offer_breakdown(raw_lines, computed, margin_global_pct, logistic_global_eur)
+    t = r['totals']
+    return t['product_cost_eur'], t['logistic_eur'], t['sale_eur']
 
 
 def compute_totals(lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2944,12 +3007,23 @@ def save_offer():
         })
 
     totals = compute_totals(computed)
-    # Totales con margen y flete por línea (coincide con lo que el cotizador
-    # muestra en pantalla). Fallback a cálculo global si el payload no trae
-    # log_unit_cost en ninguna línea.
-    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
-        input_lines, computed, margin_pct, logistic
-    )
+    # Fuente única de cálculo: build_offer_breakdown devuelve totales + breakdown
+    # por línea. El breakdown se mergea en input_lines para persistirse en
+    # lines_json y que offer_pdf, exports, etc. lean valores ya calculados sin
+    # recalcular.
+    breakdown = build_offer_breakdown(input_lines, computed, margin_pct, logistic)
+    product_cost = breakdown['totals']['product_cost_eur']
+    logistic_eur = breakdown['totals']['logistic_eur']
+    total_final = breakdown['totals']['sale_eur']
+    for li, br in zip(input_lines, breakdown['lines']):
+        li.update({
+            'qty_waste': br['qty_waste'],
+            'cost_line_eur': br['cost_line_eur'],
+            'log_line_eur': br['log_line_eur'],
+            'sale_line_eur': br['sale_line_eur'],
+            'sale_unit_eur': br['sale_unit_eur'],
+            'margin_applied_pct': br['margin_pct'],
+        })
 
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
@@ -3084,10 +3158,20 @@ def update_full_offer():
         computed.append(line)
 
     totals = compute_totals(computed)
-    # Margen y flete por línea (coherente con UI).
-    product_cost, logistic_eur, total_final = compute_offer_sale_totals(
-        input_lines, computed, margin_pct, logistic
-    )
+    # Fuente única de cálculo + persistir breakdown en lines_json (igual que save_offer).
+    breakdown = build_offer_breakdown(input_lines, computed, margin_pct, logistic)
+    product_cost = breakdown['totals']['product_cost_eur']
+    logistic_eur = breakdown['totals']['logistic_eur']
+    total_final = breakdown['totals']['sale_eur']
+    for li, br in zip(input_lines, breakdown['lines']):
+        li.update({
+            'qty_waste': br['qty_waste'],
+            'cost_line_eur': br['cost_line_eur'],
+            'log_line_eur': br['log_line_eur'],
+            'sale_line_eur': br['sale_line_eur'],
+            'sale_unit_eur': br['sale_unit_eur'],
+            'margin_applied_pct': br['margin_pct'],
+        })
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
     validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
@@ -3857,13 +3941,23 @@ def offer_pdf(offer_id):
     total_kg = 0
     # Agregar líneas con mismo SKU para la tabla de detalle (evita duplicados)
     detail_lines = _aggregate_lines_by_sku(lines)
-    # Venta por línea prorrateada del total para que la suma cuadre con TOTAL (EXW y CIF)
+    # Para ofertas nuevas (post-2026-04-24): lines_json ya trae qty_waste,
+    # sale_line_eur y sale_unit_eur calculados en el momento de guardar
+    # (build_offer_breakdown). Se leen tal cual, sin recalcular.
+    # Para ofertas viejas (sin esos campos): fallback al prorrateo por
+    # proporción de coste, que era el comportamiento previo.
     product_cost_eur = offer['total_product_eur'] or 0
     for line in detail_lines:
-        qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
-        cost_line_eur = line['price'] * qty_waste
-        sale_line_eur = (cost_line_eur / product_cost_eur * total_eur) if product_cost_eur > 0 else 0
-        price_unit_sale_usd = (sale_line_eur / qty_waste * fx) if qty_waste else 0
+        if 'sale_line_eur' in line and 'qty_waste' in line:
+            qty_waste = int(line['qty_waste'])
+            sale_line_eur = _num(line['sale_line_eur'])
+            sale_unit_eur = _num(line.get('sale_unit_eur', sale_line_eur / qty_waste if qty_waste else 0))
+            price_unit_sale_usd = sale_unit_eur * fx
+        else:
+            qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
+            cost_line_eur = line['price'] * qty_waste
+            sale_line_eur = (cost_line_eur / product_cost_eur * total_eur) if product_cost_eur > 0 else 0
+            price_unit_sale_usd = (sale_line_eur / qty_waste * fx) if qty_waste else 0
 
         # Lookup product for pallet/m2/kg data
         prod = db.execute('SELECT units_per_pallet, sqm_per_pallet, kg_per_unit FROM products WHERE sku = ?',
@@ -3907,6 +4001,13 @@ def offer_pdf(offer_id):
         ('RIGHTPADDING', (0,0), (-1,-1), 4),
     ]))
     story.append(prod_tbl)
+    waste_pct_int = int(round(offer['waste_pct'] or 0))
+    if waste_pct_int > 0:
+        story.append(Spacer(1, 1*mm))
+        story.append(Paragraph(
+            f'* Cantidades incluyen {waste_pct_int}% de merma sobre la necesidad neta del proyecto.',
+            sty['small'],
+        ))
     story.append(Spacer(1, 6*mm))
 
     # Logistics summary — solo cuando el flete lo gestiona Arias (no-EXW).

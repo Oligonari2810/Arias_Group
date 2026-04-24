@@ -158,7 +158,6 @@
   </div>
 </div>
 
-<div id="containerAdvice" style="display:none; margin-top:8px; padding:6px 10px; border:1px solid #888; background:#fafafa; font-size:12px;"></div>
 
 <table style="margin-top:10px;">
   <thead>
@@ -220,6 +219,8 @@
   <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima. <b>Precios en USD</b>; la app sigue calculando internamente en EUR y convierte con el FX EUR/USD del input superior.</p>
 </details>
 
+<div id="preflightWarnings" style="display:none; margin-top:8px; padding:8px 12px; border:1px solid #b8860b; background:#fffbea; font-size:0.85em; border-radius:3px;"></div>
+
 <div style="margin-top:8px;">
   <button type="button" onclick="clearAll()">Limpiar</button>
   <button type="button" onclick="generateOffer()">Generar oferta → Logística</button>
@@ -228,53 +229,6 @@
 <div id="offerBanner" class="flash" style="display:none; margin-top:8px;"></div>
 
 <script>
-// Container optimizer (port from bot V2)
-const CONTAINERS = {
-  '20':   {pallets: 10, kg: 21500, label: "20'"},
-  '40':   {pallets: 20, kg: 26500, label: "40'"},
-  '40HC': {pallets: 24, kg: 26500, label: "40HC"},
-};
-
-function estimateContainersJS(pallets, weightKg, famBreakdown) {
-  if (pallets <= 0 && weightKg <= 0) return null;
-  const fams = Object.keys(famBreakdown || {});
-  const onlyPlates = fams.length === 1 && fams[0] === 'PLACAS';
-  const hasProfiles = fams.includes('PERFILES');
-  let order, note = '';
-  if (hasProfiles) {
-    order = ['40HC', '40'];
-    note = 'PERFILES detectados → 40HC preferente';
-  } else if (onlyPlates) {
-    order = ['20', '40', '40HC'];
-  } else {
-    order = ['40HC', '40', '20'];
-  }
-  // Try single container
-  for (const key of order) {
-    const d = CONTAINERS[key];
-    if (pallets <= d.pallets && weightKg <= d.kg) {
-      const palOcc = d.pallets ? pallets / d.pallets : 0;
-      const weiOcc = d.kg ? weightKg / d.kg : 0;
-      if (onlyPlates) note = 'Solo PLACAS → ' + d.label + ' (cabe en 1)';
-      return {key, label: d.label, units: 1, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, note};
-    }
-  }
-  // Multiple containers
-  let best = null;
-  for (const key of order) {
-    const d = CONTAINERS[key];
-    const uPal = d.pallets > 0 ? Math.ceil(pallets / d.pallets) : 0;
-    const uWei = d.kg > 0 ? Math.ceil(weightKg / d.kg) : 0;
-    const units = Math.max(uPal, uWei, 1);
-    const palOcc = d.pallets ? (pallets / units) / d.pallets : 0;
-    const weiOcc = d.kg ? (weightKg / units) / d.kg : 0;
-    const score = palOcc + weiOcc;
-    if (!best || units < best.units || (units === best.units && score > best.score)) {
-      best = {key, label: d.label, units, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, score, note};
-    }
-  }
-  return best;
-}
 
 const products = {{ products|tojson }};
 const systems = {{ systems|tojson }};
@@ -591,32 +545,10 @@ function recalcAll() {
   });
   const palletsLogistic = Math.ceil(totalPallets);
 
-  // Family breakdown for container optimization
-  const famBreakdown = {};
-  lines.forEach(l => { famBreakdown[l.family] = (famBreakdown[l.family] || 0) + 1; });
-  const containerRec = estimateContainersJS(palletsLogistic, totalWeight, famBreakdown);
-
-  // Container auto-calc: el estimator VIEJO solo sirve como referencia del
-  // containerAdvice; NO pisa el input (eso es responsabilidad del botón
-  // Calcular logística que usa el motor nuevo con drivers físicos).
+  // El número de contenedores lo fija el usuario (input manual) o
+  // el motor nuevo con el botón "🔄 Calcular logística".
   const manualContainers = document.getElementById('containerCount');
   let containerCount = parseInt(manualContainers.value) || 0;
-
-  // Show recommendation
-  const advDiv = document.getElementById('containerAdvice');
-  if (containerRec && lines.length > 0) {
-    const palOcc = (containerRec.palletOcc * 100).toFixed(0);
-    const weiOcc = (containerRec.weightOcc * 100).toFixed(0);
-    const fams = Object.keys(famBreakdown).join(', ');
-    advDiv.innerHTML = '<b>' + containerRec.units + ' x ' + containerRec.label + '</b>'
-      + ' · Palés: ' + fmtQ(palletsLogistic) + '/' + fmtQ(containerRec.palCap) + ' (' + palOcc + '%)'
-      + ' · Peso: ' + fmtQ(totalWeight) + '/' + fmtQ(containerRec.weiCap) + ' kg (' + weiOcc + '%)'
-      + ' · Familias: ' + fams
-      + (containerRec.note ? ' · <b>' + containerRec.note + '</b>' : '');
-    advDiv.style.display = 'block';
-  } else {
-    advDiv.style.display = 'none';
-  }
 
   // Logistics cost + margin
   const _lm = parseFloat(document.getElementById('logMarginInput').value);
@@ -627,12 +559,10 @@ function recalcAll() {
     const routeSel = document.getElementById('routeSelect');
     const routeOpt = routeSel.options[routeSel.selectedIndex];
     if (routeOpt && routeOpt.value) {
-      if (containerRec) {
-        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40hc';
-        oceanFreight = parseFloat(routeOpt.dataset[rateKey]) || parseFloat(routeOpt.dataset.c40hc) || 0;
-      } else {
-        oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
-      }
+      // Sin estimación previa se asume 40HC (el motor nuevo usa 40HC por
+      // defecto). Si el usuario luego cambia el tipo, recomputeLogistics
+      // recalcula con el contenedor real.
+      oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
     }
     const logBase = oceanFreight * containerCount;
     logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
@@ -685,7 +615,11 @@ function recalcAll() {
       <td class="num">${fmtN(line.price)}</td>
       <td class="num">${fmtN(line.price * fx)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
-          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
+          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${
+            wastePct > 0 && qtyW > line.qty
+              ? `<div style="font-size:0.75em; color:#666;" title="Incluye ${(wastePct*100).toFixed(0)}% de merma">+merma → ${fmtQ(qtyW)}</div>`
+              : ''
+          }${packAlert}</td>
       <td class="num"><input type="number" value="${(logPerUnit || 0).toFixed(4)}" min="0" step="0.0001"
           style="width:85px; text-align:right; ${logInputStyle}"
           title="${line.logCostManual ? 'Override manual' : 'Imputación automática del motor'}"
@@ -732,6 +666,45 @@ function recalcAll() {
   document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
 
   renderCompetitionPanel(lines, wastePct, fx);
+  renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount);
+}
+
+// Avisos no bloqueantes antes de generar la oferta. Detecta condiciones
+// que casi siempre son errores de dedo (flete 0 en CIF, margen muy bajo,
+// línea con cantidad 0, etc.) y las muestra en una caja ámbar arriba del
+// botón Generar. No impiden guardar — solo llaman la atención.
+function renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount) {
+  const warns = [];
+  const globalMargin = parseFloat(document.getElementById('marginInput').value) || 0;
+  if (lines.length === 0) {
+    document.getElementById('preflightWarnings').style.display = 'none';
+    return;
+  }
+  if (globalMargin > 0 && globalMargin < 5) {
+    warns.push(`Margen base muy bajo (${globalMargin}%). Verifica que es intencional.`);
+  }
+  lines.forEach((l, i) => {
+    if (!l.qty || l.qty <= 0) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): cantidad 0.`);
+    }
+    if (l.margin !== undefined && l.margin !== '' && l.margin < 5) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): margen ${l.margin}% — confirmar que es correcto.`);
+    }
+  });
+  if (incoterm !== 'EXW' && !useLogImputed && effectiveLogistic <= 0) {
+    warns.push(`Incoterm ${incoterm} pero flete 0€. Pulsa "🔄 Calcular logística" o introduce coste manual.`);
+  }
+  if (incoterm !== 'EXW' && containerCount <= 0) {
+    warns.push(`Incoterm ${incoterm} sin contenedores definidos. Pulsa "🔄 Calcular logística".`);
+  }
+  const warnDiv = document.getElementById('preflightWarnings');
+  if (warns.length === 0) {
+    warnDiv.style.display = 'none';
+  } else {
+    warnDiv.innerHTML = '<b>⚠ Antes de emitir, revisa:</b><ul style="margin:4px 0 0 18px; padding:0;">'
+      + warns.map(w => `<li>${escapeHtml(w)}</li>`).join('') + '</ul>';
+    warnDiv.style.display = 'block';
+  }
 }
 
 function renderCompetitionPanel(lines, wastePct, fx) {
