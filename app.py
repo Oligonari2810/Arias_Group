@@ -182,10 +182,20 @@ def load_user(user_id):
     return None
 
 
-def get_db() -> sqlite3.Connection:
+def get_db():
+    """Return the request-scoped DB handle.
+
+    When DATABASE_URL is set, returns a psycopg-backed adapter that mimics
+    sqlite3.Connection (see db/adapter.py); otherwise falls back to a plain
+    SQLite connection for backward compatibility (SPEC-002c cutover window).
+    """
     if 'db' not in g:
-        g.db = sqlite3.connect(app.config['DATABASE'])
-        g.db.row_factory = sqlite3.Row
+        from db import adapter
+        if adapter.is_configured():
+            g.db = adapter.connect()
+        else:
+            g.db = sqlite3.connect(app.config['DATABASE'])
+            g.db.row_factory = sqlite3.Row
     return g.db
 
 
@@ -196,7 +206,16 @@ def close_db(_: Any) -> None:
         db.close()
 
 
+def using_postgres() -> bool:
+    """True when the current get_db() would return a Postgres adapter."""
+    from db import adapter
+    return adapter.is_configured()
+
+
 def init_db() -> None:
+    if using_postgres():
+        # On Postgres, Alembic owns the schema. Skip the SQLite DDL script.
+        return
     db = get_db()
     db.executescript(
         """
@@ -1114,7 +1133,12 @@ def seed_db() -> None:
         ('Sistema protección fuego', 'Placa de protección pasiva al fuego', 0.05),
     ]
     for row in systems:
-        db.execute('INSERT OR IGNORE INTO systems (name, description, default_waste_pct) VALUES (?, ?, ?)', row)
+        # Portable upsert that works on both SQLite 3.24+ and Postgres.
+        db.execute(
+            'INSERT INTO systems (name, description, default_waste_pct) VALUES (?, ?, ?) '
+            'ON CONFLICT (name) DO NOTHING',
+            row,
+        )
 
     if db.execute('SELECT COUNT(*) AS c FROM clients').fetchone()['c'] == 0:
         db.execute(
@@ -2921,8 +2945,10 @@ def config():
             )
             flash('Arancel añadido.')
         elif action == 'add_fx':
+            # No natural unique key on fx_rates; OR REPLACE was vestigial. Plain INSERT
+            # works identically on both backends.
             db.execute(
-                '''INSERT OR REPLACE INTO fx_rates (base_currency, target_currency, rate, updated_at, source)
+                '''INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source)
                    VALUES (?, ?, ?, ?, ?)''',
                 (request.form['base_currency'], request.form['target_currency'],
                  float(request.form['rate']), now_iso(),
@@ -2945,7 +2971,8 @@ def config():
         elif action == 'update_fx_setting':
             new_fx = float(request.form['fx_eur_usd'])
             db.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?)",
+                "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (str(new_fx), now_iso())
             )
             flash(f'EUR/USD actualizado a {new_fx}')
