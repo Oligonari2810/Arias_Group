@@ -5,6 +5,7 @@
   <div class="card">
     <h2>Nuevo</h2>
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="row">
         <div><label>Cliente *<select name="client_id">{% for c in clients %}<option value="{{ c['id'] }}">{{ c['name'] }}{% if c['company'] %} - {{ c['company'] }}{% endif %}</option>{% endfor %}</select></label></div>
         <div><label>Nombre proyecto *<input name="name" required></label></div>

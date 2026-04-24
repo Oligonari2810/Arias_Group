@@ -4,6 +4,7 @@
 <div class="grid-2">
   <div class="card">
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="row">
         <div><label>Sistema</label><select name="system_id">{% for s in systems %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}</select></div>
         <div><label>Área m²</label><input name="area_sqm" type="number" step="0.01" value="1000"></div>

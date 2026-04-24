@@ -23,6 +23,7 @@
 
 <div id="clientForm" style="display:none; margin-top:8px; padding:8px; border:1px solid #888;">
   <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="add_client">
     <div class="row">
       <div><label>Nombre *</label><input type="text" name="name" required></div>
@@ -56,6 +57,7 @@
 
 <div id="projectForm" style="display:none; margin-top:8px; padding:8px; border:1px solid #888;">
   <form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="action" value="add_project">
     <div class="row">
       <div><label>Proyecto *</label><input type="text" name="name" required></div>

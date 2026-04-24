@@ -9,39 +9,29 @@ Sistema operativo comercial, técnico y logístico para la distribución de Fass
 - ReportLab (PDF)
 - openpyxl (lectura Excel)
 
-## Fuente maestra de datos
+## Fuente de verdad
 
-El catálogo de productos **se lee directamente** desde la hoja `PRODUCT` del archivo Excel:
+La **DB SQLite `fassa_ops.db` es la fuente de verdad** del catálogo, clientes, proyectos, cotizaciones y toda la operativa. Todas las ediciones (precios, nuevos SKUs, datos logísticos) se hacen desde la app vía `/products`, `/masters` y flujos relacionados.
 
-```
-Arias_Group_Master-System_v1.xlsx  ← fuente maestra (186 SKUs)
-```
+> ℹ️ Los Excel antiguos (`Arias_Group_Master-System_v1.xlsx`, `PRODUCT_AriasGroup_v4.xlsx`) y el script `load_catalog.py` quedan archivados en `old/`. La DB ya contiene 60 SKUs nuevos y campos logísticos (dimensiones de palé, apilabilidad, descuentos compuestos) que esos Excel no tienen — sincronizar desde Excel hoy sería destructivo.
 
-Cada vez que actualices precios, productos o datos logísticos en el Excel, **vuelve a ejecutar** `load_catalog.py`.
+## Exportar catálogo a Excel
+
+Para revisión humana, backup o futuro import a un ERP externo, el catálogo se exporta al vuelo desde la DB:
+
+- **Bajo demanda:** botón "Descargar catálogo" en `/products` o `GET /api/export/catalog.xlsx`.
+- **Snapshot diario automático:** `docs/exports/catalog_YYYY-MM-DD.xlsx`.
 
 ## Arranque rápido
 
 ```bash
-cd Mvp_Arias_Fassa
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python app.py                      # Inicializa DB + seed + arranca en :5000
+python app.py                      # Inicializa DB + seed + arranca en :5050
 ```
 
-Abrir → http://127.0.0.1:5000/
-
-## Sincronizar catálogo (cada vez que cambies el Excel)
-
-```bash
-python load_catalog.py
-```
-
-Este script lee las 186 filas de la hoja `PRODUCT` y las carga en la DB SQLite con:
-- SKU, nombre, categoría, unidad, precio
-- Peso neto por unidad
-- Uds/palet y m²/palet
-- HS Code + Norma en las notas
+Abrir → http://127.0.0.1:5050/
 
 ## Módulos
 
@@ -59,14 +49,12 @@ Este script lee las 186 filas de la hoja `PRODUCT` y las carga en la DB SQLite c
 ## Flujo de datos
 
 ```
-EXCEL PRODUCT (186 SKUs)
-        │
-        ▼  load_catalog.py
-   SQLite DB (fassa_ops.db)
+   SQLite DB (fassa_ops.db)   ← fuente de verdad
         │
         ├─► Web App → Catálogo / Cotización / PDF
         ├─► Calculadora → m² → SKUs → palés → contenedor
-        └─► Pipeline 26 etapas → CRM → Oferta → Entrega
+        ├─► Pipeline 26 etapas → CRM → Oferta → Entrega
+        └─► Export xlsx (bajo demanda + snapshot diario)
 ```
 
 ## Exportación PDF de oferta

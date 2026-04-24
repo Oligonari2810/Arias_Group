@@ -28,8 +28,9 @@ TARGETS = {
     'calculate_quote':      0.90,   # orquestador crítico
 }
 
-# Line ranges (inclusive) matching app.py as-shipped on feature branch.
-# If the motor is refactored, update these ranges.
+# Line ranges (inclusive) of each function in app.py. **Must be kept in sync**
+# whenever these functions are edited or code is inserted above them — otherwise
+# the gate measures the wrong lines and either fails spuriously or passes blindly.
 FUNCTION_LINE_RANGES = {
     '_num':                 (532, 536),
     'detect_family':        (539, 540),

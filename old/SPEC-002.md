@@ -1,11 +1,17 @@
 # SPEC-002 — Migración SQLite → PostgreSQL + capa de abstracción de datos
 
+> **⚠️ ARCHIVADA — 2026-04-19.** Superseded por el pivot a ERP comercial
+> (Odoo / NetSuite). Ver `docs/PIVOT-2026-04-19.md`.
+> Los PRs #4 (002b) y #5 (002c) quedaron cerrados sin mergear.
+> Las ramas `feature/spec-002b-schema-migrator` y
+> `feature/spec-002c-app-refactor` permanecen en el repo como historial.
+
 **Fase:** 0 (Fundamentos)
 **Prioridad:** P0 — habilita multi-usuario real, multi-país y todo el roadmap posterior
 **Autor (CTO):** Claude
 **Ejecutor (Lead Dev):** Qwen-Coder
 **Product Owner:** Oliver
-**Estado:** Lista para ejecutar (SPEC-001 mergeada 2026-04-19)
+**Estado:** ARCHIVED (2026-04-19) — pivote a ERP comercial
 **Branch objetivo:** `feature/spec-002-postgres-migration`
 
 ---

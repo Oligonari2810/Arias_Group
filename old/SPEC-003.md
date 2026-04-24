@@ -1,11 +1,17 @@
 # SPEC-003 — Domain cleanup: descomposición de `STAGES` en entidades reales
 
+> **⚠️ ARCHIVADA — 2026-04-19.** Superseded por el pivot a ERP comercial.
+> Ver `docs/PIVOT-2026-04-19.md`.
+> Odoo / NetSuite ya trae el modelado correcto de entidades
+> (leads / opportunities / quotes / orders / deliveries / invoices),
+> por lo que esta descomposición ya no se implementa en custom.
+
 **Fase:** 1 (ERP core — desbloquea CRM limpio, reporting correcto)
 **Prioridad:** P1 — no bloqueante operativamente, pero la salud del dominio lo exige antes de SPEC-004+
 **Autor (CTO):** Claude
 **Ejecutor (Lead Dev):** Claude (o Qwen si recupera terminal; o contratación puntual)
 **Product Owner:** Oliver
-**Estado:** Borrador — activable cuando SPEC-002 (Postgres) esté mergeada
+**Estado:** ARCHIVED (2026-04-19) — Odoo modela esto de serie
 **Branch objetivo:** `feature/spec-003-domain-cleanup`
 
 ---
