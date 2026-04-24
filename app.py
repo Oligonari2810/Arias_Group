@@ -102,6 +102,7 @@ _SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 _SAFE_COLUMN_TYPES = frozenset({
     'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
     'REAL DEFAULT 50', 'REAL DEFAULT 5', 'INTEGER DEFAULT 99',
+    'INTEGER DEFAULT 30',
 })
 
 
@@ -362,6 +363,7 @@ def init_db() -> None:
             incoterm TEXT DEFAULT 'EXW',
             route_id INTEGER,
             container_count INTEGER DEFAULT 0,
+            validity_days INTEGER DEFAULT 30,
             created_at TEXT NOT NULL,
             updated_at TEXT
         );
@@ -523,6 +525,9 @@ def init_db() -> None:
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
         _safe_add_column(db, 'pending_offers', 'raw_hash', 'TEXT')
+    if 'validity_days' not in offer_cols:
+        _safe_add_column(db, 'pending_offers', 'validity_days', 'INTEGER DEFAULT 30')
+        db.execute('UPDATE pending_offers SET validity_days = 30 WHERE validity_days IS NULL')
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
         _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
@@ -2346,12 +2351,13 @@ def save_offer():
             'existing_offer_number': dup['offer_number'],
         }), 409
 
+    validity_days = int(_num(data.get('validityDays', 30)) or 30)
     db.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, raw_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+         status, incoterm, container_count, validity_days, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (
             offer_num,
             data.get('client', ''),
@@ -2366,6 +2372,7 @@ def save_offer():
             'pending',
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             raw_hash,
             now_iso(),
         )
@@ -2466,13 +2473,14 @@ def update_full_offer():
     total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
+    validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
     db.execute(
         '''UPDATE pending_offers SET
            offer_number = ?, client_name = ?, project_name = ?,
            waste_pct = ?, margin_pct = ?, fx_rate = ?,
            lines_json = ?, total_product_eur = ?, total_logistic_eur = ?,
            total_final_eur = ?, incoterm = ?, container_count = ?,
-           raw_hash = ?, updated_at = ?
+           validity_days = ?, raw_hash = ?, updated_at = ?
            WHERE id = ?''',
         (
             data.get('offerNumber', existing['offer_number']),
@@ -2487,6 +2495,7 @@ def update_full_offer():
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
             now_iso(),
             edit_id,
@@ -3124,9 +3133,10 @@ def offer_pdf(offer_id):
     # Section 3
     story.append(Paragraph('3.  CONDICIONES COMERCIALES', sty['h1']))
     story.append(Spacer(1, 1*mm))
+    validity = int(offer['validity_days']) if offer['validity_days'] else 30
     conds = [
         ('Pago', '100% prepago por transferencia bancaria antes de emisión de orden de producción.'),
-        ('Validez de oferta', f"{int(offer['margin_pct'])} días calendario desde la fecha de emisión."),
+        ('Validez de oferta', f"{validity} días calendario desde la fecha de emisión."),
         ('Plazo de entrega', 'Según confirmación de fábrica tras recepción de pago.'),
         ('Puerto de embarque', 'Valencia, España'),
         ('Incoterm aplicable', f"{offer['incoterm'] or 'EXW'} — riesgo y responsabilidad se transfieren al comprador."),

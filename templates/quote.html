@@ -117,6 +117,7 @@
   <div><label>Desperdicio %</label><input type="number" id="wasteInput" value="5" min="0" max="50" step="1" oninput="recalcAll()"></div>
   <div><label>Margen base %</label><input type="number" id="marginInput" value="20" min="0" max="100" step="1" oninput="applyGlobalMargin()"></div>
   <div><label>FX EUR/USD</label><input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001" oninput="recalcAll()"></div>
+  <div><label>Validez (días)</label><input type="number" id="validityInput" value="30" min="1" max="365" step="1"></div>
   <div>
     <label>Incoterm</label>
     <select id="incotermSelect" onchange="onIncotermChange()">
@@ -786,9 +787,11 @@ function generateOffer() {
   });
 
   const editId = document.getElementById('editOfferId').value;
+  const _vd = parseInt(document.getElementById('validityInput').value);
+  const validityDays = isNaN(_vd) || _vd < 1 ? 30 : _vd;
   const offer = {
     client, project, offerNumber: offerNum,
-    wastePct, margin, fx, incoterm,
+    wastePct, margin, fx, incoterm, validityDays,
     logisticCost, containerCount: containers, routeId,
     totalPallets: Math.ceil(totalPallets),
     totalWeight: Math.round(totalWeight),
@@ -833,6 +836,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('offerNumber').value = editData.offer_number || '';
   document.getElementById('wasteInput').value = editData.waste_pct || 0;
   document.getElementById('marginInput').value = editData.margin_pct || 20;
+  if (editData.validity_days) document.getElementById('validityInput').value = editData.validity_days;
   if (editData.fx_rate) document.getElementById('fxInput').value = editData.fx_rate;
   if (editData.incoterm) {
     document.getElementById('incotermSelect').value = editData.incoterm;
