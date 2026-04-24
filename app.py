@@ -539,6 +539,7 @@ def init_db() -> None:
     _apply_compound_discount_once(db)
     _audit_fixes_20260423(db)
     _audit_catalog_fixes_20260423(db)
+    _audit_catalog_fixes_20260423_v2(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -674,6 +675,148 @@ def _audit_catalog_fixes_20260423(db: sqlite3.Connection) -> None:
     db.commit()
     if updated:
         print(f'[migration] catálogo 2026-04-23: {updated} SKUs corregidos a precio Tarancón + bug pvp_per_m2 AQUASUPER 2700')
+
+
+def _audit_catalog_fixes_20260423_v2(db: sqlite3.Connection) -> None:
+    """Segunda tanda de correcciones de catálogo (decisión comercial 2026-04-23).
+
+    1) STD no-Tarancón → marcar como origen Calliano y ajustar PVP.
+       Las 5 placas STD fuera de Tarancón son comerciales para Arias (se
+       compran desde Calliano). Se mantiene el SKU actual (con prefijo P)
+       para no romper referencias históricas, pero se añade "(origen
+       Calliano)" al nombre y se actualiza PVP al precio Calliano €/m².
+
+    2) Placas no comerciales eliminadas: AQUASUPER 13mm 2700/2800,
+       AQUASUPER 18mm 2600, GypsoSILENS 13mm 2500/3000. Ninguna está
+       referenciada en order_lines ni pending_offers.lines_json
+       (verificado antes de la migración).
+
+    3) Descripciones de cintas guardavivos (304064, 304065) corregidas
+       a Tarifa Abril 2026 (45m y 153m; precios no cambian).
+
+    4) Dimensiones de tornillos Externa Light (301240/241/244/245)
+       corregidas a Tarifa Abril 2026 (Punta Clavo 30/40; Punta Broca
+       32/41). Precios no cambian.
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_v2_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    deleted = 0
+
+    # 1) STD no-Tarancón → origen Calliano (Gypsotech Abril 2026, columna Calliano €/m²).
+    std_calliano = [
+        # (sku, m2_per_placa, calliano_eur_m2, pvp_anterior_esperado)
+        ('P00A000260A0', 3.12, 5.59, 15.48),  # STD BA 10mm 1200×2600
+        ('P00A000270A0', 3.24, 5.59, 16.08),  # STD BA 10mm 1200×2700
+        ('P00A003320A0', 3.84, 4.55, 15.48),  # STD BA 13mm 1200×3200
+        ('P00A003360A0', 4.32, 4.55, 17.42),  # STD BA 13mm 1200×3600
+        ('P00A008250A0', 3.00, 7.15, 17.96),  # STD BA 18mm 1200×2500
+    ]
+    for sku, m2, rate, expected_old in std_calliano:
+        row = db.execute(
+            'SELECT pvp_eur_unit, name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['pvp_eur_unit'] is None:
+            continue
+        if abs(float(row['pvp_eur_unit']) - expected_old) > 0.01:
+            continue
+        new_pvp = round(m2 * rate, 2)
+        new_arias = round(new_pvp * 0.475, 4)
+        new_m2 = round(rate, 4)
+        new_name = row['name'] if '(origen Calliano)' in (row['name'] or '') \
+            else f"{row['name']} (origen Calliano)"
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?,
+                   pvp_per_m2 = ?, name = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, new_m2, new_name, sku),
+        )
+        updated += 1
+
+    # 2) Placas no comerciales eliminadas.
+    non_commercial = [
+        'P00W003270A0',  # AQUASUPER BA 13mm 1200×2700
+        'P00W003280A0',  # AQUASUPER BA 13mm 1200×2800
+        'P00W008260A0',  # AQUASUPER BA 18mm 1200×2600
+        'P00GS03250A0',  # GypsoSILENS BA 13mm 1200×2500
+        'P00GS03300A0',  # GypsoSILENS BA 13mm 1200×3000
+    ]
+    for sku in non_commercial:
+        in_orders = db.execute(
+            'SELECT 1 FROM order_lines WHERE sku = ? LIMIT 1', (sku,)
+        ).fetchone()
+        in_offers = db.execute(
+            "SELECT 1 FROM pending_offers WHERE lines_json LIKE ? LIMIT 1",
+            (f'%{sku}%',),
+        ).fetchone()
+        if in_orders or in_offers:
+            continue  # protección defensiva — no borrar si algo lo referencia
+        res = db.execute('DELETE FROM products WHERE sku = ?', (sku,))
+        if res.rowcount:
+            deleted += 1
+
+    # 3) Cintas guardavivos — descripciones Tarifa Abril 2026 (45m y 153m).
+    cintas_fix = [
+        ('304064',
+         'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×45m — 54 rollos/caja'),
+        ('304065',
+         'Cinta Guardavivos 50mm×30m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×153m — 12 rollos/caja'),
+    ]
+    for sku, old_name, new_name in cintas_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    # 4) Tornillos Externa Light — dimensiones Tarifa Abril 2026.
+    tornillos_fix = [
+        ('301240',
+         'Tornillo Exterior Ø4,0×42 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×30 — 1.000ud'),
+        ('301241',
+         'Tornillo Exterior Ø4,0×41 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×40 — 1.000ud'),
+        ('301244',
+         'Tornillo Exterior Ø4,0×42 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×32 — 500ud'),
+        ('301245',
+         'Tornillo Exterior Ø4,0×41 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×41 — 500ud'),
+    ]
+    for sku, old_name, new_name in tornillos_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_v2_applied',
+         f'updated={updated};deleted={deleted}', now_iso()),
+    )
+    db.commit()
+    if updated or deleted:
+        print(
+            f'[migration] catálogo v2: {updated} SKUs actualizados '
+            f'(STD Calliano / cintas / tornillos), {deleted} placas no comerciales eliminadas'
+        )
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
