@@ -156,6 +156,7 @@
       <div id="logisticsState" class="muted" style="font-size:0.85em; margin-top:2px;">no calculado</div>
     </div>
   </div>
+  <div id="capacityAlert" style="display:none; margin-top:8px; padding:8px 12px; border-radius:3px; font-size:0.85em;"></div>
 </div>
 
 
@@ -473,6 +474,7 @@ async function recomputeLogistics() {
     };
     const drv = {'pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
     state.innerHTML = `<b>${j.n_containers}×${containerType}</b> · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
+    renderCapacityAlert(j.free_capacity, j.n_containers, j.dominant_family);
     recalcAll();
   } catch (e) {
     state.textContent = 'error de red: ' + e.message;
@@ -499,6 +501,43 @@ function onContainerCountChange() {
     }
   }
   recalcAll();
+}
+
+// Panel de "capacidad libre" tras Calcular logística. Avisa al vendedor
+// cuando sobran peso/suelo/volumen en los contenedores dominantes, para
+// que pueda añadir pastas, cintas, cubos o cajas con mejor margen sin
+// abrir contenedor extra. UI-only (no toca el PDF).
+// Regla: no aparece si is_optimized=true (caso típico: placas 1200×2000
+// rotadas que llenan por peso hasta el tope y no dejan hueco útil).
+function renderCapacityAlert(fc, nCont, dominantFamily) {
+  const div = document.getElementById('capacityAlert');
+  if (!div) return;
+  if (!fc || nCont <= 0) { div.style.display = 'none'; return; }
+  if (fc.is_optimized) {
+    div.style.background = '#eef7ea';
+    div.style.border = '1px solid #5a8';
+    div.innerHTML = `✅ <b>Contenedores optimizados.</b> Carga máxima alcanzada (peso dominante). No cabe producto adicional.`;
+    div.style.display = 'block';
+    return;
+  }
+  const per = fc.per_container || {};
+  const tot = fc.total || {};
+  const weightPer = Number(per.weight_kg || 0);
+  const floorPer = Number(per.floor_m2 || 0);
+  const cbmPer = Number(per.cbm || 0);
+  // Umbral mínimo para llamar la atención (evita ruido con huecos irrelevantes).
+  if (weightPer < 500 && floorPer < 2 && cbmPer < 3) {
+    div.style.display = 'none';
+    return;
+  }
+  div.style.background = '#fffbea';
+  div.style.border = '1px solid #b8860b';
+  div.innerHTML =
+    `✨ <b>Oportunidad: queda capacidad en tus ${nCont} contenedores.</b>` +
+    `<div style="margin-top:4px;">Por cont.: <b>${fmtN(weightPer)} kg</b> peso · <b>${fmtN(floorPer)} m²</b> suelo · <b>${fmtN(cbmPer)} m³</b> volumen.</div>` +
+    `<div>Total: <b>${fmtN(tot.weight_kg || 0)} kg</b> · <b>${fmtN(tot.floor_m2 || 0)} m²</b> · <b>${fmtN(tot.cbm || 0)} m³</b>.</div>` +
+    `<div style="margin-top:4px; font-size:0.85em; color:#666;">Considera añadir pastas / cintas / cubos / cajas en palés (mejor margen que placas) sin abrir contenedor extra.</div>`;
+  div.style.display = 'block';
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }

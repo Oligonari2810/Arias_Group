@@ -3492,6 +3492,20 @@ def api_compute_logistics():
                 'm2_log_cost_eur': s.m2_log_cost_eur,
             } for s in result.skus
         ],
+        # Capacidad libre en los contenedores dominantes. UI-only.
+        'free_capacity': {
+            'per_container': {
+                'weight_kg': result.free_weight_kg_per_cont,
+                'cbm': result.free_cbm_per_cont,
+                'floor_m2': result.free_floor_m2_per_cont,
+            },
+            'total': {
+                'weight_kg': result.free_weight_kg_total,
+                'cbm': result.free_cbm_total,
+                'floor_m2': result.free_floor_m2_total,
+            },
+            'is_optimized': result.is_optimized,
+        },
     })
 
 
