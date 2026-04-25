@@ -166,10 +166,10 @@ No añadir a `requirements.txt` — dev deps aparte.
 **Fixture:** seed de DB en memoria con 1 system "Tabique PYL 12.5mm BA13" + 3 componentes (placa, perfil, tornillos).
 
 **Tests obligatorios:**
-- Happy path: 100 m², freight 500€, margen 25%, FX 1.085 → verifica:
+- Happy path: 100 m², freight 500€, margen 25%, FX 1.18 → verifica:
   - `summary.product_cost_eur` > 0
   - `summary.gross_margin_pct` ≈ 0.25 (tolerancia ±0.001)
-  - `summary.sale_total_local = sale_total_eur × 1.085`
+  - `summary.sale_total_local = sale_total_eur × 1.18`
   - `summary.container_recommendation` no None
   - `line_items` tiene 3 entradas con campos legacy
 - Waste compuesto: si `sc.waste_pct > system.default_waste_pct`, se usa el mayor
