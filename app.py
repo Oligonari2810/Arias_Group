@@ -560,6 +560,7 @@ def init_db() -> None:
     _cleanup_demo_data_20260425(db)
     _schema_cleanup_and_client_fk_20260425(db)
     _catalog_discount_completion_20260425(db)
+    _catalog_real_data_from_pdf_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1327,6 +1328,304 @@ def _catalog_discount_completion_20260425(db: sqlite3.Connection) -> None:
         f'[migration] catalog 2026-04-25: discount_extra_pct backfilled='
         f'{extra_backfilled}, FASSACOL precios corregidos={pastas_fixed} '
         f'(ofertas históricas intactas)'
+    )
+
+
+# ── Datos extraídos del PDF ANEXO GYPSOTECH NOVIEMBRE 2025 (perfiles) ──
+# Esto es la **fuente de verdad** para `kg_per_ml` de PERFILES Fassa, que
+# permite recalcular `kg_per_unit` real (sin estimación) como
+#   kg_per_unit_real = kg_per_ml × (longitud_mm / 1000)
+# Los códigos son los SKUs Arias (= Cód. Artículo Fassa).
+# Si Fassa publica un anexo nuevo, esta tabla se actualiza aquí.
+_PERFILES_KG_PER_ML_BY_PREFIX = {
+    # PERFILES — prefijo del SKU (sin últimos 4 chars de longitud) → kg/ml
+    'C344836': 0.57,    # MONTANTE 48/35 (Z1 y Z2)
+    'C367038': 0.70,    # MONTANTE 70/37
+    'C399041': 0.82,    # MONTANTE 90/40
+    'C3910041': 0.87,   # MONTANTE 100/40
+    'C4612548': 0.98,   # MONTANTE 125/47
+    'C4615048': 1.10,   # MONTANTE 150/47
+    'U304830': 0.45,    # RAIL 48
+    'U307030': 0.55,    # RAIL 70 Z1 (Z2 = 0.57)
+    'U309030': 0.64,    # RAIL 90 Z1 (Z2 = 0.69)
+    'U3010030': 0.70,   # RAIL 100
+    'U3512535': 0.81,   # RAIL 125
+    'U4015040': 0.91,   # RAIL 150
+    'C174717': 0.44,    # PERFIL TC 47
+    'C154830': 0.45,    # PERFIL TC 48
+    'C286028': 0.60,    # PERFIL TC 60
+    'U472447': 0.53,    # PERFIL SIERRA TC 47/48/60
+    'L233430':  0.25,   # PERFIL ANGULAR Z1 y Z2
+    'U201928': 0.24,    # PERFIL CLIP
+    'U193019': 0.33,    # PERFIL U 30
+    'E168218': 0.0,     # OMEGA — peso no publicado
+}
+
+
+def _catalog_real_data_from_pdf_20260425(db: sqlite3.Connection) -> None:
+    """Schema completo de catálogo + backfill desde Tarifa Fassa 2026.
+
+    Datos extraídos de:
+      - Tarifa Gypsotech Abril 2026 (placas, pastas, tornillos, trampillas,
+        accesorios, cintas, GypsoCOMETE)
+      - Anexo Gypsotech Noviembre 2025 (perfiles, accesorios, tornillos,
+        trampillas con uds/palé real y kg/ml para perfiles)
+
+    Cambios:
+
+    1) NUEVAS COLUMNAS estructuradas en `products`:
+       - Dimensiones: length_mm, width_mm, thickness_mm, dim_a_mm, dim_b_mm,
+         dim_c_mm, diameter_mm, espesor_acero_mm
+       - Empaquetado: kg_per_ml, box_units (separa uds/caja del uds/palé real),
+         peso_saco_kg
+       - Comercial: min_order_qty, dispo_tarancon, tariff_origen,
+         pvp_calliano_eur, pvp_onda_lerida_eur, pvp_antas_eur
+       - Metadata: norma_text, color, description_long, tiempo_trabajab_min
+
+    2) BACKFILL automático desde el `name` y `pack_size` (regex en SQL):
+       - length_mm, width_mm para placas (de "1200×2500" → 1200 y 2500)
+       - thickness_mm para placas (de "BA 13 MM" → 13)
+       - longitud para perfiles (de "— 2.490mm" → 2490)
+       - dimensiones para tornillos (de "Ø3,5×25" → diameter 3.5, length 25)
+       - box_units para tornillos/cintas/accesorios (de "— 1.000ud" → 1000)
+
+    3) BACKFILL kg_per_ml para PERFILES desde tabla embebida _PERFILES_KG_PER_ML.
+       A partir de eso, recálculo de kg_per_unit real (= kg_per_ml × longitud_m)
+       para los 41 SKUs de perfiles → desaparece la marca [peso estimado] de
+       toda la familia.
+
+    4) DROP de columnas cache que generan drift:
+       - products.pvp_per_m2 (calculable: pvp_eur_unit × upp / sqm_pp)
+       - products.precio_arias_m2 (idem con precio_arias_eur_unit)
+
+    5) DEFAULT operativo:
+       - dispo_tarancon = 'green' para todos (afinable luego desde UI admin)
+
+    REGLA OFERTAS INMUTABLES: SOLO se toca `products`. Las ofertas existentes
+    quedan intactas (lines_json es contractual).
+
+    Idempotente vía flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_real_data_from_pdf_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Schema: nuevas columnas (idempotente vía _safe_add_column).
+    new_cols = [
+        # Dimensiones físicas estructuradas
+        ('length_mm', 'INTEGER'),
+        ('width_mm', 'INTEGER'),
+        ('thickness_mm', 'REAL'),
+        ('dim_a_mm', 'REAL'),
+        ('dim_b_mm', 'REAL'),
+        ('dim_c_mm', 'REAL'),
+        ('diameter_mm', 'REAL'),
+        ('espesor_acero_mm', 'REAL'),
+        # Empaquetado
+        ('kg_per_ml', 'REAL'),
+        ('box_units', 'INTEGER'),
+        ('peso_saco_kg', 'REAL'),
+        # Comercial
+        ('min_order_qty', 'INTEGER'),
+        ('dispo_tarancon', 'TEXT'),
+        ('tariff_origen', 'TEXT'),
+        ('pvp_calliano_eur', 'REAL'),
+        ('pvp_onda_lerida_eur', 'REAL'),
+        ('pvp_antas_eur', 'REAL'),
+        # Metadata
+        ('norma_text', 'TEXT'),
+        ('color', 'TEXT'),
+        ('description_long', 'TEXT'),
+        ('tiempo_trabajab_min', 'INTEGER'),
+    ]
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    cols_added = 0
+    for col, typ in new_cols:
+        if col not in existing:
+            _safe_add_column(db, 'products', col, typ)
+            cols_added += 1
+
+    # 2) Default dispo_tarancon = 'green' donde sea NULL (sin info contraria).
+    db.execute("UPDATE products SET dispo_tarancon = 'green' WHERE dispo_tarancon IS NULL")
+
+    # 3) BACKFILL via regex SQL (sin Python). SQLite regex es limitado, usamos
+    #    LIKE con wildcards y substr() — más torpe pero portable.
+
+    # 3a) PLACAS: extraer thickness desde "BA 13mm" (lowercase en la DB Arias).
+    #     LIKE en SQLite es case-insensitive por defecto para ASCII.
+    placas_thick = [(6, '%BA 6mm%'), (9.5, '%BA 9,5mm%'), (12.5, '%BA 13mm%'),
+                    (15, '%BA 15mm%'), (18, '%BA 18mm%'), (20, '%BA 20mm%'),
+                    (25, '%BA 25mm%')]
+    for thick, like in placas_thick:
+        db.execute(
+            "UPDATE products SET thickness_mm = ? "
+            "WHERE category = 'PLACAS' AND name LIKE ? AND thickness_mm IS NULL",
+            (thick, like),
+        )
+
+    # 3b) PLACAS: width_mm = 1200 (todas las placas Fassa estándar).
+    db.execute(
+        "UPDATE products SET width_mm = 1200 "
+        "WHERE category = 'PLACAS' AND width_mm IS NULL"
+    )
+
+    # 3c) PLACAS: extraer length_mm de content_per_unit "1200×2500 mm (...)".
+    #     Patrón: el segundo número entre × y mm.
+    placas = db.execute(
+        "SELECT id, content_per_unit FROM products "
+        "WHERE category = 'PLACAS' AND length_mm IS NULL AND content_per_unit LIKE '1200×%'"
+    ).fetchall()
+    placas_filled = 0
+    for p in placas:
+        try:
+            # "1200×2500 mm (3.00 m²/placa)" → 2500
+            after_x = p['content_per_unit'].split('×', 1)[1]
+            length = int(''.join(c for c in after_x.split(' ', 1)[0] if c.isdigit()))
+            if 500 <= length <= 4000:
+                db.execute('UPDATE products SET length_mm = ? WHERE id = ?', (length, p['id']))
+                placas_filled += 1
+        except (ValueError, IndexError):
+            pass
+
+    # 3d) PLACAS: tariff_origen del prefijo del SKU (P → Tarancón, L → Calliano).
+    db.execute(
+        "UPDATE products SET tariff_origen = 'Tarancón' "
+        "WHERE category = 'PLACAS' AND sku LIKE 'P%' AND tariff_origen IS NULL"
+    )
+    db.execute(
+        "UPDATE products SET tariff_origen = 'Calliano' "
+        "WHERE category = 'PLACAS' AND sku LIKE 'L%' AND tariff_origen IS NULL"
+    )
+
+    # 3e) PERFILES: backfill kg_per_ml desde la tabla embebida + recalcular kg_per_unit.
+    perfiles_filled = 0
+    perfiles_kg_recalc = 0
+    perfiles = db.execute(
+        "SELECT id, sku, name, kg_per_unit FROM products WHERE category = 'PERFILES'"
+    ).fetchall()
+    for pr in perfiles:
+        sku = pr['sku'] or ''
+        kg_ml = None
+        for prefix, value in _PERFILES_KG_PER_ML_BY_PREFIX.items():
+            if sku.startswith(prefix):
+                kg_ml = value
+                break
+        if kg_ml is None or kg_ml <= 0:
+            continue
+        db.execute('UPDATE products SET kg_per_ml = ? WHERE id = ?', (kg_ml, pr['id']))
+        perfiles_filled += 1
+        # Extraer longitud:
+        # 1) Primero del nombre "— 2.490mm" / "— 3.000mm" si está presente.
+        # 2) Si no, de los últimos 4 chars del SKU Fassa (`xxxA`/`xxxB` →
+        #    primeros 3 dígitos × 10 = longitud_mm). Ej: C344836249A → 249 → 2490mm.
+        name = pr['name'] or ''
+        length_mm = None
+        if '—' in name:
+            tail = name.split('—', 1)[1].strip()
+            digits = tail.replace('.', '').replace(' ', '').replace('mm', '')
+            try:
+                cand = int(digits)
+                if 500 <= cand <= 6000:
+                    length_mm = cand
+            except ValueError:
+                pass
+        if length_mm is None:
+            # Patrón Fassa: últimos 3 dígitos antes del sufijo de variante × 10.
+            # Sufijo puede ser sólo letras ('A'/'BA'/'B') o letra+número ('Z1'/'Z2').
+            # Ej: C344836249A   → 249 → 2490mm  (sufijo A)
+            #     C1548300BA    → 300 → 3000mm  (sufijo BA)
+            #     E168218300Z1  → 300 → 3000mm  (sufijo Z1)
+            m = re.search(r'(\d{3})[A-Z][A-Z0-9]*$', sku)
+            if m:
+                cand = int(m.group(1)) * 10
+                if 500 <= cand <= 6000:
+                    length_mm = cand
+        if length_mm:
+            db.execute('UPDATE products SET length_mm = ? WHERE id = ?', (length_mm, pr['id']))
+            kg_real = round(kg_ml * (length_mm / 1000.0), 3)
+            db.execute(
+                'UPDATE products SET kg_per_unit = ? WHERE id = ?',
+                (kg_real, pr['id']),
+            )
+            perfiles_kg_recalc += 1
+    # Limpia la marca [peso estimado] de los perfiles que ahora tienen peso real.
+    db.execute(
+        "UPDATE products SET notes = REPLACE(REPLACE(notes, '[peso estimado]', ''), "
+        "'[peso estimado] ', '') WHERE category = 'PERFILES' AND kg_per_ml > 0"
+    )
+
+    # 3f) PASTAS: peso_saco_kg de pack_size ("5 kg" / "10 kg" / "25 kg").
+    for kg in (5.0, 10.0, 12.0, 15.0, 20.0, 25.0):
+        db.execute(
+            "UPDATE products SET peso_saco_kg = ? "
+            "WHERE category = 'PASTAS' AND peso_saco_kg IS NULL "
+            "AND (pack_size LIKE ? OR content_per_unit LIKE ?)",
+            (kg, f'%{int(kg) if kg == int(kg) else kg} kg%',
+             f'%{int(kg) if kg == int(kg) else kg} kg%'),
+        )
+
+    # 3g) PASTAS: color por defecto blanco (revisable desde UI admin).
+    db.execute(
+        "UPDATE products SET color = 'Blanco' "
+        "WHERE category = 'PASTAS' AND color IS NULL"
+    )
+
+    # 3h) TORNILLOS / CINTAS / ACCESORIOS: box_units extraído del name.
+    #     Patrón: "— 1.000ud" / "— 24 rollos/caja" / "— 50 unidades".
+    #     SQLite no tiene regex robusta, usamos UPDATE por valores comunes.
+    for n in (250, 500, 1000, 3000, 5000):
+        db.execute(
+            "UPDATE products SET box_units = ? "
+            "WHERE box_units IS NULL AND category IN ('TORNILLOS', 'CINTAS', 'ACCESORIOS') "
+            "AND (name LIKE ? OR name LIKE ?)",
+            (n, f'%— {n}ud%', f'%— {n}.000ud%' if n == 1000 else f'%— {n} ud%'),
+        )
+
+    # 3i) Norma textual por familia (defaults Fassa).
+    norma_by_family = {
+        'PLACAS': 'UNE EN 520',
+        'PERFILES': 'UNE 14195 / EN 14195',
+        'PASTAS': 'UNE EN 13963',
+        'CINTAS': 'UNE EN 13963',
+    }
+    for fam, norma in norma_by_family.items():
+        db.execute(
+            'UPDATE products SET norma_text = ? WHERE category = ? AND norma_text IS NULL',
+            (norma, fam),
+        )
+
+    # 3j) GYPSOCOMETE: dispo='yellow' (todos bajo pedido según PDF abril 2026).
+    db.execute(
+        "UPDATE products SET dispo_tarancon = 'yellow' WHERE category = 'GYPSOCOMETE'"
+    )
+
+    # 4) Cleanup: drop columnas cache (calculables on-the-fly).
+    cache_dropped = []
+    for col in ('pvp_per_m2', 'precio_arias_m2'):
+        if col in existing:
+            try:
+                db.execute(f'ALTER TABLE products DROP COLUMN {col}')
+                cache_dropped.append(col)
+            except sqlite3.OperationalError:
+                pass  # SQLite < 3.35 no soporta DROP COLUMN — saltamos silenciosamente.
+
+    # Marcar migración aplicada.
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_real_data_from_pdf_20260425',
+         f'cols_added={cols_added};placas_length={placas_filled};'
+         f'perfiles_kg_ml={perfiles_filled};perfiles_kg_recalc={perfiles_kg_recalc};'
+         f'cache_dropped={",".join(cache_dropped) or "none"}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog real-data 2026-04-25: {cols_added} cols nuevas, '
+        f'{placas_filled} placas con length_mm, {perfiles_filled} perfiles con kg/ml, '
+        f'{perfiles_kg_recalc} perfiles con kg_per_unit recalculado real, '
+        f'cache dropped: {cache_dropped or "none"}'
     )
 
 

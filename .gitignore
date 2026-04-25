@@ -20,9 +20,14 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Database
+# Database — todo lo que sea DB queda fuera de git por defecto.
 fassa_ops.db
+*.db
+*.sqlite
+*.sqlite3
 backups/
+instance/
+dev/snapshots/
 
 # PDFs (demasiado grandes para git)
 docs/*.pdf
