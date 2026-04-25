@@ -562,6 +562,7 @@ def init_db() -> None:
     _catalog_discount_completion_20260425(db)
     _catalog_real_data_from_pdf_20260425(db)
     _catalog_real_weights_20260425(db)
+    _catalog_pdf_extras_and_discontinued_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1730,6 +1731,186 @@ def _catalog_real_weights_20260425(db: sqlite3.Connection) -> None:
         f'[migration] catalog real-weights 2026-04-25: {updated} SKUs con peso '
         f'real aplicado (cintas+tornillos+accesorios+trampillas+gypsocomete). '
         f'Not found: {not_found or "none"}'
+    )
+
+
+# ── Datos extraídos del Anexo Gypsotech Noviembre 2025 (PERFILES) ──
+# Cada entrada: prefijo del SKU (sin últimos 4 chars de longitud) →
+# {upp_real, min_order, dim_a_mm, dim_b_mm, dim_c_mm, espesor_acero_mm}
+# Los uds/palé son los REALES (no uds/caja). Permite limpiar el lío histórico
+# de "units_per_pallet hospitando uds/caja" en perfiles.
+_PERFILES_EXTRAS_BY_PREFIX = {
+    # MONTANTES
+    'C344836':  {'upp': 480,  'min': 10, 'a': 34, 'b': 46.5,  'c': 36, 'esp': 0.60},
+    'C367038':  {'upp': 250,  'min': 10, 'a': 36, 'b': 69.5,  'c': 38, 'esp': 0.60},
+    'C399041':  {'upp': 200,  'min': 10, 'a': 39, 'b': 88.5,  'c': 41, 'esp': 0.60},
+    'C3910041': {'upp': 160,  'min': 8,  'a': 39, 'b': 98.5,  'c': 41, 'esp': 0.60},
+    'C4612548': {'upp': 120,  'min': 4,  'a': 46, 'b': 123.5, 'c': 48, 'esp': 0.60},
+    'C4615048': {'upp': 120,  'min': 4,  'a': 46, 'b': 148.5, 'c': 48, 'esp': 0.60},
+    # RAILS
+    'U304830':  {'upp': 560,  'min': 10, 'a': 30, 'b': 48,    'c': 30, 'esp': 0.55},
+    'U307030':  {'upp': 350,  'min': 10, 'a': 30, 'b': 70,    'c': 30, 'esp': 0.55},
+    'U309030':  {'upp': 280,  'min': 10, 'a': 30, 'b': 90,    'c': 30, 'esp': 0.55},
+    'U3010030': {'upp': 160,  'min': 8,  'a': 30, 'b': 100,   'c': 30, 'esp': 0.55},
+    'U3512535': {'upp': 120,  'min': 4,  'a': 35, 'b': 125,   'c': 35, 'esp': 0.55},
+    'U4015040': {'upp': 120,  'min': 4,  'a': 40, 'b': 150,   'c': 40, 'esp': 0.55},
+    # OTROS
+    'E168218':  {'upp': 600,  'min': 10, 'a': 18, 'b': 82,    'c': 16, 'esp': 0.55},
+    'C174717':  {'upp': 1440, 'min': 10, 'a': 18, 'b': 47,    'c': 18, 'esp': 0.60},
+    'C1548300': {'upp': 1440, 'min': 10, 'a': 15, 'b': 48,    'c': 15, 'esp': 0.60},
+    'C286028':  {'upp': 480,  'min': 10, 'a': 28, 'b': 60,    'c': 28, 'esp': 0.60},
+    'U472447':  {'upp': 600,  'min': 10, 'a': 47, 'b': 17,    'c': 47, 'esp': 0.70},
+    'L233430':  {'upp': 1080, 'min': 30, 'a': 23, 'b': 34,    'c': None, 'esp': 0.55},
+    'U201928':  {'upp': 420,  'min': 10, 'a': 28, 'b': 19,    'c': 20, 'esp': 0.55},
+    'U193019':  {'upp': 1280, 'min': 10, 'a': 19, 'b': 30,    'c': 19, 'esp': 0.55},
+}
+
+# Box_units explícitos por SKU (uds dentro de la unidad de venta "caja").
+# Cuando la unidad de venta es la caja (tornillos, accesorios, gypsocomete),
+# `box_units` indica cuántas unidades individuales lleva la caja.
+# CINTAS: rollos por caja (la unidad de venta es el rollo, pero se compran
+# en cajas para almacén).
+_BOX_UNITS_BY_SKU = {
+    # ACCESORIOS — Anexo Nov 2025 pp. 6-8
+    '304000': 100,    # Horquilla Cuelgue Rápida M6 TC 47
+    '301008': 100,    # Horquilla Cuelgue M6 TC 48
+    '304001': 50,     # Horquilla Cuelgue M6 TC 60
+    '304007': 50,     # Pieza Empalme TC 47
+    '304008': 50,     # Pieza Empalme TC 60
+    '304014': 50,     # Cruceta TC 47
+    '304015': 25,     # Cruceta TC 60
+    '304021': 100,    # Suspensión TC 47 90mm
+    '304022': 100,    # Suspensión TC 47 180mm
+    '304023': 50,     # Suspensión TC 47 240mm
+    '304029': 100,    # Anclaje Directo 47×120
+    '304030': 100,    # Anclaje Directo 60×120
+    '301060': 100,    # Gancho Fijación Vigas
+    '304042': 100,    # Clip Horizontal 4-10
+    '304043': 100,    # Clip Horizontal 10-15
+    '304036': 100,    # Anclaje Universal Omega M6
+    '304049': 20,     # Aislador Acústico TC 47
+    '304050': 25,     # Aislador Acústico Trasdosado
+    '304095': 100,    # Varilla Roscada Ø6×1000
+    '304096': 50,     # Varilla Roscada Ø6×2000
+    '304097': 100,    # Manguito Cilíndrico Ø6×20
+    # CINTAS — Anexo Nov 2025 p. 9 (rollos por caja)
+    '304056': 24,     # Cinta Juntas 23m
+    '304057': 20,     # Cinta Juntas 75m
+    '304058': 10,     # Cinta Juntas 150m
+    '304078': 54,     # Malla FV 50m × 45m
+    '304079': 12,     # Malla FV 50m × 153m
+    '301121':  6,     # Malla Externa Light 50m
+    '304064': 10,     # Cinta Guardavivos 12.5m
+    '304065': 10,     # Cinta Guardavivos 30m
+    '304075': 22,     # Banda Estanca 50mm
+    '304076': 15,     # Banda Estanca 70mm
+    '304077': 11,     # Banda Estanca 90mm
+    # GYPSOCOMETE — Tarifa Gypsotech Abril 2026 p. 46
+    '301600': 2,      # ANGLE
+    '301601': 2,      # CROSS
+    '301602': 2,      # STAR
+    '301605': 5,      # LINE 2m
+    '301606': 5,      # Recambio pantalla 2m
+    '301607': 5,      # Recambio pantalla 3m
+    '301600XL': 2,
+    '301601XL': 2,
+    '301602XL': 2,
+    '301605XL': 5,
+    '301606XL': 5,
+}
+
+
+def _catalog_pdf_extras_and_discontinued_20260425(db: sqlite3.Connection) -> None:
+    """Datos adicionales extraídos del PDF + flags para SKUs descartados.
+
+    1) BACKFILL adicional desde Anexo Gypsotech Nov 2025:
+       - units_per_pallet REAL para los 41 perfiles (de 480, 250, 200, etc.
+         según modelo). Esto sobreescribe los valores históricos donde la
+         columna venía de uds/caja en lugar de uds/palé real.
+       - min_order_qty para perfiles (10, 4, 8, 30 según modelo).
+       - dim_a_mm, dim_b_mm, dim_c_mm para perfiles (sección C/U/Ω).
+       - espesor_acero_mm (0.55 / 0.60 / 0.70).
+
+    2) BACKFILL box_units para 40+ SKUs de accesorios, cintas, GypsoCOMETE
+       (de la tarifa y anexo). Esto separa el "uds/caja" del
+       "units_per_pallet" real.
+
+    3) NUEVAS COLUMNAS para gestionar SKUs descartados:
+       - is_active (BOOLEAN, default 1) — sigue en operativa Arias.
+       - discontinued_reason (TEXT) — motivo si is_active=0.
+         Valores comunes: 'caribbean_unsuitable', 'oversized_logistics',
+         'fassa_discontinued', 'low_demand', etc.
+
+    Esta migración deja el SCHEMA listo pero NO marca ningún SKU como
+    descartado. Oliver indicará en migración 0011 qué SKUs descartar y por
+    qué motivo concreto.
+
+    REGLA OFERTAS INMUTABLES: solo `products`. Las ofertas históricas no se
+    tocan — sus pesos y units_per_pallet quedan congelados en lines_json.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_pdf_extras_and_discontinued_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Schema: añadir is_active + discontinued_reason.
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    cols_added = 0
+    if 'is_active' not in existing:
+        # Nota: no podemos usar DEFAULT 1 porque la allowlist de _safe_add_column
+        # no lo permite. Hacemos ALTER + UPDATE explícito.
+        _safe_add_column(db, 'products', 'is_active', 'INTEGER')
+        db.execute('UPDATE products SET is_active = 1 WHERE is_active IS NULL')
+        cols_added += 1
+    if 'discontinued_reason' not in existing:
+        _safe_add_column(db, 'products', 'discontinued_reason', 'TEXT')
+        cols_added += 1
+
+    # 2) Backfill PERFILES con datos del Anexo Nov 2025.
+    perfiles_updated = 0
+    perfiles = db.execute("SELECT id, sku FROM products WHERE category = 'PERFILES'").fetchall()
+    for pr in perfiles:
+        sku = pr['sku'] or ''
+        spec = None
+        for prefix, data in _PERFILES_EXTRAS_BY_PREFIX.items():
+            if sku.startswith(prefix):
+                spec = data
+                break
+        if spec is None:
+            continue
+        db.execute(
+            "UPDATE products SET units_per_pallet = ?, min_order_qty = ?, "
+            "dim_a_mm = ?, dim_b_mm = ?, dim_c_mm = ?, espesor_acero_mm = ? "
+            "WHERE id = ?",
+            (spec['upp'], spec['min'], spec['a'], spec['b'], spec['c'], spec['esp'],
+             pr['id']),
+        )
+        perfiles_updated += 1
+
+    # 3) Backfill box_units para los SKUs catalogados.
+    box_updated = 0
+    for sku, n in _BOX_UNITS_BY_SKU.items():
+        cur = db.execute(
+            "UPDATE products SET box_units = ? WHERE sku = ? AND box_units IS NULL",
+            (n, sku),
+        )
+        box_updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_pdf_extras_and_discontinued_20260425',
+         f'cols_added={cols_added};perfiles_updated={perfiles_updated};'
+         f'box_units_set={box_updated}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog pdf-extras 2026-04-25: +{cols_added} cols '
+        f'(is_active+discontinued_reason), {perfiles_updated} perfiles con upp/min/dims real, '
+        f'{box_updated} SKUs con box_units explícito'
     )
 
 
