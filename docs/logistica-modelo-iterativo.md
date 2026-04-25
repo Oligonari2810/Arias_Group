@@ -48,25 +48,35 @@ Oliver con cargas reales Fassa (2026-04-25). Si en el futuro la realidad
 operativa cambia (ej. estibadores más eficientes que aprovechen 90% del
 suelo), se editan en `container_profiles` desde `/masters` sin redeploy.
 
-## Imputación del coste — "por palés totales"
+## Imputación del coste — "por peso neto"
 
-Cada palé del proyecto recibe una parte proporcional del coste:
+Cada SKU paga proporcional a su **peso neto de mercancía** (sin tara de palé):
 
 ```
-coste_palé = (n_decimal × tarifa_cont) / total_palés_proyecto
+coste_sku = (peso_neto_sku / peso_neto_total) × coste_total
+coste_unit = coste_sku / qty_pedida
 ```
 
-Esto significa que **placas, pastas y cintas pagan flete proporcional** al
-suelo que ocupan, sin la distorsión anterior de "placas pagan 100% y
-cintas viajan gratis".
+Es lo que la naviera factura realmente en flete marítimo. Y es **robusto
+frente a errores de datos**: si `units_per_pallet` de un SKU está mal
+cargado en DB (ej. cinta cargada como 20 cuando son 600 reales), el reparto
+por peso no se distorsiona — sigue pagando lo justo según los kg que pesa.
 
-Antes del cambio:
-- Placas (540 palés): 100% del flete → 245 €/palé
-- Pastas (50 palés): 0 €/palé (gratis)
-- Cintas (49 palés): 0 €/palé (gratis)
+**Por qué peso NETO, no peso BRUTO**:
+- N_containers SÍ se calcula con peso bruto (capacidad real del cont).
+- Pero la imputación por peso bruto se distorsionaría con palés inflados:
+  cinta con 30 "palés" falsos × 22 kg tara = 660 kg fantasma. Pagaría 4×
+  más de lo justo.
+- Imputando por peso neto, la tara queda como coste común, repartida
+  proporcional al peso real de la mercancía.
 
-Después:
-- Cualquier familia: ~210 €/palé (proporcional)
+Comparación de modelos en un proyecto típico (placas + pastas + cintas):
+
+| Modelo | Placas | Pastas | Cintas | Comentario |
+|---|---|---|---|---|
+| "Quien abre paga" (vetado) | 100% | 0% | 0% | Distorsiona márgenes |
+| "Por palés totales" (vetado) | OK | OK | sobrepaga si units_per_pallet mal | Sensible a datos malos |
+| **"Por peso neto" (actual)** | proporcional | proporcional | proporcional | Robusto, lo que cobra la naviera |
 
 ## Coste fraccional vs entero
 

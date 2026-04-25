@@ -298,9 +298,10 @@ def compute_logistics(
     el cliente paga proporcional a la carga real. n_containers (entero) se
     reporta para el operador (contenedores físicos a reservar = ceil del decimal).
 
-    Imputación del coste: por palés totales del proyecto (no "quien abre paga").
-    Cada palé recibe (n_decimal × cost_per_cont) / total_palés. Es la regla
-    más justa: cintas y pastas también contribuyen al flete que ocupan.
+    Imputación del coste: POR PESO real (lo que la naviera factura). Cada SKU
+    paga (peso_sku / peso_total) × coste_total. Robusto frente a errores en
+    units_per_pallet de algún SKU — antes la imputación por palés daba números
+    absurdos para cintas/mallas con units_per_pallet inflado.
     """
     if not skus:
         return LogisticsResult(
@@ -367,21 +368,30 @@ def compute_logistics(
     # Familia dominante = la que más palés aporta (informativo).
     dom_cat = max(family_results, key=lambda c: family_results[c].total_pallets) if family_results else ''
 
-    # Imputación: por palés totales (no "quien abre paga"). Cada palé recibe
-    # un coste = (n_decimal × cost_per_cont) / total_palés. Cintas/pastas
-    # contribuyen al flete que ocupan, no van gratis.
-    total_cost = round(n_decimal * cost_per_container_eur, 2)
-    cost_per_pallet = (n_decimal * cost_per_container_eur / total_pallets) if total_pallets > 0 else 0.0
+    # Imputación POR PESO NETO de mercancía (sin tara de palé). La naviera
+    # factura por peso, pero usamos peso NETO en lugar de bruto porque:
+    # - El N_containers SÍ cuenta peso bruto (capacidad real del cont).
+    # - Pero la imputación al cliente por peso bruto se distorsiona si
+    #   algún SKU tiene units_per_pallet mal cargado (ej. cinta=20 cuando
+    #   son 600). Eso infla los "palés" → infla la tara → infla el peso
+    #   relativo → paga de más.
+    # - Imputando por peso neto, la tara queda como coste común proporcional
+    #   y los datos imprecisos no envenenan el reparto.
+    total_cost_imputable = n_decimal * cost_per_container_eur
+    total_cost = round(total_cost_imputable, 2)
+    total_weight_neto = sum(s.qty * s.unit_weight_kg for s in skus if s.unit_weight_kg > 0)
+    cost_per_kg = (total_cost_imputable / total_weight_neto) if total_weight_neto > 0 else 0.0
     for sc in skus_computed:
-        if sc.pallets <= 0:
-            continue
-        sc_cost = cost_per_pallet * sc.pallets
         sku_in = next((s for s in skus if s.sku == sc.sku), None)
-        if sku_in and sku_in.units_per_pallet > 0:
-            units_total = sc.pallets * sku_in.units_per_pallet
-            sc.unit_log_cost_eur = round(sc_cost / units_total, 4) if units_total > 0 else 0
-            if sku_in.unit_area_m2 > 0:
-                sc.m2_log_cost_eur = round(sc.unit_log_cost_eur / sku_in.unit_area_m2, 4)
+        if not sku_in or sku_in.unit_weight_kg <= 0 or sku_in.qty <= 0:
+            continue
+        weight_neto_sku = sku_in.qty * sku_in.unit_weight_kg
+        sc_cost = cost_per_kg * weight_neto_sku
+        # Dividir por qty pedida (no por capacidad del palé): el contenedor
+        # transporta exactamente qty unidades, no la capacidad teórica del palé.
+        sc.unit_log_cost_eur = round(sc_cost / sku_in.qty, 4)
+        if sku_in.unit_area_m2 > 0:
+            sc.m2_log_cost_eur = round(sc.unit_log_cost_eur / sku_in.unit_area_m2, 4)
 
     # Capacidad libre por contenedor para alerta de cross-sell.
     if n_containers > 0:
