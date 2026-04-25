@@ -467,13 +467,18 @@ async function recomputeLogistics() {
     });
     // Update container count. Guardamos N + coste/cont del motor para poder
     // reescalar si el usuario cambia el contador después.
+    // n_containers físicos = ceil(decimal) — los que reservamos a la naviera.
+    // n_containers_decimal = factor real de carga que se imputa al cliente.
     document.getElementById('containerCount').value = j.n_containers;
     window._motorCalc = {
       nContainers: j.n_containers,
+      nContainersDecimal: j.n_containers_decimal,
       costPerContainer: costPerCont,
     };
-    const drv = {'pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
-    state.innerHTML = `<b>${j.n_containers}×${containerType}</b> · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
+    const drv = {'floor':'suelo','pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
+    const decimalLabel = j.n_containers_decimal && j.n_containers_decimal !== j.n_containers
+      ? ` (carga real ${j.n_containers_decimal.toFixed(2)})` : '';
+    state.innerHTML = `<b>${j.n_containers}×${containerType}</b>${decimalLabel} · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
     renderCapacityAlert(j.free_capacity, j.n_containers, j.dominant_family);
     recalcAll();
   } catch (e) {

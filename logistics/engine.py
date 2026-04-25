@@ -32,6 +32,11 @@ class ContainerProfile:
     payload_kg: float
     door_clearance_m: float = 0.30
     stowage_factor: float = 0.90  # 0.85-0.95; aplica a peso y volumen
+    # Techo de carga geométrica del suelo en estiba real con palés de placa.
+    # 0.80 (operativa Arias) = 80% del suelo aprovechable; 20% reservado para
+    # sujeción, accesos y palés irregulares. Antes se asumía 1.0 (100%) lo
+    # que sobreestimaba la capacidad geométrica.
+    floor_stowage_factor: float = 1.0
 
     @property
     def usable_length_m(self) -> float:
@@ -45,6 +50,11 @@ class ContainerProfile:
     def effective_cbm(self) -> float:
         return (self.inner_length_m * self.inner_width_m * self.inner_height_m
                 * self.stowage_factor)
+
+    @property
+    def usable_floor_m2(self) -> float:
+        """Suelo aprovechable real para apilar palés (m²)."""
+        return self.inner_length_m * self.inner_width_m * self.floor_stowage_factor
 
 
 @dataclass(frozen=True)
@@ -106,30 +116,35 @@ class FamilyResult:
 @dataclass
 class LogisticsResult:
     container_type: str
+    # Número de contenedores físicos a reservar (entero, ceil del decimal).
     n_containers: int
-    total_cost_eur: float
-    dominant_family: str
-    dominant_driver: str
-    families: dict[str, FamilyResult]
-    skus: list[SkuComputed]
+    # Número decimal "efectivo de carga" — usado para imputar coste. El cliente
+    # paga n_containers_decimal × cost_per_container; la fracción restante hasta
+    # n_containers (entero) la absorbe Arias o se rellena con otra carga.
+    n_containers_decimal: float = 0.0
+    total_cost_eur: float = 0.0  # = n_containers_decimal × cost_per_container
+    dominant_family: str = ''
+    # Driver dominante GLOBAL del cálculo agregado: 'floor' | 'weight' | 'cbm'
+    dominant_driver: str = ''
+    families: dict[str, FamilyResult] = field(default_factory=dict)
+    skus: list[SkuComputed] = field(default_factory=list)
     extra_containers_by_family: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
-    # Capacidad libre por contenedor dominante (el que abren las placas).
-    # Útil para alertar al vendedor que queda hueco para cross-sell de
-    # familias complementarias con mejor margen (pastas, cintas, etc.).
-    # Los contenedores "extras" (abiertos por complementarias que no cupieron
-    # en huecos) no cuentan en el cálculo: se asumen razonablemente cargados.
+    # Capacidad libre POR CONTENEDOR (alerta de oportunidad cross-sell).
     free_weight_kg_per_cont: float = 0.0
     free_cbm_per_cont: float = 0.0
     free_floor_m2_per_cont: float = 0.0
     free_weight_kg_total: float = 0.0
     free_cbm_total: float = 0.0
     free_floor_m2_total: float = 0.0
-    # True si el contenedor dominante no admite carga complementaria útil:
-    # < 5% del payload libre Y < 10% del suelo libre. Caso típico: placas
-    # 1200×2000 rotadas que llenan por peso hasta el tope. El cotizador
-    # usa este flag para mostrar "optimizado" en vez de "oportunidad".
     is_optimized: bool = False
+    # Drivers desglosados (para diagnóstico y UI):
+    n_by_floor: float = 0.0
+    n_by_weight: float = 0.0
+    n_by_cbm: float = 0.0
+    total_floor_m2: float = 0.0
+    total_weight_kg: float = 0.0
+    total_cbm: float = 0.0
 
 
 def _effective_pallet_profile(sku: SkuInput, family_profile: PalletProfile) -> PalletProfile:
@@ -259,24 +274,42 @@ def compute_logistics(
     pallet_profiles: dict[str, PalletProfile],
     cost_per_container_eur: float,
 ) -> LogisticsResult:
-    """Calcula N contenedores, coste total y coste imputado por SKU.
+    """Modelo agregado de capacidad — calibración Oliver 2026-04-25.
 
-    Lógica:
-    1. Por SKU: palets, peso, cbm (con override per-SKU si existe).
-    2. Por familia: N alone = max(pallets, weight, cbm).
-    3. Familia dominante = la de mayor N alone.
-    4. Resto de familias: ocupan suelo sobrante en los N dominantes.
-    5. Si una familia complementaria sobrepasa ese sobrante, abre sus propios
-       contenedores adicionales.
-    6. Imputación: paga quien abre contenedores; dentro de una familia, el
-       coste se reparte proporcional a palets.
+    En lugar de hacer packing 3D estricto por familia (que dejaba strips
+    laterales muertos y daba números muy conservadores), se calculan
+    capacidades agregadas del proyecto y se compara contra las capacidades
+    útiles del contenedor:
+
+      N = MAX(
+        Σ huella_m² / usable_floor,    # huella de palé considera apilamiento
+        Σ peso_kg   / usable_payload,
+        Σ volumen_m³/ usable_cbm,
+      )
+
+    Donde:
+      - huella_palé = (L × A) / niveles_apilables (un palé apilado 3 niveles
+        ocupa 1/3 del suelo)
+      - usable_floor = inner_l × inner_w × floor_stowage_factor (0,80 = 80%)
+      - usable_payload = payload × stowage_factor (0,90)
+      - usable_cbm    = inner_l × inner_w × inner_h × stowage_factor (0,90)
+
+    El resultado N es **decimal** (no se redondea con ceil para el coste);
+    el cliente paga proporcional a la carga real. n_containers (entero) se
+    reporta para el operador (contenedores físicos a reservar = ceil del decimal).
+
+    Imputación del coste: por palés totales del proyecto (no "quien abre paga").
+    Cada palé recibe (n_decimal × cost_per_cont) / total_palés. Es la regla
+    más justa: cintas y pastas también contribuyen al flete que ocupan.
     """
     if not skus:
         return LogisticsResult(
-            container_type=container.type, n_containers=0, total_cost_eur=0,
+            container_type=container.type, n_containers=0,
+            n_containers_decimal=0.0, total_cost_eur=0,
             dominant_family='', dominant_driver='', families={}, skus=[],
         )
-    # 1 + 2: computed per SKU + agrupar por familia.
+
+    # 1: computed per SKU + agrupar por familia.
     skus_computed: list[SkuComputed] = []
     by_family: dict[str, list[SkuComputed]] = {}
     for sku_in in skus:
@@ -288,7 +321,6 @@ def compute_logistics(
         skus_computed.append(sc)
         by_family.setdefault(sku_in.category, []).append(sc)
 
-    # Guardamos el pallet profile "operativo" por familia (primer override gana).
     effective_pallet_by_family: dict[str, PalletProfile] = {}
     for sku_in in skus:
         if sku_in.category not in effective_pallet_by_family:
@@ -296,152 +328,94 @@ def compute_logistics(
                 sku_in, pallet_profiles[sku_in.category]
             )
 
-    # 2: FamilyResult por categoría.
+    # 2: FamilyResult por categoría (mantenido por compat con UI/diagnóstico).
     family_results: dict[str, FamilyResult] = {}
     for cat, scs in by_family.items():
         family_results[cat] = _family_result(
             cat, scs, container, effective_pallet_by_family[cat]
         )
 
-    # 3: dominante = el de mayor n_alone.
-    dom_cat = max(family_results, key=lambda c: family_results[c].n_alone)
-    dom = family_results[dom_cat]
-    n_containers = dom.n_alone
+    # 3: AGREGADOS — el cálculo principal del modelo nuevo.
+    total_huella_m2 = 0.0
+    total_weight_kg = 0.0
+    total_cbm = 0.0
+    total_pallets = 0
+    for cat, scs in by_family.items():
+        pallet = effective_pallet_by_family[cat]
+        levels = max(pallet.stackable_levels, 1)
+        # Huella considerando apilamiento: un palé apilado 3 niveles ocupa 1/3
+        # del suelo. Si stackable=1, ocupa el suelo completo.
+        huella_per_pallet = (pallet.length_m * pallet.width_m) / levels
+        for sc in scs:
+            total_huella_m2 += sc.pallets * huella_per_pallet
+            total_weight_kg += sc.weight_total_kg
+            total_cbm += sc.cbm_total
+            total_pallets += sc.pallets
 
-    # 4 + 5: cada familia complementaria intenta ocupar suelo sobrante.
-    dom_pallet = effective_pallet_by_family[dom_cat]
-    extra_by_family: dict[str, int] = {}
-    for cat, fr in family_results.items():
-        if cat == dom_cat:
+    usable_floor = container.usable_floor_m2
+    usable_payload = container.effective_payload_kg
+    usable_cbm = container.effective_cbm
+
+    n_floor = total_huella_m2 / usable_floor if usable_floor > 0 else 0.0
+    n_weight = total_weight_kg / usable_payload if usable_payload > 0 else 0.0
+    n_cbm = total_cbm / usable_cbm if usable_cbm > 0 else 0.0
+
+    drivers = [('floor', n_floor), ('weight', n_weight), ('cbm', n_cbm)]
+    dominant_driver, n_decimal = max(drivers, key=lambda x: x[1])
+    n_containers = math.ceil(n_decimal) if n_decimal > 0 else 0
+
+    # Familia dominante = la que más palés aporta (informativo).
+    dom_cat = max(family_results, key=lambda c: family_results[c].total_pallets) if family_results else ''
+
+    # Imputación: por palés totales (no "quien abre paga"). Cada palé recibe
+    # un coste = (n_decimal × cost_per_cont) / total_palés. Cintas/pastas
+    # contribuyen al flete que ocupan, no van gratis.
+    total_cost = round(n_decimal * cost_per_container_eur, 2)
+    cost_per_pallet = (n_decimal * cost_per_container_eur / total_pallets) if total_pallets > 0 else 0.0
+    for sc in skus_computed:
+        if sc.pallets <= 0:
             continue
-        comp_pallet = effective_pallet_by_family[cat]
-        slots_per_cont = _floor_slots_for_complement(container, dom_pallet, comp_pallet)
-        available_slots = slots_per_cont * n_containers
-        overflow_pallets = max(0, fr.total_pallets - available_slots)
-        if overflow_pallets == 0:
-            extra_by_family[cat] = 0
-            continue
-        # Abre sus propios contenedores para lo que no cupo.
-        extra_n = math.ceil(overflow_pallets / max(fr.cap_geo_per_container, 1))
-        # Y también pueden restringir peso/cbm:
-        extra_w = math.ceil(overflow_pallets * (fr.total_weight_kg / max(fr.total_pallets, 1))
-                            / container.effective_payload_kg) if fr.total_weight_kg > 0 else 0
-        extra = max(extra_n, extra_w)
-        extra_by_family[cat] = extra
-        n_containers += extra
+        sc_cost = cost_per_pallet * sc.pallets
+        sku_in = next((s for s in skus if s.sku == sc.sku), None)
+        if sku_in and sku_in.units_per_pallet > 0:
+            units_total = sc.pallets * sku_in.units_per_pallet
+            sc.unit_log_cost_eur = round(sc_cost / units_total, 4) if units_total > 0 else 0
+            if sku_in.unit_area_m2 > 0:
+                sc.m2_log_cost_eur = round(sc.unit_log_cost_eur / sku_in.unit_area_m2, 4)
 
-    total_cost = n_containers * cost_per_container_eur
-
-    # 6: imputación.
-    # Dominante paga sus N_dominant contenedores; cada complementaria paga sus extras.
-    # Dentro de la familia, se reparte por palets.
-    def impute(cat: str, containers_paid_by_this_family: int) -> None:
-        fr = family_results[cat]
-        if fr.total_pallets <= 0 or containers_paid_by_this_family <= 0:
-            return
-        cost_family = containers_paid_by_this_family * cost_per_container_eur
-        cost_per_pallet = cost_family / fr.total_pallets
-        for sc in by_family[cat]:
-            if sc.pallets <= 0:
-                continue
-            sc_cost = cost_per_pallet * sc.pallets
-            # €/unidad: cost / (pallets × units_per_pallet)
-            # Tenemos los SkuComputed pero no units_per_pallet aquí; recuperamos.
-            # Buscamos el SkuInput correspondiente:
-            sku_in = next((s for s in skus if s.sku == sc.sku), None)
-            if sku_in and sku_in.units_per_pallet > 0:
-                units_total = sc.pallets * sku_in.units_per_pallet
-                sc.unit_log_cost_eur = round(sc_cost / units_total, 4) if units_total > 0 else 0
-                if sku_in.unit_area_m2 > 0:
-                    sc.m2_log_cost_eur = round(sc.unit_log_cost_eur / sku_in.unit_area_m2, 4)
-
-    impute(dom_cat, dom.n_alone)
-    for cat, extra in extra_by_family.items():
-        if extra > 0:
-            impute(cat, extra)
-
-    # ─────────────────────────────────────────────────────────────────────
-    # CAPACIDAD LIBRE en los contenedores dominantes (no en los extras).
-    # El vendedor ve esto como "oportunidad de cross-sell" en la UI.
-    #   free_weight = payload_efectivo − peso_palés_dominantes_prom
-    #                                 − peso_palés_complementarios_en_huecos
-    #   free_floor  = suelo_interior − suelo_ocupado_por_dominantes_planta_baja
-    #                                − suelo_ocupado_por_complementarios_en_huecos
-    #   free_cbm    = cbm_efectivo  − cbm_mercancía_paletizada
-    # ─────────────────────────────────────────────────────────────────────
-    n_dom_cont = dom.n_alone  # solo los contenedores del dominante
-    cont_floor_m2 = container.inner_length_m * container.inner_width_m
-    cont_cbm_eff = container.effective_cbm
-    cont_weight_eff = container.effective_payload_kg
-
-    if n_dom_cont > 0:
-        # Dominante: peso y cbm promediados por contenedor (total/N).
-        # Suelo: solo planta baja — los niveles superiores del palé
-        # dominante no liberan espacio aprovechable (están apilados).
-        dom_pallets_per_cont = dom.total_pallets / n_dom_cont
-        dom_pallets_on_floor = math.ceil(
-            dom_pallets_per_cont / max(dom_pallet.stackable_levels, 1)
-        )
-        dom_floor_used = dom_pallets_on_floor * dom_pallet.length_m * dom_pallet.width_m
-        dom_weight_used = dom.total_weight_kg / n_dom_cont
-        dom_cbm_used = dom.total_cbm / n_dom_cont
-
-        # Complementarias que CABEN en huecos de dominantes (no las que abren extras).
-        comp_floor_used = 0.0
-        comp_weight_used = 0.0
-        comp_cbm_used = 0.0
-        for cat, fr in family_results.items():
-            if cat == dom_cat:
-                continue
-            extras_by_this = extra_by_family.get(cat, 0)
-            comp_pallet_obj = effective_pallet_by_family[cat]
-            # Palés de esta complementaria alojados en huecos de dominantes:
-            pallets_in_extras = extras_by_this * max(fr.cap_geo_per_container, 1)
-            pallets_in_dom_huecos = max(0, fr.total_pallets - pallets_in_extras)
-            if pallets_in_dom_huecos <= 0:
-                continue
-            # Planta baja del complementario en huecos (sin niveles superiores):
-            comp_floor_pallets = math.ceil(
-                pallets_in_dom_huecos / max(comp_pallet_obj.stackable_levels, 1)
-            )
-            comp_floor_used += (
-                comp_floor_pallets * comp_pallet_obj.length_m * comp_pallet_obj.width_m
-            ) / n_dom_cont
-            comp_weight_used += (
-                pallets_in_dom_huecos * (fr.total_weight_kg / max(fr.total_pallets, 1))
-            ) / n_dom_cont
-            comp_cbm_used += (
-                pallets_in_dom_huecos * (fr.total_cbm / max(fr.total_pallets, 1))
-            ) / n_dom_cont
-
-        free_weight = max(0.0, cont_weight_eff - dom_weight_used - comp_weight_used)
-        free_floor = max(0.0, cont_floor_m2 - dom_floor_used - comp_floor_used)
-        free_cbm = max(0.0, cont_cbm_eff - dom_cbm_used - comp_cbm_used)
-
-        # Umbrales de "optimizado": < 5% peso libre Y < 10% suelo libre.
-        pct_weight_free = free_weight / cont_weight_eff if cont_weight_eff > 0 else 0
-        pct_floor_free = free_floor / cont_floor_m2 if cont_floor_m2 > 0 else 0
+    # Capacidad libre por contenedor para alerta de cross-sell.
+    if n_containers > 0:
+        free_floor = max(0.0, usable_floor - (total_huella_m2 / n_containers))
+        free_weight = max(0.0, usable_payload - (total_weight_kg / n_containers))
+        free_cbm = max(0.0, usable_cbm - (total_cbm / n_containers))
+        pct_weight_free = free_weight / usable_payload if usable_payload > 0 else 0
+        pct_floor_free = free_floor / usable_floor if usable_floor > 0 else 0
         optimized = pct_weight_free < 0.05 and pct_floor_free < 0.10
     else:
-        free_weight = 0.0
-        free_floor = 0.0
-        free_cbm = 0.0
+        free_floor = free_weight = free_cbm = 0.0
         optimized = True
 
     return LogisticsResult(
         container_type=container.type,
         n_containers=n_containers,
-        total_cost_eur=round(total_cost, 2),
+        n_containers_decimal=round(n_decimal, 4),
+        total_cost_eur=total_cost,
         dominant_family=dom_cat,
-        dominant_driver=dom.dominant_driver,
+        dominant_driver=dominant_driver,
         families=family_results,
         skus=skus_computed,
-        extra_containers_by_family=extra_by_family,
+        extra_containers_by_family={},  # legacy field — el modelo agregado no separa "extras"
         free_weight_kg_per_cont=round(free_weight, 2),
         free_cbm_per_cont=round(free_cbm, 2),
         free_floor_m2_per_cont=round(free_floor, 2),
-        free_weight_kg_total=round(free_weight * n_dom_cont, 2),
-        free_cbm_total=round(free_cbm * n_dom_cont, 2),
-        free_floor_m2_total=round(free_floor * n_dom_cont, 2),
+        free_weight_kg_total=round(free_weight * n_containers, 2),
+        free_cbm_total=round(free_cbm * n_containers, 2),
+        free_floor_m2_total=round(free_floor * n_containers, 2),
         is_optimized=optimized,
+        n_by_floor=round(n_floor, 4),
+        n_by_weight=round(n_weight, 4),
+        n_by_cbm=round(n_cbm, 4),
+        total_floor_m2=round(total_huella_m2, 2),
+        total_weight_kg=round(total_weight_kg, 2),
+        total_cbm=round(total_cbm, 2),
     )
