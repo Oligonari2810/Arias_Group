@@ -561,6 +561,7 @@ def init_db() -> None:
     _audit_catalog_fixes_20260423_v2(db)
     _audit_logistics_fixes_20260424(db)
     _audit_catalog_completion_20260424(db)
+    _sync_fx_sources_20260424(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1076,6 +1077,54 @@ def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
             f'{updated} SKUs actualizados (pesos + Montante 48/35 Z2), '
             f'{inserted} perfiles Z1 nuevos insertados'
         )
+
+
+def _sync_fx_sources_20260424(db: sqlite3.Connection) -> None:
+    """Sincroniza app_settings.fx_eur_usd con fx_rates EUR→USD.
+
+    Bug histórico: catálogo (/products) y dashboard (/quote) leían el FX de
+    tablas distintas (fx_rates vs app_settings.fx_eur_usd), lo que producía
+    valores divergentes en pantalla y como default del cotizador. Ya se
+    unificó en código (todos usan get_current_fx_eur_usd que prioriza
+    fx_rates), pero los valores en DB siguen pudiendo discrepar.
+
+    Esta migración alinea app_settings.fx_eur_usd con el último rate
+    EUR→USD de fx_rates. Si fx_rates no tiene ningún rate, no hace nada
+    (deja el comportamiento actual: app_settings es la única fuente).
+
+    Idempotente: si ya están sincronizados, el UPDATE no cambia nada.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'fx_sync_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    row = db.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' "
+        "ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        # Sin rate oficial en fx_rates → no tocamos app_settings.
+        db.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ('fx_sync_20260424_applied', 'no-fx_rates-row', now_iso()),
+        )
+        db.commit()
+        return
+
+    canonical = float(row['rate'])
+    db.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (str(canonical), now_iso()),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('fx_sync_20260424_applied', f'synced_to={canonical}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] FX sources sincronizadas: app_settings.fx_eur_usd ← {canonical} (fx_rates EUR→USD)')
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
@@ -1834,8 +1883,11 @@ def dashboard():
         'products': products_count, 'systems': systems_count,
         'quotes': offers_count,
     }
-    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
-    fx = {'USD': float(fx_setting['value']) if fx_setting else 1.085}
+    # Fuente única: get_current_fx_eur_usd() prioriza fx_rates (rate oficial
+    # con histórico) sobre app_settings.fx_eur_usd (legacy override). Antes
+    # cada endpoint leía de un sitio distinto y aparecían FX divergentes
+    # entre el catálogo /products y el cotizador /quote.
+    fx = {'USD': get_current_fx_eur_usd()}
 
     # Top empresas por volumen € (via clients.company)
     top_companies = db.execute('''
@@ -2408,8 +2460,10 @@ def quote():
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
-    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
-    fx_rate = float(fx_setting['value']) if fx_setting else 1.085
+    # Fuente única (ver dashboard): el cotizador toma el rate oficial de
+    # fx_rates, no app_settings. Si fx_rates está vacío, fallback a
+    # app_settings y luego al hardcoded 1.085.
+    fx_rate = get_current_fx_eur_usd()
     projects_raw = db.execute(
         'SELECT id, client_id, name, area_sqm, incoterm FROM projects ORDER BY created_at DESC'
     ).fetchall()
@@ -2970,12 +3024,21 @@ def config():
             flash('Ruta actualizada.')
         elif action == 'update_fx_setting':
             new_fx = float(request.form['fx_eur_usd'])
+            now = now_iso()
+            # Escribir en AMBAS tablas para mantener coherencia: fx_rates es
+            # lo que get_current_fx_eur_usd() lee primero (catálogo/cotizador),
+            # app_settings se conserva por compatibilidad con el editor actual.
             db.execute(
                 "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (str(new_fx), now_iso())
+                (str(new_fx), now)
             )
-            flash(f'EUR/USD actualizado a {new_fx}')
+            db.execute(
+                "INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source) "
+                "VALUES ('EUR', 'USD', ?, ?, ?)",
+                (new_fx, now, 'Manual desde /masters')
+            )
+            flash(f'EUR/USD actualizado a {new_fx} (aplicado a catálogo y cotizador)')
         db.commit()
         return redirect(url_for('config'))
 
