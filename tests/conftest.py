@@ -1,30 +1,67 @@
-"""Test fixtures for Arias_Group calc engine tests.
+"""Test fixtures for Arias_Group.
 
-Flask app must be importable without triggering a hard SECRET_KEY error and
-without pointing to the production SQLite file. We set env vars *before*
-importing `app`.
+Supports two backends:
+
+  * **Postgres (preferred, SPEC-002c)** — when TEST_DATABASE_URL is set, the
+    fixture drops `public`, runs `alembic upgrade head`, then seeds.  The
+    Flask app picks up the Postgres adapter via DATABASE_URL.
+  * **SQLite fallback** — when TEST_DATABASE_URL is absent, a tempfile DB is
+    created and `init_db()` + `seed_db()` run against it.  This preserves
+    the original SPEC-001 test environment for devs without Docker.
+
+All env vars that `app.py` reads are set BEFORE importing `app` — otherwise
+the SECRET_KEY guard aborts the import.
 """
 import os
 import tempfile
 
-# Force-set for the test process; do NOT use setdefault because a user env with
-# FLASK_DEBUG=0 and no SECRET_KEY would abort the app import at top level.
+# --- Environment setup (MUST happen before `from app import ...`) --------
+
 os.environ['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'test-secret-key'
 os.environ['FLASK_DEBUG'] = os.environ.get('FLASK_DEBUG') or '1'
 
-_TMP_DB_FD, _TMP_DB_PATH = tempfile.mkstemp(prefix='arias_test_', suffix='.db')
-os.environ['FASSA_DB_PATH'] = _TMP_DB_PATH
+_USE_POSTGRES = bool(os.environ.get('TEST_DATABASE_URL'))
+
+if _USE_POSTGRES:
+    # Align DATABASE_URL so app.get_db() picks the Postgres adapter.
+    os.environ['DATABASE_URL'] = os.environ['TEST_DATABASE_URL']
+    _TMP_DB_FD, _TMP_DB_PATH = None, None
+else:
+    _TMP_DB_FD, _TMP_DB_PATH = tempfile.mkstemp(prefix='arias_test_', suffix='.db')
+    os.environ['FASSA_DB_PATH'] = _TMP_DB_PATH
+    # Ensure the Postgres adapter stays dormant in SQLite mode.
+    os.environ.pop('DATABASE_URL', None)
 
 import pytest
 
 from app import app as flask_app, init_db, seed_db, get_db, now_iso
 
 
+def _reset_postgres_schema():
+    """Wipe and re-apply the Alembic schema against TEST_DATABASE_URL."""
+    from sqlalchemy import text
+    from alembic import command
+    from alembic.config import Config
+    from db import get_engine
+    from db.engine import reset_engine_cache
+
+    url = os.environ['TEST_DATABASE_URL']
+    reset_engine_cache()
+    eng = get_engine(url)
+    with eng.begin() as conn:
+        conn.execute(text('DROP SCHEMA public CASCADE'))
+        conn.execute(text('CREATE SCHEMA public'))
+
+    cfg = Config('alembic.ini')
+    cfg.set_main_option('sqlalchemy.url', url)
+    command.upgrade(cfg, 'head')
+
+
 def _seed_calc_fixtures(db):
     """Insert products + system_components so calculate_quote has lines to compute.
 
-    System 'Sistema placa estándar interior' is seeded by seed_db(); we attach
-    three components (placa + perfil + tornillos) using realistic Fassa SKUs.
+    Uses portable INSERT ... ON CONFLICT DO NOTHING so it works on both SQLite
+    3.24+ and Postgres without adapter translation.
     """
     existing = db.execute(
         "SELECT COUNT(*) AS c FROM system_components WHERE system_id = "
@@ -43,10 +80,11 @@ def _seed_calc_fixtures(db):
     ]
     for sku, name, cat, unit, price, kg, upp, sqm_pp, _waste in products:
         db.execute(
-            '''INSERT OR IGNORE INTO products
+            '''INSERT INTO products
             (sku, name, category, source_catalog, unit, unit_price_eur,
              kg_per_unit, units_per_pallet, sqm_per_pallet)
-            VALUES (?,?,?,?,?,?,?,?,?)''',
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (sku) DO NOTHING''',
             (sku, name, cat, 'TEST', unit, price, kg, upp, sqm_pp),
         )
 
@@ -62,9 +100,10 @@ def _seed_calc_fixtures(db):
     for sku, consumption, waste in components:
         prod_id = db.execute('SELECT id FROM products WHERE sku = ?', (sku,)).fetchone()['id']
         db.execute(
-            '''INSERT OR IGNORE INTO system_components
+            '''INSERT INTO system_components
             (system_id, product_id, consumption_per_sqm, waste_pct)
-            VALUES (?,?,?,?)''',
+            VALUES (?,?,?,?)
+            ON CONFLICT (system_id, product_id) DO NOTHING''',
             (system_id, prod_id, consumption, waste),
         )
     db.commit()
@@ -73,17 +112,27 @@ def _seed_calc_fixtures(db):
 @pytest.fixture(scope='session')
 def app():
     flask_app.config['TESTING'] = True
-    flask_app.config['DATABASE'] = _TMP_DB_PATH
-    with flask_app.app_context():
-        init_db()
-        seed_db()
-        _seed_calc_fixtures(get_db())
+
+    if _USE_POSTGRES:
+        _reset_postgres_schema()
+        with flask_app.app_context():
+            seed_db()
+            _seed_calc_fixtures(get_db())
+    else:
+        flask_app.config['DATABASE'] = _TMP_DB_PATH
+        with flask_app.app_context():
+            init_db()
+            seed_db()
+            _seed_calc_fixtures(get_db())
+
     yield flask_app
-    os.close(_TMP_DB_FD)
-    try:
-        os.unlink(_TMP_DB_PATH)
-    except OSError:
-        pass
+
+    if not _USE_POSTGRES:
+        os.close(_TMP_DB_FD)
+        try:
+            os.unlink(_TMP_DB_PATH)
+        except OSError:
+            pass
 
 
 @pytest.fixture

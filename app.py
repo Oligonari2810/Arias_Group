@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+# Carga .env si existe (dev local). En producción las env vars ya están
+# inyectadas por el runtime (Render, Docker, etc.) y override=False respeta
+# esos valores sin pisarlos.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf.csrf import CSRFProtect
@@ -92,7 +101,8 @@ def _safe_next_url(target: str | None) -> str | None:
 _SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 _SAFE_COLUMN_TYPES = frozenset({
     'TEXT', 'INTEGER', 'REAL', 'BLOB', 'NUMERIC',
-    'REAL DEFAULT 50', 'INTEGER DEFAULT 99',
+    'REAL DEFAULT 50', 'REAL DEFAULT 5', 'INTEGER DEFAULT 99',
+    'INTEGER DEFAULT 30',
 })
 
 
@@ -109,6 +119,22 @@ def _safe_add_column(db: sqlite3.Connection, table: str, col: str, typ: str) -> 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def get_current_fx_eur_usd() -> float:
+    db = get_db()
+    row = db.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' "
+        "ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    if row:
+        return float(row['rate'])
+    row = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
+    return float(row['value']) if row else 1.085
+
+
+def eur_to_usd(amount_eur: float, fx_rate: float) -> float:
+    return round(amount_eur * fx_rate, 2)
 
 
 def bot_token_required(fn):
@@ -156,10 +182,20 @@ def load_user(user_id):
     return None
 
 
-def get_db() -> sqlite3.Connection:
+def get_db():
+    """Return the request-scoped DB handle.
+
+    When DATABASE_URL is set, returns a psycopg-backed adapter that mimics
+    sqlite3.Connection (see db/adapter.py); otherwise falls back to a plain
+    SQLite connection for backward compatibility (SPEC-002c cutover window).
+    """
     if 'db' not in g:
-        g.db = sqlite3.connect(app.config['DATABASE'])
-        g.db.row_factory = sqlite3.Row
+        from db import adapter
+        if adapter.is_configured():
+            g.db = adapter.connect()
+        else:
+            g.db = sqlite3.connect(app.config['DATABASE'])
+            g.db.row_factory = sqlite3.Row
     return g.db
 
 
@@ -170,7 +206,16 @@ def close_db(_: Any) -> None:
         db.close()
 
 
+def using_postgres() -> bool:
+    """True when the current get_db() would return a Postgres adapter."""
+    from db import adapter
+    return adapter.is_configured()
+
+
 def init_db() -> None:
+    if using_postgres():
+        # On Postgres, Alembic owns the schema. Skip the SQLite DDL script.
+        return
     db = get_db()
     db.executescript(
         """
@@ -206,7 +251,8 @@ def init_db() -> None:
             pack_size TEXT,
             pvp_eur_unit REAL,
             precio_arias_eur_unit REAL,
-            discount_pct REAL DEFAULT 50
+            discount_pct REAL DEFAULT 50,
+            discount_extra_pct REAL
         );
         CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
         CREATE INDEX IF NOT EXISTS idx_products_subfamily ON products(subfamily);
@@ -336,6 +382,7 @@ def init_db() -> None:
             incoterm TEXT DEFAULT 'EXW',
             route_id INTEGER,
             container_count INTEGER DEFAULT 0,
+            validity_days INTEGER DEFAULT 30,
             created_at TEXT NOT NULL,
             updated_at TEXT
         );
@@ -425,6 +472,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS family_defaults (
             category TEXT PRIMARY KEY,
             discount_pct REAL NOT NULL DEFAULT 50,
+            discount_extra_pct REAL NOT NULL DEFAULT 5,
             display_order INTEGER DEFAULT 99,
             notes TEXT
         );
@@ -447,6 +495,30 @@ def init_db() -> None:
             value TEXT NOT NULL,
             updated_at TEXT
         );
+
+        -- Perfil físico de contenedor (§3 spec logística). Editable sin redeploy.
+        CREATE TABLE IF NOT EXISTS container_profiles (
+            type TEXT PRIMARY KEY,               -- '20', '40', '40HC'
+            inner_length_m REAL NOT NULL,
+            inner_width_m REAL NOT NULL,
+            inner_height_m REAL NOT NULL,
+            payload_kg REAL NOT NULL,
+            door_clearance_m REAL NOT NULL DEFAULT 0.30,
+            stowage_factor REAL NOT NULL DEFAULT 0.90,  -- 0.85-0.95 según estiba
+            notes TEXT
+        );
+
+        -- Perfil físico de palé por familia (§2 spec). Cada SKU puede overridear
+        -- en products.pallet_* si su embalaje difiere del default familiar.
+        CREATE TABLE IF NOT EXISTS pallet_profiles (
+            category TEXT PRIMARY KEY,           -- 'PLACAS', 'PERFILES', ...
+            pallet_length_m REAL NOT NULL,
+            pallet_width_m REAL NOT NULL,
+            pallet_height_m REAL NOT NULL,       -- altura del palé cargado
+            stackable_levels INTEGER NOT NULL DEFAULT 1,  -- niveles apilables dentro del contenedor
+            allow_mix_floor INTEGER NOT NULL DEFAULT 1,   -- bool: puede compartir suelo con otras familias
+            notes TEXT
+        );
         """
     )
     # Migraciones para DBs existentes — usa _safe_add_column (allowlist valida col + tipo).
@@ -454,7 +526,15 @@ def init_db() -> None:
     for col, typ in [('subfamily', 'TEXT'), ('pvp_per_m2', 'REAL'), ('precio_arias_m2', 'REAL'),
                      ('content_per_unit', 'TEXT'), ('pack_size', 'TEXT'),
                      ('pvp_eur_unit', 'REAL'), ('precio_arias_eur_unit', 'REAL'),
-                     ('discount_pct', 'REAL DEFAULT 50')]:
+                     ('discount_pct', 'REAL DEFAULT 50'),
+                     ('discount_extra_pct', 'REAL'),
+                     # Fase A logística: overrides per-SKU sobre el pallet_profiles de la familia.
+                     ('pallet_length_m', 'REAL'),
+                     ('pallet_width_m', 'REAL'),
+                     ('pallet_height_m', 'REAL'),
+                     ('pallet_weight_kg', 'REAL'),
+                     ('stackable_levels', 'INTEGER'),
+                     ('allow_mix_floor', 'INTEGER')]:
         if col not in prod_cols:
             _safe_add_column(db, 'products', col, typ)
     client_cols = {r[1] for r in db.execute("PRAGMA table_info(clients)").fetchall()}
@@ -464,10 +544,630 @@ def init_db() -> None:
     offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
     if 'raw_hash' not in offer_cols:
         _safe_add_column(db, 'pending_offers', 'raw_hash', 'TEXT')
+    if 'validity_days' not in offer_cols:
+        _safe_add_column(db, 'pending_offers', 'validity_days', 'INTEGER DEFAULT 30')
+        db.execute('UPDATE pending_offers SET validity_days = 30 WHERE validity_days IS NULL')
     fd_cols = {r[1] for r in db.execute("PRAGMA table_info(family_defaults)").fetchall()}
     if fd_cols and 'display_order' not in fd_cols:
         _safe_add_column(db, 'family_defaults', 'display_order', 'INTEGER DEFAULT 99')
+    if fd_cols and 'discount_extra_pct' not in fd_cols:
+        _safe_add_column(db, 'family_defaults', 'discount_extra_pct', 'REAL DEFAULT 5')
     db.commit()
+    # Migración one-shot: aplicar descuento compuesto (base + extra) a precio_arias.
+    # Se marca en app_settings para no volver a correr en restarts posteriores.
+    _apply_compound_discount_once(db)
+    _audit_fixes_20260423(db)
+    _audit_catalog_fixes_20260423(db)
+    _audit_catalog_fixes_20260423_v2(db)
+    _audit_logistics_fixes_20260424(db)
+    _audit_catalog_completion_20260424(db)
+    _sync_fx_sources_20260424(db)
+
+
+def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Migraciones one-shot derivadas de la auditoría 2026-04-23.
+
+    - Cancela la oferta duplicada id=18 (compartía offer_number 2026-8464 con #19).
+    - Alinea doc_sequences.OFR al máximo numérico existente para que
+      el backend genere a partir de ahí números únicos y secuenciales.
+
+    Idempotente: flag en app_settings para no re-ejecutar en restarts.
+    """
+    flag = db.execute("SELECT value FROM app_settings WHERE key = 'audit_fixes_20260423_applied'").fetchone()
+    if flag:
+        return
+
+    dup = db.execute(
+        "SELECT id, offer_number, status FROM pending_offers WHERE id = 18 AND offer_number = '2026-8464'"
+    ).fetchone()
+    if dup and dup['status'] == 'pending':
+        db.execute(
+            "UPDATE pending_offers SET status = 'cancelled', updated_at = ? WHERE id = 18",
+            (now_iso(),),
+        )
+        db.execute(
+            "INSERT INTO audit_log (offer_id, action, detail, username, created_at) VALUES (?,?,?,?,?)",
+            (
+                18,
+                'OFFER_CANCELLED',
+                'Auto-cancelada por auditoría 2026-04-23: offer_number 2026-8464 duplicado '
+                'con oferta #19 (Palmira V2). Esta era la versión previa con proyecto sin nombre.',
+                'audit-system',
+                now_iso(),
+            ),
+        )
+
+    max_num = 0
+    for row in db.execute("SELECT offer_number FROM pending_offers").fetchall():
+        n = row['offer_number'] or ''
+        parts = n.split('-')
+        if len(parts) == 2 and parts[1].isdigit():
+            max_num = max(max_num, int(parts[1]))
+    if max_num > 0:
+        existing = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+        if existing:
+            if existing['last_number'] < max_num:
+                db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (max_num,))
+        else:
+            db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (max_num,))
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_fixes_20260423_applied', now_iso(), now_iso()),
+    )
+    db.commit()
+    print('[migration] auditoría 2026-04-23 aplicada: duplicado #18 cancelado, secuencia OFR alineada')
+
+
+def _audit_catalog_fixes_20260423(db: sqlite3.Connection) -> None:
+    """Correcciones de catálogo derivadas de la auditoría contra Tarifa Fassa
+    Hispania Abril 2026 + Tarifa Gypsotech Abril 2026 + Anexo Gypsotech Nov 2025.
+
+    Arias Group compra FCA Tarancón. Varios SKUs tenían cargado el precio del
+    punto de recogida de Fátima-PT o Antas, no Tarancón. Esto hacía que el
+    motor aplicara 50%+5% descuento sobre un PVP más bajo del real, dejando
+    menos margen del calculado en presupuestos.
+
+    También: bug numérico en pvp_per_m2 de AQUASUPER BA 13mm 1200×2700
+    (9.5473 en lugar de 7.1605). No afecta cálculos (se usa unit_price_eur)
+    pero sí la visualización si se expone pvp_per_m2.
+
+    Idempotente: flag audit_catalog_fixes_20260423_applied en app_settings.
+    Los precios nuevos aplican solo a ofertas futuras — lines_json congela
+    el precio vigente al emitir, las ofertas ya enviadas no se recalculan.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    # SKUs con punto de recogida corregido a Tarancón (PVP verificado contra
+    # Tarifa Fassa Hispania Abril 2026, columna "Tarancón/Madrid"). El
+    # precio_arias y unit_price se recalculan con descuento compuesto 50%+5%.
+    tarancon_fixes = [
+        # (sku, pvp_anterior, pvp_tarancon, nombre)
+        ('420Y1A',  3.99,  5.48,  'KI 7'),
+        ('1188F',   5.43,  7.14,  'FASSACOL ONE GRIS'),
+        ('1783Y1A', 5.73,  7.15,  'FASSACOL PRIME GRIS'),
+        ('1772Y1A', 11.45, 12.89, 'FASSACOL MULTI BLANCO'),
+        ('1774Y1A', 13.67, 14.85, 'FASSACOL FLEX BLANCO'),
+        ('1778Y1A', 24.09, 25.58, 'FASSACOL ULTRAFLEX S1 BLANCO'),
+        ('1779Y1A', 22.69, 24.19, 'FASSACOL ULTRAFLEX S1 GRIS'),
+        ('1077F',   17.03, 18.89, 'AQUAZIP GE 97 Comp A'),
+    ]
+    updated = 0
+    for sku, expected_old, new_pvp, _name in tarancon_fixes:
+        row = db.execute(
+            'SELECT pvp_eur_unit FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        current = row['pvp_eur_unit']
+        # Solo actualizar si el valor actual coincide con el que detectamos,
+        # por si alguien lo corrigió manualmente antes de esta migración.
+        if current is None or abs(float(current) - expected_old) > 0.01:
+            continue
+        new_arias = round(new_pvp * 0.475, 4)  # 50% + 5% compuesto
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, sku),
+        )
+        updated += 1
+
+    # Bug numérico pvp_per_m2 AQUASUPER BA 13mm 1200×2700 (P00W003270A0).
+    # PVP 23.20€ / (1.2 × 2.7) m² = 7.1605 €/m², no 9.5473.
+    row = db.execute(
+        "SELECT pvp_eur_unit, pvp_per_m2 FROM products WHERE sku = 'P00W003270A0'"
+    ).fetchone()
+    if row and row['pvp_per_m2'] and abs(float(row['pvp_per_m2']) - 9.5473) < 0.001:
+        correct_m2 = round(float(row['pvp_eur_unit']) / (1.2 * 2.7), 4)
+        db.execute(
+            'UPDATE products SET pvp_per_m2 = ? WHERE sku = ?',
+            (correct_m2, 'P00W003270A0'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] catálogo 2026-04-23: {updated} SKUs corregidos a precio Tarancón + bug pvp_per_m2 AQUASUPER 2700')
+
+
+def _audit_catalog_fixes_20260423_v2(db: sqlite3.Connection) -> None:
+    """Segunda tanda de correcciones de catálogo (decisión comercial 2026-04-23).
+
+    1) STD no-Tarancón → marcar como origen Calliano y ajustar PVP.
+       Las 5 placas STD fuera de Tarancón son comerciales para Arias (se
+       compran desde Calliano). Se mantiene el SKU actual (con prefijo P)
+       para no romper referencias históricas, pero se añade "(origen
+       Calliano)" al nombre y se actualiza PVP al precio Calliano €/m².
+
+    2) Placas no comerciales eliminadas: AQUASUPER 13mm 2700/2800,
+       AQUASUPER 18mm 2600, GypsoSILENS 13mm 2500/3000. Ninguna está
+       referenciada en order_lines ni pending_offers.lines_json
+       (verificado antes de la migración).
+
+    3) Descripciones de cintas guardavivos (304064, 304065) corregidas
+       a Tarifa Abril 2026 (45m y 153m; precios no cambian).
+
+    4) Dimensiones de tornillos Externa Light (301240/241/244/245)
+       corregidas a Tarifa Abril 2026 (Punta Clavo 30/40; Punta Broca
+       32/41). Precios no cambian.
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_fixes_20260423_v2_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    deleted = 0
+
+    # 1) STD no-Tarancón → origen Calliano (Gypsotech Abril 2026, columna Calliano €/m²).
+    std_calliano = [
+        # (sku, m2_per_placa, calliano_eur_m2, pvp_anterior_esperado)
+        ('P00A000260A0', 3.12, 5.59, 15.48),  # STD BA 10mm 1200×2600
+        ('P00A000270A0', 3.24, 5.59, 16.08),  # STD BA 10mm 1200×2700
+        ('P00A003320A0', 3.84, 4.55, 15.48),  # STD BA 13mm 1200×3200
+        ('P00A003360A0', 4.32, 4.55, 17.42),  # STD BA 13mm 1200×3600
+        ('P00A008250A0', 3.00, 7.15, 17.96),  # STD BA 18mm 1200×2500
+    ]
+    for sku, m2, rate, expected_old in std_calliano:
+        row = db.execute(
+            'SELECT pvp_eur_unit, name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['pvp_eur_unit'] is None:
+            continue
+        if abs(float(row['pvp_eur_unit']) - expected_old) > 0.01:
+            continue
+        new_pvp = round(m2 * rate, 2)
+        new_arias = round(new_pvp * 0.475, 4)
+        new_m2 = round(rate, 4)
+        new_name = row['name'] if '(origen Calliano)' in (row['name'] or '') \
+            else f"{row['name']} (origen Calliano)"
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?,
+                   pvp_per_m2 = ?, name = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, new_m2, new_name, sku),
+        )
+        updated += 1
+
+    # 2) Placas no comerciales eliminadas.
+    non_commercial = [
+        'P00W003270A0',  # AQUASUPER BA 13mm 1200×2700
+        'P00W003280A0',  # AQUASUPER BA 13mm 1200×2800
+        'P00W008260A0',  # AQUASUPER BA 18mm 1200×2600
+        'P00GS03250A0',  # GypsoSILENS BA 13mm 1200×2500
+        'P00GS03300A0',  # GypsoSILENS BA 13mm 1200×3000
+    ]
+    for sku in non_commercial:
+        in_orders = db.execute(
+            'SELECT 1 FROM order_lines WHERE sku = ? LIMIT 1', (sku,)
+        ).fetchone()
+        in_offers = db.execute(
+            "SELECT 1 FROM pending_offers WHERE lines_json LIKE ? LIMIT 1",
+            (f'%{sku}%',),
+        ).fetchone()
+        if in_orders or in_offers:
+            continue  # protección defensiva — no borrar si algo lo referencia
+        res = db.execute('DELETE FROM products WHERE sku = ?', (sku,))
+        if res.rowcount:
+            deleted += 1
+
+    # 3) Cintas guardavivos — descripciones Tarifa Abril 2026 (45m y 153m).
+    cintas_fix = [
+        ('304064',
+         'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×45m — 54 rollos/caja'),
+        ('304065',
+         'Cinta Guardavivos 50mm×30m — 10 rollos/caja',
+         'Cinta Guardavivos 50mm×153m — 12 rollos/caja'),
+    ]
+    for sku, old_name, new_name in cintas_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    # 4) Tornillos Externa Light — dimensiones Tarifa Abril 2026.
+    tornillos_fix = [
+        ('301240',
+         'Tornillo Exterior Ø4,0×42 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×30 — 1.000ud'),
+        ('301241',
+         'Tornillo Exterior Ø4,0×41 — 1.000ud',
+         'Tornillo Exterior Punta Clavo Externa Light Ø4,0×40 — 1.000ud'),
+        ('301244',
+         'Tornillo Exterior Ø4,0×42 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×32 — 500ud'),
+        ('301245',
+         'Tornillo Exterior Ø4,0×41 — 500ud',
+         'Tornillo Exterior Punta Broca Externa Light Ø4,0×41 — 500ud'),
+    ]
+    for sku, old_name, new_name in tornillos_fix:
+        row = db.execute(
+            'SELECT name FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if row and row['name'] == old_name:
+            db.execute(
+                'UPDATE products SET name = ? WHERE sku = ?', (new_name, sku)
+            )
+            updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_fixes_20260423_v2_applied',
+         f'updated={updated};deleted={deleted}', now_iso()),
+    )
+    db.commit()
+    if updated or deleted:
+        print(
+            f'[migration] catálogo v2: {updated} SKUs actualizados '
+            f'(STD Calliano / cintas / tornillos), {deleted} placas no comerciales eliminadas'
+        )
+
+
+def _audit_logistics_fixes_20260424(db: sqlite3.Connection) -> None:
+    """Correcciones de datos logísticos detectadas tras la auditoría de catálogo.
+
+    1) STD origen Calliano — units_per_pallet y sqm_per_pallet estaban con
+       valores de Tarancón (carga original), pero al ser placas no servibles
+       desde Tarancón vienen de Calliano, donde la densidad de palé es
+       distinta (más placas por palé). Impacto: el motor estimate_containers
+       sobrestima palés cuando se pide una de estas 5 placas → contenedores
+       extra innecesarios en la oferta.
+
+       Tarifa Gypsotech Abril 2026, columna "N° PLACAS/PALÉ CALLIANO (L)":
+       - P00A000260A0 STD 10mm 2600: 48→66, 149,76→205,92 m²/palé
+       - P00A000270A0 STD 10mm 2700: 48→66, 155,52→213,84 m²/palé
+       - P00A003320A0 STD 13mm 3200: 36→40, 138,24→153,60 m²/palé
+       - P00A003360A0 STD 13mm 3600: 36→40, 155,52→172,80 m²/palé
+       - P00A008250A0 STD 18mm 2500: 24→34,  72,00→102,00 m²/palé
+
+    2) C367038269A Montante 70/37 Z1 — kg_per_unit calculado como si fuera
+       2990mm (2,09 kg) pero el SKU indica 2690mm. Corregido a 0,70 kg/ml ×
+       2,69 m = 1,88 kg (peso Fassa según anexo perfiles).
+
+    Idempotente mediante flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_logistics_fixes_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+
+    # 1) STD Calliano — uds/palé y m²/palé correctos de origen Calliano.
+    std_pallet_fix = [
+        # (sku, old_upp, new_upp, new_sqm_per_pallet)
+        ('P00A000260A0', 48.0, 66.0, 205.92),
+        ('P00A000270A0', 48.0, 66.0, 213.84),
+        ('P00A003320A0', 36.0, 40.0, 153.60),
+        ('P00A003360A0', 36.0, 40.0, 172.80),
+        ('P00A008250A0', 24.0, 34.0, 102.00),
+    ]
+    for sku, expected_old, new_upp, new_sqm in std_pallet_fix:
+        row = db.execute(
+            'SELECT units_per_pallet FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row or row['units_per_pallet'] is None:
+            continue
+        if abs(float(row['units_per_pallet']) - expected_old) > 0.01:
+            continue
+        db.execute(
+            '''UPDATE products
+               SET units_per_pallet = ?, sqm_per_pallet = ?
+               WHERE sku = ?''',
+            (new_upp, new_sqm, sku),
+        )
+        updated += 1
+
+    # 2) Montante 70/37 Z1 2690mm — peso correcto.
+    row = db.execute(
+        "SELECT kg_per_unit FROM products WHERE sku = 'C367038269A'"
+    ).fetchone()
+    if row and row['kg_per_unit'] is not None and abs(float(row['kg_per_unit']) - 2.09) < 0.01:
+        db.execute(
+            "UPDATE products SET kg_per_unit = 1.88 WHERE sku = 'C367038269A'"
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_logistics_fixes_20260424_applied', str(updated), now_iso()),
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] logística 2026-04-24: {updated} SKUs corregidos (STD Calliano uds/palé + Montante 70/37 2690 peso)')
+
+
+def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
+    """Completar datos logísticos de consumibles y añadir perfiles Z1 faltantes.
+
+    1) kg_per_unit estimado para 76 SKUs (tornillos, cintas, accesorios,
+       GypsoCOMETE, trampillas) que tenían peso NULL. Valores conservadores
+       basados en prácticas del sector (acero galvanizado, papel kraft,
+       PVC, aluminio o placa yeso alta densidad según material). Se
+       marcan como 'estimated' en notes para que se actualicen cuando
+       lleguen las fichas técnicas oficiales.
+
+    2) 14 nuevos SKUs de perfiles Z1 del Anexo Gypsotech Nov 2025 que no
+       estaban cargados: Montante 48/35 Z1 (7 longitudes), Montante 70/37
+       Z1 (4 longitudes faltantes además de 2690), Montante 90/40 Z1
+       (2 longitudes faltantes) y Perfil TC 47 Z1 de 5300mm. Precio €/ml
+       del anexo × longitud; kg = kg/ml × longitud.
+
+    3) Corrige un error de carga: C344836299B (Montante 48/35 Z2 2990mm)
+       tenía PVP 4,186€ (precio €/ml Z1 = 1,40) cuando le corresponde el
+       €/ml Z2 = 2,15 → PVP = 6,43€. Afecta precio_arias y unit_price.
+
+    Idempotente: INSERT OR IGNORE para no duplicar, flag en app_settings.
+    Las ofertas ya emitidas NO cambian (lines_json congela el precio).
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_catalog_completion_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    now = now_iso()
+    updated = 0
+    inserted = 0
+
+    # 1) Pesos estimados para consumibles sin kg_per_unit.
+    # Peso por UNIDAD DE VENTA (caja/rollo/ud/paquete), no por pieza.
+    estimated_weights = {
+        # TORNILLOS — cajas de tornillo fosfatado/cincado + embalaje
+        '304100': 1.00, '304101': 2.00, '304102': 10.00,   # PM Punta Clavo Ø3,5×25
+        '304103': 1.40, '304104': 2.80, '304105': 8.40,   # PM Punta Clavo Ø3,5×35
+        '304106': 3.60, '304107': 4.40,                    # PM Punta Clavo Ø3,5×45 / 55
+        '304108': 3.50, '304109': 4.00,                    # PM Ø4,2×70 / Ø4,8×90
+        '304115': 2.20, '304116': 3.00, '304117': 3.80,   # PM Punta Broca Ø3,5×25/35/45
+        '304123': 2.30, '304124': 3.20, '304125': 4.10,   # AD Ø3,9×25/35/45
+        '304126': 5.00, '304128': 3.50,                    # AD Ø3,9×55 / ×70
+        '304133': 0.50, '304134': 1.80, '304135': 2.50,   # MM Punta Broca
+        '301240': 3.00, '301241': 3.50,                    # Externa Light Punta Clavo
+        '301244': 1.70, '301245': 2.20,                    # Externa Light Punta Broca
+        # CINTAS Y MALLAS — peso por rollo
+        '304056': 0.20, '304057': 0.60, '304058': 1.20,   # Cinta juntas papel
+        '304064': 0.30, '304065': 1.00,                    # Cinta guardavivos
+        '304075': 0.50, '304076': 0.70,                    # Banda estanca
+        '304078': 0.15, '304079': 0.50,                    # Malla FV autoadhesiva
+        '301121': 1.50,                                    # Malla Externa Light
+        '700960': 9.00,                                    # Fassanet 160
+        # ACCESORIOS PERFILES — peso por caja/paquete completo
+        '304014': 3.50, '304015': 2.00,                    # Crucetas TC 47 / 60
+        '304021': 7.00, '304022': 10.00, '304023': 7.00,   # Suspensión TC 47 90/180/240
+        '304029': 8.00, '304030': 10.00,                   # Anclaje Directo 47/60 ×120
+        '304036': 5.00,                                    # Anclaje Universal Omega M6
+        '304049': 4.00, '304050': 6.00,                    # Aisladores acústicos
+        '304095': 18.00, '304096': 18.00,                  # Varilla roscada M6 1000/2000
+        '304097': 1.00,                                    # Manguito cilíndrico
+        '1091001Y': 15.00,                                 # Cantonera yeso 2600mm PVC
+        # GYPSOCOMETE — placa alta densidad + perfil aluminio + LED
+        '301600': 6.00, '301601': 8.00, '301602': 12.00,   # ANGLE/CROSS/STAR 18mm
+        '301600XL': 7.00, '301601XL': 9.00, '301602XL': 13.00, '301605XL': 25.00,
+        '301606': 0.50, '301607': 0.70, '301606XL': 1.00,  # Recambios pantalla
+        # TRAMPILLAS — acero lacado / aluminio / acero+placa fuego
+        '304081': 2.50, '304082': 4.00, '304083': 6.00, '304084': 8.00,
+        '304085': 2.00, '304086': 3.00, '304087': 5.00, '304088': 7.00,
+        '304089': 9.00, '304090': 17.00,
+        '301761': 8.00, '301762': 14.00, '301763': 17.00, '301764': 21.00,
+        '301461': 12.00, '301462': 22.00, '301463': 27.00, '301464': 33.00,
+    }
+    for sku, weight in estimated_weights.items():
+        row = db.execute(
+            'SELECT kg_per_unit, notes FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not row:
+            continue
+        if row['kg_per_unit'] is not None and float(row['kg_per_unit']) > 0:
+            continue  # ya tiene peso, respetar
+        new_notes = row['notes'] or ''
+        tag = '[peso estimado 2026-04-24]'
+        if tag not in new_notes:
+            new_notes = (new_notes + ' ' + tag).strip()
+        db.execute(
+            'UPDATE products SET kg_per_unit = ?, notes = ? WHERE sku = ?',
+            (weight, new_notes, sku),
+        )
+        updated += 1
+
+    # 2) Perfiles Z1 faltantes (Anexo Gypsotech Nov 2025).
+    # Estructura: (sku, name, longitud_m, eur_ml, kg_ml, uds_pallet, subfamily)
+    new_perfiles = [
+        ('C344836249A', 'Montante 48/35 Z1 — 2.490mm', 2.49, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836259A', 'Montante 48/35 Z1 — 2.590mm', 2.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836269A', 'Montante 48/35 Z1 — 2.690mm', 2.69, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836279A', 'Montante 48/35 Z1 — 2.790mm', 2.79, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836299A', 'Montante 48/35 Z1 — 2.990mm', 2.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836359A', 'Montante 48/35 Z1 — 3.590mm', 3.59, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C344836399A', 'Montante 48/35 Z1 — 3.990mm', 3.99, 1.40, 0.57, 480, 'MONTANTE 48/35'),
+        ('C367038279A', 'Montante 70/37 Z1 — 2.790mm', 2.79, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038299A', 'Montante 70/37 Z1 — 2.990mm', 2.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038359A', 'Montante 70/37 Z1 — 3.590mm', 3.59, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C367038399A', 'Montante 70/37 Z1 — 3.990mm', 3.99, 1.78, 0.70, 250, 'MONTANTE 70/37'),
+        ('C399041359A', 'Montante 90/40 Z1 — 3.590mm', 3.59, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C399041399A', 'Montante 90/40 Z1 — 3.990mm', 3.99, 2.23, 0.82, 200, 'MONTANTE 90/40'),
+        ('C174717530A', 'Perfil TC 47 Z1 — 5.300mm',    5.30, 1.13, 0.44, 1080, 'TC 47'),
+    ]
+    for sku, name, longitud, eur_ml, kg_ml, upp, subfamily in new_perfiles:
+        exists = db.execute(
+            'SELECT 1 FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if exists:
+            continue
+        pvp = round(eur_ml * longitud, 4)
+        precio_arias = round(pvp * 0.475, 4)  # 50% + 5% compuesto
+        kg = round(kg_ml * longitud, 2)
+        db.execute(
+            '''INSERT INTO products
+               (sku, name, category, source_catalog, unit, unit_price_eur,
+                kg_per_unit, units_per_pallet, pvp_eur_unit,
+                precio_arias_eur_unit, discount_pct, discount_extra_pct,
+                subfamily, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (sku, name, 'PERFILES', 'ANEXO-Nov2025', 'barra',
+             precio_arias, kg, float(upp), pvp, precio_arias,
+             50.0, 5.0, subfamily,
+             '[añadido auditoría 2026-04-24]'),
+        )
+        inserted += 1
+
+    # 3) Corregir Montante 48/35 Z2 2990mm (cargado con precio Z1).
+    # PVP correcto: 2,15 €/ml × 2,99 m = 6,4285€.
+    row = db.execute(
+        "SELECT pvp_eur_unit FROM products WHERE sku = 'C344836299B'"
+    ).fetchone()
+    if row and row['pvp_eur_unit'] is not None and abs(float(row['pvp_eur_unit']) - 4.186) < 0.01:
+        new_pvp = 6.4285
+        new_arias = round(new_pvp * 0.475, 4)
+        db.execute(
+            '''UPDATE products
+               SET pvp_eur_unit = ?, precio_arias_eur_unit = ?, unit_price_eur = ?
+               WHERE sku = ?''',
+            (new_pvp, new_arias, new_arias, 'C344836299B'),
+        )
+        updated += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_catalog_completion_20260424_applied',
+         f'updated={updated};inserted={inserted}', now),
+    )
+    db.commit()
+    if updated or inserted:
+        print(
+            f'[migration] catálogo completado 2026-04-24: '
+            f'{updated} SKUs actualizados (pesos + Montante 48/35 Z2), '
+            f'{inserted} perfiles Z1 nuevos insertados'
+        )
+
+
+def _sync_fx_sources_20260424(db: sqlite3.Connection) -> None:
+    """Sincroniza app_settings.fx_eur_usd con fx_rates EUR→USD.
+
+    Bug histórico: catálogo (/products) y dashboard (/quote) leían el FX de
+    tablas distintas (fx_rates vs app_settings.fx_eur_usd), lo que producía
+    valores divergentes en pantalla y como default del cotizador. Ya se
+    unificó en código (todos usan get_current_fx_eur_usd que prioriza
+    fx_rates), pero los valores en DB siguen pudiendo discrepar.
+
+    Esta migración alinea app_settings.fx_eur_usd con el último rate
+    EUR→USD de fx_rates. Si fx_rates no tiene ningún rate, no hace nada
+    (deja el comportamiento actual: app_settings es la única fuente).
+
+    Idempotente: si ya están sincronizados, el UPDATE no cambia nada.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'fx_sync_20260424_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    row = db.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency='EUR' AND target_currency='USD' "
+        "ORDER BY updated_at DESC LIMIT 1"
+    ).fetchone()
+    if not row:
+        # Sin rate oficial en fx_rates → no tocamos app_settings.
+        db.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ('fx_sync_20260424_applied', 'no-fx_rates-row', now_iso()),
+        )
+        db.commit()
+        return
+
+    canonical = float(row['rate'])
+    db.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (str(canonical), now_iso()),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('fx_sync_20260424_applied', f'synced_to={canonical}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] FX sources sincronizadas: app_settings.fx_eur_usd ← {canonical} (fx_rates EUR→USD)')
+
+
+def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
+    """Recalcula precio_arias_eur_unit usando descuento compuesto (base × extra).
+
+    Fórmula: precio_arias = pvp × (1 - base/100) × (1 - extra/100)
+    Solo corre una vez (flag en app_settings). Las ofertas ya guardadas no
+    se tocan: guardan su propio precio congelado en lines_json.
+    """
+    flag = db.execute("SELECT value FROM app_settings WHERE key = 'compound_discount_applied_v1'").fetchone()
+    if flag:
+        return
+    rows = db.execute(
+        '''SELECT p.id, p.pvp_eur_unit, p.discount_pct, p.discount_extra_pct,
+                  p.precio_arias_eur_unit, p.pvp_per_m2,
+                  fd.discount_extra_pct AS fd_extra
+           FROM products p
+           LEFT JOIN family_defaults fd ON fd.category = p.category'''
+    ).fetchall()
+    updated = 0
+    for r in rows:
+        pvp = r['pvp_eur_unit']
+        if pvp is None:
+            continue
+        base = r['discount_pct'] if r['discount_pct'] is not None else 50
+        extra_override = r['discount_extra_pct']
+        fd_extra = r['fd_extra'] if r['fd_extra'] is not None else 5
+        extra = extra_override if extra_override is not None else fd_extra
+        new_arias = round(float(pvp) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4)
+        pvp_m2 = r['pvp_per_m2']
+        new_arias_m2 = round(float(pvp_m2) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4) if pvp_m2 else None
+        db.execute(
+            'UPDATE products SET precio_arias_eur_unit = ?, unit_price_eur = ?, precio_arias_m2 = ? WHERE id = ?',
+            (new_arias, new_arias, new_arias_m2, r['id'])
+        )
+        updated += 1
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('compound_discount_applied_v1', str(updated), now_iso())
+    )
+    db.commit()
+    if updated:
+        print(f'[migration] descuento compuesto aplicado a {updated} productos')
 
 
 def seed_db() -> None:
@@ -482,7 +1182,12 @@ def seed_db() -> None:
         ('Sistema protección fuego', 'Placa de protección pasiva al fuego', 0.05),
     ]
     for row in systems:
-        db.execute('INSERT OR IGNORE INTO systems (name, description, default_waste_pct) VALUES (?, ?, ?)', row)
+        # Portable upsert that works on both SQLite 3.24+ and Postgres.
+        db.execute(
+            'INSERT INTO systems (name, description, default_waste_pct) VALUES (?, ?, ?) '
+            'ON CONFLICT (name) DO NOTHING',
+            row,
+        )
 
     if db.execute('SELECT COUNT(*) AS c FROM clients').fetchone()['c'] == 0:
         db.execute(
@@ -529,6 +1234,46 @@ def seed_db() -> None:
             db.execute('''INSERT INTO customs_rates
                 (country, hs_code, category, dai_pct, itbis_pct, other_pct, notes)
                 VALUES (?,?,?,?,?,?,?)''', c)
+
+    # Seed perfiles físicos de contenedor (§3 spec logística).
+    # Dimensiones interiores estándar ISO. payload 40' = 28000 kg por criterio
+    # operativo Arias (industria típica 26500-26700; ajustable vía UI de config).
+    if db.execute('SELECT COUNT(*) AS c FROM container_profiles').fetchone()['c'] == 0:
+        profiles = [
+            # type, inner_length_m, inner_width_m, inner_height_m, payload_kg, door, stow, notes
+            ('20',   5.90,  2.35, 2.39, 21500, 0.30, 0.90, 'Contenedor 20 pies estándar'),
+            ('40',   12.03, 2.35, 2.39, 28000, 0.30, 0.90, 'Contenedor 40 pies estándar — payload operativo Arias'),
+            ('40HC', 12.03, 2.35, 2.69, 28000, 0.30, 0.90, 'Contenedor 40 High Cube — 30cm más alto que 40 estándar'),
+        ]
+        for p in profiles:
+            db.execute('''INSERT INTO container_profiles
+                (type, inner_length_m, inner_width_m, inner_height_m, payload_kg,
+                 door_clearance_m, stowage_factor, notes)
+                VALUES (?,?,?,?,?,?,?,?)''', p)
+
+    # Seed perfiles de palé por familia (§2 spec logística).
+    # Valores iniciales editables desde UI de masters; cada SKU puede overridear
+    # en products.pallet_* si su embalaje físico difiere del default familiar.
+    if db.execute('SELECT COUNT(*) AS c FROM pallet_profiles').fetchone()['c'] == 0:
+        pallets = [
+            # category, L, W, H, levels, allow_mix, notes
+            ('PLACAS',     2.50, 1.20, 0.30, 3, 1, 'Palé placa yeso 1200x2500 — apilable 3 niveles, el hueco lateral (1.15m) y los pisos superiores admiten mezcla'),
+            ('PERFILES',   3.00, 0.80, 0.35, 2, 1, 'Palé perfiles metálicos — apilable 2 niveles, mezcla suelo OK'),
+            ('TORNILLOS',  1.20, 0.80, 1.00, 2, 1, 'Palé cajas de tornillería'),
+            ('CINTAS',     1.20, 0.80, 1.00, 2, 1, 'Palé cintas y mallas'),
+            ('PASTAS',     1.20, 0.80, 1.20, 1, 1, 'Palé sacos de pasta — sin apilado (peso)'),
+            ('ACCESORIOS', 1.20, 0.80, 1.00, 2, 1, 'Palé accesorios varios'),
+        ]
+        for pr in pallets:
+            db.execute('''INSERT INTO pallet_profiles
+                (category, pallet_length_m, pallet_width_m, pallet_height_m,
+                 stackable_levels, allow_mix_floor, notes)
+                VALUES (?,?,?,?,?,?,?)''', pr)
+
+    # Fix idempotente: PLACAS debe admitir mezcla de suelo (regla Arias) incluso
+    # si una versión previa del seed la marcó en 0.
+    db.execute("UPDATE pallet_profiles SET allow_mix_floor = 1 "
+               "WHERE category = 'PLACAS' AND allow_mix_floor = 0")
 
     # Seed FX rates
     if db.execute('SELECT COUNT(*) AS c FROM fx_rates').fetchone()['c'] == 0:
@@ -713,6 +1458,126 @@ def estimate_containers(pallets_logistic: float, weight_kg: float,
     return best
 
 
+def build_offer_breakdown(raw_lines: list[dict[str, Any]],
+                          computed: list[dict[str, Any]],
+                          margin_global_pct: float,
+                          logistic_global_eur: float) -> dict[str, Any]:
+    """Fuente única de verdad para el cálculo de un presupuesto.
+
+    Devuelve un breakdown por línea con TODOS los valores que necesitan los
+    consumidores (frontend preview, save_offer al persistir, offer_pdf al
+    renderizar, exports a Odoo/NetSuite, etc.) así nadie tiene que recalcular.
+
+    Estructura:
+      {
+        'lines': [
+          {sku, name, family, unit, qty_neta, qty_waste, price_arias_eur,
+           log_unit_eur, margin_pct, cost_line_eur, log_line_eur,
+           sale_line_eur, sale_unit_eur},
+          ...
+        ],
+        'totals': {product_cost_eur, logistic_eur, sale_eur},
+        'meta': {has_per_line_log, margin_global_pct},
+      }
+
+    Regla:
+      - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
+      - flete por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
+        Si NINGUNA línea trae log_unit_cost, el flete global del payload se
+        prorratea proporcional al coste de producto por línea (equivalente
+        matemáticamente al cálculo global previo, mantiene compat con bot).
+      - venta línea = cost_producto / (1 - margen_línea) + flete_línea
+        (flete es pass-through: no genera margen, igual que el frontend).
+    """
+    product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
+    if product_cost_total <= 0 or not computed:
+        return {
+            'lines': [],
+            'totals': {'product_cost_eur': 0.0, 'logistic_eur': 0.0, 'sale_eur': 0.0},
+            'meta': {'has_per_line_log': False, 'margin_global_pct': margin_global_pct},
+        }
+
+    has_per_line_log = any(_num(li.get('log_unit_cost', 0)) > 0 for li in raw_lines)
+    margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
+
+    breakdown_lines: list[dict[str, Any]] = []
+    total_product = 0.0
+    total_logistic = 0.0
+    total_sale = 0.0
+    for i, cl in enumerate(computed):
+        line_input = raw_lines[i] if i < len(raw_lines) else {}
+        cost_prod = _num(cl.get('cost_exw_eur'))
+        qty_w = _num(cl.get('qty_input'))
+        qty_neta = _num(cl.get('qty_original', cl.get('qty_input', 0)))
+        price_arias = _num(cl.get('price_unit_eur')) or (cost_prod / qty_w if qty_w else 0)
+
+        m_raw = line_input.get('margin')
+        if m_raw is None or m_raw == '':
+            margin_line = margin_global
+        else:
+            m_val = _num(m_raw)
+            margin_line = m_val / 100 if m_val >= 1 else m_val
+
+        if has_per_line_log:
+            log_unit = _num(line_input.get('log_unit_cost', 0))
+            log_line = log_unit * qty_w
+        else:
+            share = cost_prod / product_cost_total
+            log_line = logistic_global_eur * share
+            log_unit = (log_line / qty_w) if qty_w else 0.0
+
+        sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
+        sale_line = sale_product + log_line
+        sale_unit = (sale_line / qty_w) if qty_w else 0.0
+
+        breakdown_lines.append({
+            'sku': cl.get('sku'),
+            'name': cl.get('name'),
+            'family': cl.get('family'),
+            'unit': cl.get('unit'),
+            'qty_neta': round(qty_neta, 2),
+            'qty_waste': round(qty_w, 2),
+            'price_arias_eur': round(price_arias, 4),
+            'log_unit_eur': round(log_unit, 4),
+            'margin_pct': round(margin_line * 100, 2),
+            'cost_line_eur': round(cost_prod, 2),
+            'log_line_eur': round(log_line, 2),
+            'sale_line_eur': round(sale_line, 2),
+            'sale_unit_eur': round(sale_unit, 4),
+        })
+
+        total_product += cost_prod
+        total_logistic += log_line
+        total_sale += sale_line
+
+    return {
+        'lines': breakdown_lines,
+        'totals': {
+            'product_cost_eur': round(total_product, 2),
+            'logistic_eur': round(total_logistic, 2),
+            'sale_eur': round(total_sale, 2),
+        },
+        'meta': {
+            'has_per_line_log': has_per_line_log,
+            'margin_global_pct': margin_global_pct,
+        },
+    }
+
+
+def compute_offer_sale_totals(raw_lines: list[dict[str, Any]],
+                              computed: list[dict[str, Any]],
+                              margin_global_pct: float,
+                              logistic_global_eur: float) -> tuple[float, float, float]:
+    """Wrapper legacy: devuelve solo (product_cost, logistic, sale) como tuple.
+
+    Nuevo código debe usar build_offer_breakdown para tener acceso al detalle
+    por línea. Este wrapper se mantiene para no romper callers existentes.
+    """
+    r = build_offer_breakdown(raw_lines, computed, margin_global_pct, logistic_global_eur)
+    t = r['totals']
+    return t['product_cost_eur'], t['logistic_eur'], t['sale_eur']
+
+
 def compute_totals(lines: list[dict[str, Any]]) -> dict[str, Any]:
     ok_lines = [l for l in lines if l.get('ok', True)]
     total_cost = sum(_num(l.get('cost_exw_eur')) for l in ok_lines)
@@ -814,6 +1679,35 @@ def next_sequence(db: sqlite3.Connection, prefix: str) -> str:
         n = 1
         db.execute('INSERT INTO doc_sequences (prefix, last_number) VALUES (?, ?)', (prefix, n))
     return f'{prefix}-{n:04d}'
+
+
+def generate_offer_number(db: sqlite3.Connection) -> str:
+    """Genera offer_number único y secuencial con formato YYYY-NNNN.
+
+    Usa doc_sequences.OFR como contador. A diferencia de next_sequence,
+    el prefijo es el año actual (no 'OFR-') para mantener continuidad
+    con el formato histórico '2026-XXXX' ya enviado a clientes.
+
+    Garantiza unicidad: itera el counter hasta que no exista un
+    offer_number idéntico en pending_offers (defensivo ante colisiones
+    con números ya emitidos antes de la auditoría).
+    """
+    year = datetime.now(timezone.utc).year
+    row = db.execute("SELECT last_number FROM doc_sequences WHERE prefix = 'OFR'").fetchone()
+    n = (row['last_number'] + 1) if row else 1
+    while True:
+        candidate = f'{year}-{n:04d}'
+        exists = db.execute(
+            'SELECT 1 FROM pending_offers WHERE offer_number = ?', (candidate,)
+        ).fetchone()
+        if not exists:
+            break
+        n += 1
+    if row:
+        db.execute("UPDATE doc_sequences SET last_number = ? WHERE prefix = 'OFR'", (n,))
+    else:
+        db.execute("INSERT INTO doc_sequences (prefix, last_number) VALUES ('OFR', ?)", (n,))
+    return candidate
 
 
 def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, target_margin_pct: float, fx_rate: float) -> dict[str, Any]:
@@ -989,8 +1883,11 @@ def dashboard():
         'products': products_count, 'systems': systems_count,
         'quotes': offers_count,
     }
-    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
-    fx = {'USD': float(fx_setting['value']) if fx_setting else 1.085}
+    # Fuente única: get_current_fx_eur_usd() prioriza fx_rates (rate oficial
+    # con histórico) sobre app_settings.fx_eur_usd (legacy override). Antes
+    # cada endpoint leía de un sitio distinto y aparecían FX divergentes
+    # entre el catálogo /products y el cotizador /quote.
+    fx = {'USD': get_current_fx_eur_usd()}
 
     # Top empresas por volumen € (via clients.company)
     top_companies = db.execute('''
@@ -1087,14 +1984,18 @@ def products():
     # Resumen
     totals = {cat: sum(len(v) for v in subs.values()) for cat, subs in groups.items()}
     missing = sum(1 for r in rows if r['pvp_eur_unit'] is None)
-    fam_defaults = {r['category']: r['discount_pct']
-                    for r in db.execute('SELECT category, discount_pct FROM family_defaults').fetchall()}
+    fd_rows = db.execute('SELECT category, discount_pct, discount_extra_pct FROM family_defaults').fetchall()
+    fam_defaults = {r['category']: r['discount_pct'] for r in fd_rows}
+    fam_extras = {r['category']: (r['discount_extra_pct'] if r['discount_extra_pct'] is not None else 5) for r in fd_rows}
+    fx_eur_usd = get_current_fx_eur_usd()
     return render_template('products.html',
                            groups=groups,
                            totals=totals,
                            grand_total=len(rows),
                            missing=missing,
                            fam_defaults=fam_defaults,
+                           fam_extras=fam_extras,
+                           fx_eur_usd=fx_eur_usd,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 
@@ -1121,7 +2022,7 @@ def api_update_product(product_id: int):
     data = request.get_json() or {}
     # Campos editables
     editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
-                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
                 'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet', 'notes']
     changes = []
     sets = []
@@ -1132,7 +2033,7 @@ def api_update_product(product_id: int):
         new_v = data[f]
         old_v = existing[f]
         # normalizar números
-        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
+        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
                  'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet'):
             new_v = float(new_v) if new_v not in (None, '') else None
         if new_v == old_v:
@@ -1142,14 +2043,27 @@ def api_update_product(product_id: int):
         changes.append((f, old_v, new_v))
     if not sets:
         return jsonify({'ok': True, 'changed': 0, 'message': 'sin cambios'})
-    # Auto-sync: si cambió pvp_eur_unit o discount_pct y no envió precio_arias_eur_unit explícito, recalcular
+    # Auto-sync: si cambió pvp_eur_unit, discount_pct o discount_extra_pct
+    # y no envió precio_arias_eur_unit explícito, recalcular con compuesto.
     if 'precio_arias_eur_unit' not in data:
         pvp_new = next((v for f, _, v in changes if f == 'pvp_eur_unit'), None)
         disc_new = next((v for f, _, v in changes if f == 'discount_pct'), None)
+        extra_new = next((v for f, _, v in changes if f == 'discount_extra_pct'), None)
         pvp = pvp_new if pvp_new is not None else existing['pvp_eur_unit']
         disc = disc_new if disc_new is not None else (existing['discount_pct'] or 50)
+        # Efectivo extra: override del producto > default de la familia > 0
+        try:
+            existing_extra = existing['discount_extra_pct']
+        except (IndexError, KeyError):
+            existing_extra = None
+        extra_override = extra_new if extra_new is not None else existing_extra
+        if extra_override is None:
+            fd = db.execute('SELECT discount_extra_pct FROM family_defaults WHERE category = ?',
+                            (existing['category'],)).fetchone()
+            extra_override = (fd['discount_extra_pct'] if fd and fd['discount_extra_pct'] is not None else 0)
+        extra = float(extra_override)
         if pvp is not None:
-            arias = round(float(pvp) * (1 - float(disc) / 100), 4)
+            arias = round(float(pvp) * (1 - float(disc) / 100) * (1 - extra / 100), 4)
             if arias != existing['precio_arias_eur_unit']:
                 sets.append('precio_arias_eur_unit = ?')
                 vals.append(arias)
@@ -1546,8 +2460,10 @@ def quote():
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
-    fx_setting = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
-    fx_rate = float(fx_setting['value']) if fx_setting else 1.085
+    # Fuente única (ver dashboard): el cotizador toma el rate oficial de
+    # fx_rates, no app_settings. Si fx_rates está vacío, fallback a
+    # app_settings y luego al hardcoded 1.085.
+    fx_rate = get_current_fx_eur_usd()
     projects_raw = db.execute(
         'SELECT id, client_id, name, area_sqm, incoterm FROM projects ORDER BY created_at DESC'
     ).fetchall()
@@ -2083,8 +2999,10 @@ def config():
             )
             flash('Arancel añadido.')
         elif action == 'add_fx':
+            # No natural unique key on fx_rates; OR REPLACE was vestigial. Plain INSERT
+            # works identically on both backends.
             db.execute(
-                '''INSERT OR REPLACE INTO fx_rates (base_currency, target_currency, rate, updated_at, source)
+                '''INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source)
                    VALUES (?, ?, ?, ?, ?)''',
                 (request.form['base_currency'], request.form['target_currency'],
                  float(request.form['rate']), now_iso(),
@@ -2106,11 +3024,21 @@ def config():
             flash('Ruta actualizada.')
         elif action == 'update_fx_setting':
             new_fx = float(request.form['fx_eur_usd'])
+            now = now_iso()
+            # Escribir en AMBAS tablas para mantener coherencia: fx_rates es
+            # lo que get_current_fx_eur_usd() lee primero (catálogo/cotizador),
+            # app_settings se conserva por compatibilidad con el editor actual.
             db.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?)",
-                (str(new_fx), now_iso())
+                "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (str(new_fx), now)
             )
-            flash(f'EUR/USD actualizado a {new_fx}')
+            db.execute(
+                "INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source) "
+                "VALUES ('EUR', 'USD', ?, ?, ?)",
+                (new_fx, now, 'Manual desde /masters')
+            )
+            flash(f'EUR/USD actualizado a {new_fx} (aplicado a catálogo y cotizador)')
         db.commit()
         return redirect(url_for('config'))
 
@@ -2162,17 +3090,38 @@ def save_offer():
             'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
             'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
             'margin': _num(li.get('margin', data.get('margin', 33))),
+            'log_unit_cost': _num(li.get('log_unit_cost', 0)),
+            'log_cost_manual': bool(li.get('log_cost_manual', False)),
+            'competitor_price_eur': _num(li.get('competitor_price_eur', 0)),
             'note': li.get('note'),
         })
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Fuente única de cálculo: build_offer_breakdown devuelve totales + breakdown
+    # por línea. El breakdown se mergea en input_lines para persistirse en
+    # lines_json y que offer_pdf, exports, etc. lean valores ya calculados sin
+    # recalcular.
+    breakdown = build_offer_breakdown(input_lines, computed, margin_pct, logistic)
+    product_cost = breakdown['totals']['product_cost_eur']
+    logistic_eur = breakdown['totals']['logistic_eur']
+    total_final = breakdown['totals']['sale_eur']
+    for li, br in zip(input_lines, breakdown['lines']):
+        li.update({
+            'qty_waste': br['qty_waste'],
+            'cost_line_eur': br['cost_line_eur'],
+            'log_line_eur': br['log_line_eur'],
+            'sale_line_eur': br['sale_line_eur'],
+            'sale_unit_eur': br['sale_unit_eur'],
+            'margin_applied_pct': br['margin_pct'],
+        })
 
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
-    offer_num = data.get('offerNumber') or next_sequence(db, 'OFR')
+    # offer_number SIEMPRE generado por backend con unicidad garantizada.
+    # Ignoramos data.get('offerNumber'): el frontend lo enviaba aleatorio
+    # ('2026-' + Date.now().slice(-4)), lo que causó colisiones históricas
+    # (p.ej. ofertas #18 y #19 con el mismo '2026-8464').
+    offer_num = generate_offer_number(db)
     raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
     dup = find_offer_by_hash(db, raw_hash)
     if dup:
@@ -2182,12 +3131,13 @@ def save_offer():
             'existing_offer_number': dup['offer_number'],
         }), 409
 
+    validity_days = int(_num(data.get('validityDays', 30)) or 30)
     db.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, raw_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+         status, incoterm, container_count, validity_days, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (
             offer_num,
             data.get('client', ''),
@@ -2197,11 +3147,12 @@ def save_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             'pending',
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             raw_hash,
             now_iso(),
         )
@@ -2297,18 +3248,30 @@ def update_full_offer():
         computed.append(line)
 
     totals = compute_totals(computed)
-    product_cost = totals['cost_exw_eur']
-    cost_total = product_cost + logistic
-    total_final = cost_total / max(1 - margin_pct, 0.01) if margin_pct < 1 else cost_total
+    # Fuente única de cálculo + persistir breakdown en lines_json (igual que save_offer).
+    breakdown = build_offer_breakdown(input_lines, computed, margin_pct, logistic)
+    product_cost = breakdown['totals']['product_cost_eur']
+    logistic_eur = breakdown['totals']['logistic_eur']
+    total_final = breakdown['totals']['sale_eur']
+    for li, br in zip(input_lines, breakdown['lines']):
+        li.update({
+            'qty_waste': br['qty_waste'],
+            'cost_line_eur': br['cost_line_eur'],
+            'log_line_eur': br['log_line_eur'],
+            'sale_line_eur': br['sale_line_eur'],
+            'sale_unit_eur': br['sale_unit_eur'],
+            'margin_applied_pct': br['margin_pct'],
+        })
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
+    validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
     db.execute(
         '''UPDATE pending_offers SET
            offer_number = ?, client_name = ?, project_name = ?,
            waste_pct = ?, margin_pct = ?, fx_rate = ?,
            lines_json = ?, total_product_eur = ?, total_logistic_eur = ?,
            total_final_eur = ?, incoterm = ?, container_count = ?,
-           raw_hash = ?, updated_at = ?
+           validity_days = ?, raw_hash = ?, updated_at = ?
            WHERE id = ?''',
         (
             data.get('offerNumber', existing['offer_number']),
@@ -2319,10 +3282,11 @@ def update_full_offer():
             fx,
             json.dumps(input_lines),
             round(product_cost, 2),
-            round(logistic, 2),
+            round(logistic_eur, 2),
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
+            validity_days,
             compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
             now_iso(),
             edit_id,
@@ -2385,6 +3349,150 @@ def config_delete():
         return jsonify({'ok': False, 'error': 'Tipo inválido'}), 400
     db.commit()
     return jsonify({'ok': True})
+
+
+# ── API: Compute logistics (motor nuevo — fase C spec logística) ────
+@app.route('/api/compute-logistics', methods=['POST'])
+@login_required
+def api_compute_logistics():
+    """Calcula contenedores + imputación de coste por SKU usando el motor
+    de logistics/engine.py. Reemplaza la estimación lump-sum del motor viejo.
+
+    Payload esperado:
+      {
+        "lines": [{"sku": "...", "qty": 120, "waste_pct": 5}, ...],
+        "container_type": "40HC",
+        "cost_per_container_eur": 5500.0
+      }
+
+    Respuesta:
+      {
+        "ok": true,
+        "n_containers": 5,
+        "dominant_family": "PLACAS",
+        "dominant_driver": "pallets",
+        "total_cost_eur": 27500,
+        "per_sku": [
+          {"sku": "...", "unit_log_cost_eur": 3.54, "m2_log_cost_eur": 1.18,
+           "pallets": 10, "weight_total_kg": 12500}
+        ]
+      }
+    """
+    from logistics.engine import ContainerProfile, PalletProfile, SkuInput, compute_logistics
+
+    db = get_db()
+    data = request.get_json() or {}
+    lines_in = data.get('lines') or []
+    container_type = data.get('container_type') or '40HC'
+    cost_per_container = float(data.get('cost_per_container_eur') or 0)
+
+    if not lines_in:
+        return jsonify({'ok': False, 'error': 'sin líneas'}), 400
+
+    # Container profile.
+    cp_row = db.execute(
+        'SELECT * FROM container_profiles WHERE type = ?', (container_type,)
+    ).fetchone()
+    if not cp_row:
+        return jsonify({'ok': False, 'error': f'container_type {container_type!r} no existe'}), 400
+    container = ContainerProfile(
+        type=cp_row['type'],
+        inner_length_m=cp_row['inner_length_m'],
+        inner_width_m=cp_row['inner_width_m'],
+        inner_height_m=cp_row['inner_height_m'],
+        payload_kg=cp_row['payload_kg'],
+        door_clearance_m=cp_row['door_clearance_m'],
+        stowage_factor=cp_row['stowage_factor'],
+    )
+
+    # Pallet profiles por familia.
+    pallet_profiles: dict[str, PalletProfile] = {}
+    for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
+        pallet_profiles[r['category']] = PalletProfile(
+            category=r['category'],
+            length_m=r['pallet_length_m'],
+            width_m=r['pallet_width_m'],
+            height_m=r['pallet_height_m'],
+            stackable_levels=r['stackable_levels'],
+            allow_mix_floor=bool(r['allow_mix_floor']),
+        )
+
+    # Build SkuInputs: completa metadata faltante desde la tabla products.
+    skus: list[SkuInput] = []
+    for ln in lines_in:
+        sku = str(ln.get('sku') or '').strip()
+        if not sku:
+            continue
+        waste_pct = float(ln.get('waste_pct') or 0) / 100
+        qty_raw = float(ln.get('qty') or 0)
+        qty = math.ceil(qty_raw * (1 + waste_pct))
+        if qty <= 0:
+            continue
+        # Pull product metadata.
+        p = db.execute(
+            'SELECT category, unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet, '
+            'pallet_length_m, pallet_width_m, pallet_height_m, pallet_weight_kg, '
+            'stackable_levels, allow_mix_floor '
+            'FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not p:
+            continue
+        category = p['category']
+        if category not in pallet_profiles:
+            continue  # familia sin perfil — skip silencioso
+        upp = p['units_per_pallet'] or 0
+        sqm_pp = p['sqm_per_pallet']
+        unit_area_m2 = (float(sqm_pp) / float(upp)) if (upp and sqm_pp) else 0
+        skus.append(SkuInput(
+            sku=sku,
+            category=category,
+            qty=qty,
+            unit_weight_kg=float(p['kg_per_unit'] or 0),
+            unit_area_m2=unit_area_m2,
+            units_per_pallet=float(upp) if upp else 1,
+            pallet_length_m=p['pallet_length_m'],
+            pallet_width_m=p['pallet_width_m'],
+            pallet_height_m=p['pallet_height_m'],
+            pallet_weight_kg=p['pallet_weight_kg'],
+            stackable_levels=p['stackable_levels'],
+        ))
+
+    if not skus:
+        return jsonify({'ok': False, 'error': 'ningún SKU válido'}), 400
+
+    try:
+        result = compute_logistics(skus, container, pallet_profiles, cost_per_container)
+    except KeyError as e:
+        return jsonify({'ok': False, 'error': f'familia sin perfil: {e}'}), 400
+
+    return jsonify({
+        'ok': True,
+        'n_containers': result.n_containers,
+        'dominant_family': result.dominant_family,
+        'dominant_driver': result.dominant_driver,
+        'total_cost_eur': result.total_cost_eur,
+        'extra_containers_by_family': result.extra_containers_by_family,
+        'families': {
+            cat: {
+                'total_pallets': fr.total_pallets,
+                'total_weight_kg': fr.total_weight_kg,
+                'total_cbm': fr.total_cbm,
+                'cap_geo_per_container': fr.cap_geo_per_container,
+                'n_alone': fr.n_alone,
+                'dominant_driver': fr.dominant_driver,
+            } for cat, fr in result.families.items()
+        },
+        'per_sku': [
+            {
+                'sku': s.sku,
+                'category': s.category,
+                'pallets': s.pallets,
+                'weight_total_kg': s.weight_total_kg,
+                'unit_log_cost_eur': s.unit_log_cost_eur,
+                'm2_log_cost_eur': s.m2_log_cost_eur,
+            } for s in result.skus
+        ],
+    })
 
 
 # ── API: Delete offer ────────────────────────────────────────────
@@ -2656,7 +3764,7 @@ def offer_pdf(offer_id):
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
         leftMargin=15*mm, rightMargin=15*mm,
-        topMargin=15*mm, bottomMargin=15*mm,
+        topMargin=10*mm, bottomMargin=10*mm,
     )
     
     # Paleta oficial Arias Group (de la factura proforma real)
@@ -2687,12 +3795,14 @@ def offer_pdf(offer_id):
         'brand': S('brand', fontSize=8, textColor=GOLD, fontName='Helvetica-Bold', leading=10),
         'subtitle': S('sub', fontSize=9, textColor=NAVY, fontName='Helvetica', leading=12),
         'systems': S('sys', fontSize=8, textColor=MGRAY, fontName='Helvetica', leading=10),
-        'h1': S('h1', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', leading=11),
+        'h1': S('h1', fontSize=11, textColor=NAVY, fontName='Helvetica-Bold', leading=13, spaceAfter=2),
         'p': S('p', fontSize=7.5, textColor=INK, fontName='Helvetica', leading=11),
         'small': S('small', fontSize=7, textColor=MGRAY, fontName='Helvetica', leading=9),
         'bold': S('bold', fontSize=7.5, textColor=NAVY, fontName='Helvetica-Bold', leading=11),
         'right': S('right', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_RIGHT, leading=11),
         'center': S('center', fontSize=7.5, textColor=NAVY, fontName='Helvetica', alignment=TA_CENTER, leading=11),
+        'th_c': S('thc', fontSize=7.5, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER, leading=11),
+        'th_r': S('thr', fontSize=7.5, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT, leading=11),
         'cond': S('cond', fontSize=7, textColor=INK, fontName='Helvetica', leading=10),
         'total_l': S('tl', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
         'total_v': S('tv', fontSize=9, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_RIGHT),
@@ -2712,31 +3822,31 @@ def offer_pdf(offer_id):
     # Header: logo sobre fondo blanco + barra navy con texto
     logo_path = str(BASE_DIR / 'static' / 'logos' / 'arias_group_logo_1000px.png')
     if os.path.exists(logo_path):
-        logo_row = Table([[RLImage(logo_path, width=55*mm, height=20*mm, kind='proportional'), '']],
+        logo_row = Table([[RLImage(logo_path, width=45*mm, height=16*mm, kind='proportional'), '']],
                          colWidths=[W*0.4, W*0.6])
         logo_row.setStyle(TableStyle([
             ('LEFTPADDING', (0,0), (0,0), 0),
             ('TOPPADDING', (0,0), (-1,-1), 0),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 1),
             ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
         ]))
         story.append(logo_row)
     hdr = [[
-        Paragraph('ARIAS GROUP CARIBE', S('brand_h', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
-        Paragraph('PROPUESTA TÉCNICA Y COMERCIAL', S('pt', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h', fontSize=10, textColor=WHITE, fontName='Helvetica-Bold', leading=12)),
+        Paragraph('PROPUESTA ECONÓMICA', S('pt', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr_tbl = Table(hdr, colWidths=[W*0.3, W*0.7])
     hdr_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), NAVY),
-        ('TOPPADDING', (0,0), (-1,-1), 10),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
         ('LEFTPADDING', (0,0), (0,0), 14),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
     ]))
     story.append(hdr_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('Sistemas Constructivos Fassa Bortolo', sty['systems']))
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 3*mm))
     
     # Reference block
     ref_data = [
@@ -2754,35 +3864,45 @@ def offer_pdf(offer_id):
     ref_tbl = Table(ref_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
     ref_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), LGRAY),
-        ('TOPPADDING', (0,0), (-1,-1), 3),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
         ('LEFTPADDING', (0,0), (-1,-1), 5),
         ('RIGHTPADDING', (0,0), (-1,-1), 5),
         ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#CCCCCC')),
     ]))
     story.append(ref_tbl)
-    story.append(Spacer(1, 5*mm))
-    
+    story.append(Spacer(1, 4*mm))
+
     # Section 1
     story.append(Paragraph('1.  OBJETO Y ALCANCE', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('La presente propuesta cubre el suministro de materiales del sistema <b>Suministro completo</b>, fabricados por Fassa Bortolo (Italia/España), para el proyecto <b>{}</b>. Arias Group Caribe SRL actúa como distribuidor técnico exclusivo para República Dominicana y el Caribe.'.format(offer['project_name']), sty['p']))
     story.append(Paragraph('Alcance específico: Suministro de materiales — ver detalle hoja 2', sty['p']))
     story.append(Spacer(1, 4*mm))
-    
-    # Section 2 — RESUMEN (sin listar líneas; detalle completo va en Hoja 2)
+
+    # Section 2 — RESUMEN (precalcula totales logísticos para dar contexto)
     story.append(Paragraph('2.  RESUMEN ECONÓMICO', sty['h1']))
-    story.append(Spacer(1, 2*mm))
     n_lineas = len(lines)
-    total_prod_eur = offer['total_product_eur'] or 0
-    total_log_eur = offer['total_logistic_eur'] or 0
+    agg_for_summary = _aggregate_lines_by_sku(lines)
+    sum_units = 0
+    sum_pallets = 0
+    sum_kg = 0.0
+    for _l in agg_for_summary:
+        q_w = math.ceil(_l['qty'] * (1 + offer['waste_pct']/100))
+        sum_units += q_w
+        _p = db.execute('SELECT units_per_pallet, kg_per_unit FROM products WHERE sku = ?', (_l['sku'],)).fetchone()
+        if _p and _p['units_per_pallet'] and _p['units_per_pallet'] > 0:
+            sum_pallets += math.ceil(q_w / _p['units_per_pallet'])
+        if _p and _p['kg_per_unit']:
+            sum_kg += q_w * _p['kg_per_unit']
     econ_data = [
-        [Paragraph('<b>Concepto</b>', sty['center']), Paragraph('<b>Importe</b>', sty['center'])],
-        [Paragraph(f'Nº de referencias incluidas', sty['p']), Paragraph(f'{n_lineas}', sty['right'])],
-        [Paragraph('Subtotal productos (EUR)', sty['p']), Paragraph(f'€ {total_prod_eur:,.2f}', sty['right'])],
-        [Paragraph('Logística (EUR)', sty['p']), Paragraph(f'€ {total_log_eur:,.2f}', sty['right'])],
-        [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (EUR)</b>', sty['bold']), Paragraph(f'<b>€ {total_eur:,.2f}</b>', sty['right'])],
-        [Paragraph(f'Tipo de cambio EUR/USD', sty['p']), Paragraph(f'{fx:.4f}', sty['right'])],
+        [Paragraph('Concepto', sty['th_c']), Paragraph('Detalle', sty['th_c'])],
+        [Paragraph('Nº de referencias', sty['p']), Paragraph(f'{n_lineas}', sty['right'])],
+        [Paragraph('Unidades totales', sty['p']), Paragraph(f'{sum_units:,}', sty['right'])],
+        [Paragraph('Palés totales', sty['p']), Paragraph(f'{sum_pallets:,}' if sum_pallets else '—', sty['right'])],
+        [Paragraph('Peso bruto aproximado', sty['p']), Paragraph(f'{sum_kg:,.0f} kg' if sum_kg else '—', sty['right'])],
+        [Paragraph('Moneda', sty['p']), Paragraph('USD (dólares estadounidenses)', sty['right'])],
+        [Paragraph('Tipo de cambio aplicado', sty['p']), Paragraph(f'{fx:.3f} EUR/USD', sty['right'])],
         [Paragraph(f'<b>TOTAL {offer["incoterm"] or "EXW"} (USD)</b>', sty['bold']), Paragraph(f'<b>$ {total_usd:,.2f}</b>', sty['right'])],
     ]
     econ_tbl = Table(econ_data, colWidths=[W*0.65, W*0.35])
@@ -2790,9 +3910,7 @@ def offer_pdf(offer_id):
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
         ('BACKGROUND', (0,-1), (-1,-1), GOLD_SOFT),
-        ('BACKGROUND', (0,-3), (-1,-3), BONE),
         ('LINEABOVE', (0,-1), (-1,-1), 1, GOLD),
-        ('LINEABOVE', (0,-3), (-1,-3), 0.5, GOLD),
         ('LINEBELOW', (0,0), (-1,-2), 0.3, colors.HexColor('#CCCCCC')),
         ('TOPPADDING', (0,0), (-1,-1), 4),
         ('BOTTOMPADDING', (0,0), (-1,-1), 4),
@@ -2800,22 +3918,23 @@ def offer_pdf(offer_id):
         ('RIGHTPADDING', (0,0), (-1,-1), 6),
     ]))
     story.append(econ_tbl)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('* Importes sujetos a confirmación de pedido formal. No incluyen impuestos locales ni gastos de aduana en destino. Detalle línea-a-línea en Hoja 2.', sty['small']))
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 3
     story.append(Paragraph('3.  CONDICIONES COMERCIALES', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
+    validity = int(offer['validity_days']) if offer['validity_days'] else 30
     conds = [
         ('Pago', '100% prepago por transferencia bancaria antes de emisión de orden de producción.'),
-        ('Validez de oferta', f"{int(offer['margin_pct'])} días calendario desde la fecha de emisión."),
+        ('Validez de oferta', f"{validity} días calendario desde la fecha de emisión."),
         ('Plazo de entrega', 'Según confirmación de fábrica tras recepción de pago.'),
         ('Puerto de embarque', 'Valencia, España'),
         ('Incoterm aplicable', f"{offer['incoterm'] or 'EXW'} — riesgo y responsabilidad se transfieren al comprador."),
         ('Divisa', 'USD (dólares estadounidenses)'),
     ]
-    cond_data = [[Paragraph('<b>Concepto</b>', sty['center']), Paragraph('<b>Detalle</b>', sty['center'])]]
+    cond_data = [[Paragraph('Concepto', sty['th_c']), Paragraph('Detalle', sty['th_c'])]]
     for label, detail in conds:
         cond_data.append([Paragraph(f"<b>{label}</b>", sty['bold']), Paragraph(detail, sty['p'])])
     cond_tbl = Table(cond_data, colWidths=[W*0.25, W*0.75])
@@ -2824,17 +3943,17 @@ def offer_pdf(offer_id):
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
         ('BACKGROUND', (0,1), (0,-1), LGRAY),
         ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
-        ('TOPPADDING', (0,0), (-1,-1), 3),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
         ('LEFTPADDING', (0,0), (-1,-1), 5),
         ('RIGHTPADDING', (0,0), (-1,-1), 5),
     ]))
     story.append(cond_tbl)
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 4
     story.append(Paragraph('4.  OBSERVACIONES TÉCNICAS', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     obs = [
         'Los materiales ofertados cuentan con marcado CE y están fabricados bajo estándares europeos (EN, ETA según aplique).',
         'Producto de origen europeo (Italia/España) con trazabilidad de lote.',
@@ -2844,13 +3963,13 @@ def offer_pdf(offer_id):
     for o in obs:
         story.append(Paragraph(f"•  {o}", sty['cond']))
     story.append(Spacer(1, 4*mm))
-    
+
     # Section 5
     story.append(Paragraph('5.  ACEPTACIÓN Y FIRMA', sty['h1']))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
     story.append(Paragraph('Para confirmar esta propuesta, el cliente deberá firmar y devolver este documento. La firma implica aceptación de las condiciones comerciales indicadas.', sty['p']))
-    story.append(Spacer(1, 4*mm))
-    
+    story.append(Spacer(1, 3*mm))
+
     sig_data = [[
         Paragraph('<b>ARIAS GROUP CARIBE SRL</b><br/>RNC: 1-33-63109-1<br/>Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203<br/>Santo Domingo, D.N.<br/><br/>___________________________<br/>Director Comercial<br/>Fecha: _______________', sty['sig']),
         Paragraph(f'<b>{client_company}</b><br/>RNC: {client_rnc}<br/>{offer["client_name"]}<br/><br/>___________________________<br/>Firma y sello<br/>Fecha: _______________', sty['sig']),
@@ -2858,11 +3977,11 @@ def offer_pdf(offer_id):
     sig_tbl = Table(sig_data, colWidths=[W*0.5, W*0.5])
     sig_tbl.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
     ]))
     story.append(sig_tbl)
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 2*mm))
     story.append(Paragraph('Esta propuesta es de carácter confidencial y está dirigida exclusivamente al destinatario indicado.', sty['footer']))
     story.append(PageBreak())
     
@@ -2882,8 +4001,8 @@ def offer_pdf(offer_id):
         ]))
         story.append(logo_row2)
     hdr2 = [[
-        Paragraph('ARIAS GROUP CARIBE', S('brand_h2', fontSize=10, textColor=GOLD, fontName='Helvetica-Bold', leading=12)),
-        Paragraph('DETALLE DE PRODUCTOS', S('dp', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
+        Paragraph('ARIAS GROUP CARIBE', S('brand_h2', fontSize=10, textColor=WHITE, fontName='Helvetica-Bold', leading=12)),
+        Paragraph('DESGLOSE PRESUPUESTO', S('dp', fontSize=11, textColor=WHITE, fontName='Helvetica-Bold', alignment=TA_CENTER)),
     ]]
     hdr2_tbl = Table(hdr2, colWidths=[W*0.3, W*0.7])
     hdr2_tbl.setStyle(TableStyle([
@@ -2898,25 +4017,37 @@ def offer_pdf(offer_id):
     story.append(Paragraph(f'{offer["project_name"]}  ·  Ref. {offer["offer_number"]}', sty['systems']))
     story.append(Spacer(1, 6*mm))
     
-    # Products table with auto-calculated pallets/m2
+    # Products table — desglose cara-cliente (sin palés/m²; ir a resumen log. si CIF)
     prod_data = [[
-        Paragraph('<b>Descripción producto</b>', sty['center']),
-        Paragraph('<b>Ref. Fassa</b>', sty['center']),
-        Paragraph('<b>Ud.</b>', sty['center']),
-        Paragraph('<b>Cantidad</b>', sty['center']),
-        Paragraph('<b>Palés</b>', sty['center']),
-        Paragraph('<b>M²</b>', sty['center']),
-        Paragraph('<b>Precio/ud (€)</b>', sty['right']),
-        Paragraph('<b>Total (€)</b>', sty['right']),
+        Paragraph('Descripción producto', sty['th_c']),
+        Paragraph('Ref. Fassa', sty['th_c']),
+        Paragraph('Ud.', sty['th_c']),
+        Paragraph('Cantidad', sty['th_c']),
+        Paragraph('Precio/ud ($)', sty['th_r']),
+        Paragraph('Total ($)', sty['th_r']),
     ]]
     total_pal = 0
     total_m2 = 0
     total_kg = 0
     # Agregar líneas con mismo SKU para la tabla de detalle (evita duplicados)
     detail_lines = _aggregate_lines_by_sku(lines)
+    # Para ofertas nuevas (post-2026-04-24): lines_json ya trae qty_waste,
+    # sale_line_eur y sale_unit_eur calculados en el momento de guardar
+    # (build_offer_breakdown). Se leen tal cual, sin recalcular.
+    # Para ofertas viejas (sin esos campos): fallback al prorrateo por
+    # proporción de coste, que era el comportamiento previo.
+    product_cost_eur = offer['total_product_eur'] or 0
     for line in detail_lines:
-        qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
-        sub = line['price'] * qty_waste
+        if 'sale_line_eur' in line and 'qty_waste' in line:
+            qty_waste = int(line['qty_waste'])
+            sale_line_eur = _num(line['sale_line_eur'])
+            sale_unit_eur = _num(line.get('sale_unit_eur', sale_line_eur / qty_waste if qty_waste else 0))
+            price_unit_sale_usd = sale_unit_eur * fx
+        else:
+            qty_waste = math.ceil(line['qty'] * (1 + offer['waste_pct']/100))
+            cost_line_eur = line['price'] * qty_waste
+            sale_line_eur = (cost_line_eur / product_cost_eur * total_eur) if product_cost_eur > 0 else 0
+            price_unit_sale_usd = (sale_line_eur / qty_waste * fx) if qty_waste else 0
 
         # Lookup product for pallet/m2/kg data
         prod = db.execute('SELECT units_per_pallet, sqm_per_pallet, kg_per_unit FROM products WHERE sku = ?',
@@ -2938,63 +4069,67 @@ def offer_pdf(offer_id):
             Paragraph(line['sku'], sty['center']),
             Paragraph(line.get('unit', 'ud'), sty['center']),
             Paragraph(f'{qty_waste:,}', sty['center']),
-            Paragraph(str(pal) if pal else '—', sty['center']),
-            Paragraph(f'{m2:,.0f}' if m2 else '—', sty['center']),
-            Paragraph(f"€ {line['price']:,.2f}", sty['right']),
-            Paragraph(f"€ {sub:,.2f}", sty['right']),
+            Paragraph(f"$ {price_unit_sale_usd:,.2f}", sty['right']),
+            Paragraph(f"$ {sale_line_eur * fx:,.2f}", sty['right']),
         ])
-    
-    prod_data.append(['', '', '', '', '', '',
+
+    prod_data.append(['', '', '', '',
         Paragraph('<b>TOTAL</b>', sty['bold']),
-        Paragraph(f"<b>€ {total_eur:,.2f}</b>", sty['right']),
+        Paragraph(f"<b>$ {total_usd:,.2f}</b>", sty['right']),
     ])
-    prod_data.append(['', '', '', '', '', '',
-        Paragraph(f'TC EUR/USD: {fx:.4f}', sty['small']),
-        Paragraph(f"<b>$ {total_usd:,.2f} USD</b>", sty['right']),
-    ])
-    
-    prod_tbl = Table(prod_data, colWidths=[W*0.30, W*0.14, W*0.06, W*0.09, W*0.06, W*0.10, W*0.11, W*0.14])
+
+    prod_tbl = Table(prod_data, colWidths=[W*0.38, W*0.16, W*0.08, W*0.12, W*0.12, W*0.14])
     prod_tbl.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), NAVY),
         ('TEXTCOLOR', (0,0), (-1,0), WHITE),
-        ('BACKGROUND', (0,-2), (-1,-1), GOLD_SOFT),
-        ('BACKGROUND', (0,-3), (-1,-3), BONE),
-        ('LINEBELOW', (0,0), (-1,-4), 0.3, colors.HexColor('#CCCCCC')),
-        ('LINEABOVE', (0,-3), (-1,-3), 1, GOLD),
+        ('BACKGROUND', (0,-1), (-1,-1), GOLD_SOFT),
+        ('LINEBELOW', (0,0), (-1,-2), 0.3, colors.HexColor('#CCCCCC')),
+        ('LINEABOVE', (0,-1), (-1,-1), 1, GOLD),
         ('TOPPADDING', (0,0), (-1,-1), 3),
         ('BOTTOMPADDING', (0,0), (-1,-1), 3),
         ('LEFTPADDING', (0,0), (-1,-1), 4),
         ('RIGHTPADDING', (0,0), (-1,-1), 4),
     ]))
     story.append(prod_tbl)
+    waste_pct_int = int(round(offer['waste_pct'] or 0))
+    if waste_pct_int > 0:
+        story.append(Spacer(1, 1*mm))
+        story.append(Paragraph(
+            f'* Cantidades incluyen {waste_pct_int}% de merma sobre la necesidad neta del proyecto.',
+            sty['small'],
+        ))
     story.append(Spacer(1, 6*mm))
-    
-    # Logistics summary
-    story.append(Paragraph('RESUMEN LOGÍSTICO', sty['h1']))
-    story.append(Spacer(1, 2*mm))
-    log_data = [
-        [Paragraph('<b>Puerto salida</b>', sty['bold']), Paragraph('Valencia, España', sty['p']),
-         Paragraph('<b>Puerto destino</b>', sty['bold']), Paragraph('Puerto Caucedo, R. Dominicana', sty['p'])],
-        [Paragraph('<b>Tipo contenedor</b>', sty['bold']), Paragraph("40' Standard", sty['p']),
-         Paragraph('<b>Nº contenedores</b>', sty['bold']), Paragraph(str(offer['container_count'] or 0), sty['p'])],
-        [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(f'{total_pal:,}' if total_pal else '—', sty['p']),
-         Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'{total_kg:,.0f} kg' if total_kg else '—', sty['p'])],
-        [Paragraph('<b>M² totales</b>', sty['bold']), Paragraph(f'{total_m2:,.0f} m²' if total_m2 else '—', sty['p']),
-         Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(offer['incoterm'] or 'EXW', sty['p'])],
-        [Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p']),
-         Paragraph('', sty['p']), Paragraph('', sty['p'])],
-    ]
-    log_tbl = Table(log_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
-    log_tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), LGRAY),
-        ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-        ('LEFTPADDING', (0,0), (-1,-1), 6),
-        ('RIGHTPADDING', (0,0), (-1,-1), 6),
-    ]))
-    story.append(log_tbl)
-    story.append(Spacer(1, 6*mm))
+
+    # Logistics summary — solo cuando el flete lo gestiona Arias (no-EXW).
+    # En EXW el cliente se encarga del transporte; incluir puerto destino,
+    # contenedores, etc. confunde porque no aplica al alcance del pedido.
+    incoterm_upper = (offer['incoterm'] or 'EXW').upper()
+    if incoterm_upper != 'EXW':
+        story.append(Paragraph('RESUMEN LOGÍSTICO', sty['h1']))
+        story.append(Spacer(1, 2*mm))
+        log_data = [
+            [Paragraph('<b>Puerto salida</b>', sty['bold']), Paragraph('Valencia, España', sty['p']),
+             Paragraph('<b>Puerto destino</b>', sty['bold']), Paragraph('Puerto Caucedo, R. Dominicana', sty['p'])],
+            [Paragraph('<b>Tipo contenedor</b>', sty['bold']), Paragraph("40' Standard", sty['p']),
+             Paragraph('<b>Nº contenedores</b>', sty['bold']), Paragraph(str(offer['container_count'] or 0), sty['p'])],
+            [Paragraph('<b>Palés totales</b>', sty['bold']), Paragraph(f'{total_pal:,}' if total_pal else '—', sty['p']),
+             Paragraph('<b>Peso bruto total</b>', sty['bold']), Paragraph(f'{total_kg:,.0f} kg' if total_kg else '—', sty['p'])],
+            [Paragraph('<b>M² totales</b>', sty['bold']), Paragraph(f'{total_m2:,.0f} m²' if total_m2 else '—', sty['p']),
+             Paragraph('<b>Incoterm</b>', sty['bold']), Paragraph(incoterm_upper, sty['p'])],
+            [Paragraph('<b>Plazo entrega est.</b>', sty['bold']), Paragraph('Según confirmación', sty['p']),
+             Paragraph('', sty['p']), Paragraph('', sty['p'])],
+        ]
+        log_tbl = Table(log_data, colWidths=[W*0.18, W*0.32, W*0.18, W*0.32])
+        log_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), LGRAY),
+            ('LINEBELOW', (0,0), (-1,-1), 0.3, colors.HexColor('#CCCCCC')),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(log_tbl)
+        story.append(Spacer(1, 6*mm))
     story.append(Paragraph('Arias Group Caribe SRL  ·  RNC 1-33-63109-1  ·  Av. Independencia Km 6, Plaza Comercial Átala I, Suite 203, Santo Domingo, D.N.  ·  Distribución técnica Fassa Bortolo', sty['footer']))
     
     doc.build(story)
@@ -3626,10 +4761,35 @@ def api_ficha_tecnica(sku):
     return jsonify({'ok': True, 'ficha': ficha})
 
 
-if __name__ == '__main__':
+def _bootstrap_db() -> None:
+    """Idempotent: CREATE TABLE IF NOT EXISTS + seed solo si tablas vacías."""
+    db_path = Path(app.config['DATABASE'])
+    parent = db_path.parent
+    print(f'[bootstrap] DB_PATH={db_path}')
+    print(f'[bootstrap] parent={parent} exists={parent.exists()}')
+    # En Render la carpeta del Disk puede existir pero la app necesita crear
+    # subdirectorios propios; mkdir -p es no-op si ya existe.
+    parent.mkdir(parents=True, exist_ok=True)
+    print(f'[bootstrap] parent writable={os.access(parent, os.W_OK)}')
     with app.app_context():
         init_db()
         seed_db()
+    print(f'[bootstrap] init/seed OK → db_exists={db_path.exists()} size={db_path.stat().st_size if db_path.exists() else 0}')
+
+
+# Bootstrap on import cuando se sirve bajo WSGI (waitress/gunicorn en Render).
+# `python app.py` sigue pasando por __main__ más abajo. Tests no setean el flag.
+if os.environ.get('RUN_INIT_ON_IMPORT') == '1':
+    try:
+        _bootstrap_db()
+    except Exception as e:
+        import traceback
+        print(f'[bootstrap] init/seed falló: {e}')
+        traceback.print_exc()
+
+
+if __name__ == '__main__':
+    _bootstrap_db()
     host = os.environ.get('FLASK_HOST', '127.0.0.1')
     port = int(os.environ.get('FLASK_PORT', '5001'))
     app.run(debug=_debug, host=host, port=port)

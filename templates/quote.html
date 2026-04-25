@@ -33,7 +33,9 @@
   </div>
   <div>
     <label>Nº Oferta</label>
-    <input type="text" id="offerNumber" placeholder="2026-001">
+    <input type="text" id="offerNumber" placeholder="Se asigna al guardar" readonly
+           title="El número de oferta se asigna automáticamente al guardar para garantizar unicidad."
+           style="background:#f5f5f5; color:#666;">
   </div>
 </div>
 
@@ -116,7 +118,14 @@
 <div class="row" style="margin-top:6px;">
   <div><label>Desperdicio %</label><input type="number" id="wasteInput" value="5" min="0" max="50" step="1" oninput="recalcAll()"></div>
   <div><label>Margen base %</label><input type="number" id="marginInput" value="20" min="0" max="100" step="1" oninput="applyGlobalMargin()"></div>
-  <div><label>FX EUR/USD</label><input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001" oninput="recalcAll()"></div>
+  <div>
+    <label>FX EUR/USD</label>
+    <input type="number" id="fxInput" value="{{ fx_rate }}" step="0.001"
+           oninput="recalcAll(); checkFxWarning();"
+           data-official="{{ fx_rate }}">
+    <div id="fxWarning" style="display:none; font-size:0.75em; color:#b8860b; margin-top:2px;"></div>
+  </div>
+  <div><label>Validez (días)</label><input type="number" id="validityInput" value="30" min="1" max="365" step="1"></div>
   <div>
     <label>Incoterm</label>
     <select id="incotermSelect" onchange="onIncotermChange()">
@@ -139,13 +148,16 @@
         {% endfor %}
       </select>
     </div>
-    <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="recalcAll()"></div>
+    <div><label>Nº Contenedores</label><input type="number" id="containerCount" value="0" min="0" step="1" onchange="onContainerCountChange()"></div>
     <div><label>Margen logística %</label><input type="number" id="logMarginInput" value="0" min="0" max="50" step="1" oninput="recalcAll()"></div>
     <div><label>Coste logístico</label><div id="logisticCostDisplay" class="mono">€ 0.00</div></div>
+    <div style="align-self:end;">
+      <button type="button" onclick="recomputeLogistics()" title="Usa el motor nuevo con drivers físicos (geometría + peso + volumen)">🔄 Calcular logística</button>
+      <div id="logisticsState" class="muted" style="font-size:0.85em; margin-top:2px;">no calculado</div>
+    </div>
   </div>
 </div>
 
-<div id="containerAdvice" style="display:none; margin-top:8px; padding:6px 10px; border:1px solid #888; background:#fafafa; font-size:12px;"></div>
 
 <table style="margin-top:10px;">
   <thead>
@@ -155,9 +167,13 @@
       <th>Familia</th>
       <th>Unidad</th>
       <th class="num">Precio €</th>
+      <th class="num">Precio $</th>
       <th class="num">Cant.</th>
+      <th class="num" title="Coste logístico por unidad. Editable: override manual de la imputación del motor.">Log €/ud</th>
       <th class="num">Margen %</th>
+      <th class="num">PVP $</th>
       <th class="num">Venta €</th>
+      <th class="num">Venta $</th>
       <th></th>
     </tr>
   </thead>
@@ -168,10 +184,42 @@
   <tr><td>Coste producto <span id="wasteLabel"></span></td><td class="num">€ <span id="subtotalProducts">0.00</span></td></tr>
   <tr><td>+ Logística (<span id="incotermLabel">EXW</span>)</td><td class="num">€ <span id="logisticTotal">0.00</span></td></tr>
   <tr><td>= Coste total</td><td class="num">€ <span id="costProduct">0.00</span></td></tr>
-  <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% medio)</td></tr>
+  <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% s/producto)</td></tr>
   <tr><th>TOTAL VENTA €</th><td class="num"><b>€ <span id="totalEur">0.00</span></b></td></tr>
   <tr><td>TOTAL VENTA USD</td><td class="num">$ <span id="totalUsd">0.00</span></td></tr>
 </table>
+
+<details style="margin-top:10px;">
+  <summary style="cursor:pointer; font-weight:bold;">▶ Análisis de competencia <span class="muted" style="font-weight:normal;" id="compSummary"></span></summary>
+  <table style="margin-top:6px;">
+    <thead>
+      <tr>
+        <th>SKU</th>
+        <th class="num">Venta $/ud</th>
+        <th class="num">Competencia $/ud</th>
+        <th class="num">Dif $/ud</th>
+        <th class="num">Dif %</th>
+        <th class="num">Venta línea $</th>
+        <th class="num">Comp línea $</th>
+      </tr>
+    </thead>
+    <tbody id="compBody"></tbody>
+    <tfoot>
+      <tr style="border-top:2px solid #333; font-weight:bold;">
+        <td>Totales</td>
+        <td class="num">—</td>
+        <td class="num">—</td>
+        <td class="num" id="compTotalDifUnit">—</td>
+        <td class="num" id="compTotalDifPct">—</td>
+        <td class="num" id="compTotalSale">$ 0.00</td>
+        <td class="num" id="compTotalComp">$ 0.00</td>
+      </tr>
+    </tfoot>
+  </table>
+  <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima. <b>Precios en USD</b>; la app sigue calculando internamente en EUR y convierte con el FX EUR/USD del input superior.</p>
+</details>
+
+<div id="preflightWarnings" style="display:none; margin-top:8px; padding:8px 12px; border:1px solid #b8860b; background:#fffbea; font-size:0.85em; border-radius:3px;"></div>
 
 <div style="margin-top:8px;">
   <button type="button" onclick="clearAll()">Limpiar</button>
@@ -181,53 +229,6 @@
 <div id="offerBanner" class="flash" style="display:none; margin-top:8px;"></div>
 
 <script>
-// Container optimizer (port from bot V2)
-const CONTAINERS = {
-  '20':   {pallets: 10, kg: 21500, label: "20'"},
-  '40':   {pallets: 20, kg: 26500, label: "40'"},
-  '40HC': {pallets: 24, kg: 26500, label: "40HC"},
-};
-
-function estimateContainersJS(pallets, weightKg, famBreakdown) {
-  if (pallets <= 0 && weightKg <= 0) return null;
-  const fams = Object.keys(famBreakdown || {});
-  const onlyPlates = fams.length === 1 && fams[0] === 'PLACAS';
-  const hasProfiles = fams.includes('PERFILES');
-  let order, note = '';
-  if (hasProfiles) {
-    order = ['40HC', '40'];
-    note = 'PERFILES detectados → 40HC preferente';
-  } else if (onlyPlates) {
-    order = ['20', '40', '40HC'];
-  } else {
-    order = ['40HC', '40', '20'];
-  }
-  // Try single container
-  for (const key of order) {
-    const d = CONTAINERS[key];
-    if (pallets <= d.pallets && weightKg <= d.kg) {
-      const palOcc = d.pallets ? pallets / d.pallets : 0;
-      const weiOcc = d.kg ? weightKg / d.kg : 0;
-      if (onlyPlates) note = 'Solo PLACAS → ' + d.label + ' (cabe en 1)';
-      return {key, label: d.label, units: 1, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, note};
-    }
-  }
-  // Multiple containers
-  let best = null;
-  for (const key of order) {
-    const d = CONTAINERS[key];
-    const uPal = d.pallets > 0 ? Math.ceil(pallets / d.pallets) : 0;
-    const uWei = d.kg > 0 ? Math.ceil(weightKg / d.kg) : 0;
-    const units = Math.max(uPal, uWei, 1);
-    const palOcc = d.pallets ? (pallets / units) / d.pallets : 0;
-    const weiOcc = d.kg ? (weightKg / units) / d.kg : 0;
-    const score = palOcc + weiOcc;
-    if (!best || units < best.units || (units === best.units && score > best.score)) {
-      best = {key, label: d.label, units, palCap: d.pallets, weiCap: d.kg, palletOcc: palOcc, weightOcc: weiOcc, score, note};
-    }
-  }
-  return best;
-}
 
 const products = {{ products|tojson }};
 const systems = {{ systems|tojson }};
@@ -393,7 +394,13 @@ function updateLineQty(i, val) {
   const v = parseFloat(val);
   if (isNaN(v) || v <= 0) return;
   lines[i].qty = v;
-  document.getElementById('containerCount').value = 0;
+  // NO reseteamos containerCount a 0: el motor nuevo lo fija con Calcular
+  // logística y queremos que persista hasta que Ana vuelva a clicar.
+  // Marcamos la logística como "stale" visualmente.
+  const state = document.getElementById('logisticsState');
+  if (state && !state.textContent.includes('stale')) {
+    state.innerHTML = '<span style="color:#a23;">⚠ stale — vuelve a Calcular logística</span>';
+  }
   recalcAll();
 }
 
@@ -419,7 +426,98 @@ function addSystem() {
 function removeLine(i) { lines.splice(i, 1); recalcAll(); }
 function clearAll() { lines.length = 0; recalcAll(); document.getElementById('offerBanner').style.display = 'none'; }
 
+function updateLineLogCost(i, val) {
+  const v = parseFloat(val);
+  lines[i].logUnitCost = isNaN(v) ? 0 : v;
+  lines[i].logCostManual = true;
+  recalcAll();
+}
+
+async function recomputeLogistics() {
+  if (lines.length === 0) { alert('Añade al menos un producto.'); return; }
+  const wasteInput = parseFloat(document.getElementById('wasteInput').value);
+  const wastePct = isNaN(wasteInput) ? 5 : wasteInput;
+  const routeSel = document.getElementById('routeSelect');
+  const routeOpt = routeSel.options[routeSel.selectedIndex];
+  // Asumimos 40HC por defecto — el motor decidirá si el mix de pesos/geometrías lo justifica.
+  const containerType = '40HC';
+  const costPerCont = routeOpt && routeOpt.value
+    ? (parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0)
+    : 0;
+  const state = document.getElementById('logisticsState');
+  state.textContent = 'calculando…';
+  try {
+    const r = await fetch('/api/compute-logistics', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        lines: lines.map(l => ({ sku: l.sku, qty: l.qty, waste_pct: wastePct })),
+        container_type: containerType,
+        cost_per_container_eur: costPerCont,
+      }),
+    });
+    const j = await r.json();
+    if (!j.ok) { state.textContent = 'error: ' + (j.error || r.status); return; }
+    // Populate per-line log cost (respeta overrides manuales del usuario).
+    lines.forEach(l => {
+      if (l.logCostManual) return;  // no pisar ediciones manuales
+      const p = j.per_sku.find(x => x.sku === l.sku);
+      l.logUnitCost = p ? p.unit_log_cost_eur : 0;
+    });
+    // Update container count. Guardamos N + coste/cont del motor para poder
+    // reescalar si el usuario cambia el contador después.
+    document.getElementById('containerCount').value = j.n_containers;
+    window._motorCalc = {
+      nContainers: j.n_containers,
+      costPerContainer: costPerCont,
+    };
+    const drv = {'pallets':'geometría','weight':'peso','cbm':'volumen'}[j.dominant_driver] || j.dominant_driver;
+    state.innerHTML = `<b>${j.n_containers}×${containerType}</b> · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
+    recalcAll();
+  } catch (e) {
+    state.textContent = 'error de red: ' + e.message;
+  }
+}
+
+// Al cambiar manualmente el número de contenedores después de pulsar
+// "Calcular logística", reescalamos el logUnitCost por línea proporcional
+// al nuevo N (asume coste por contenedor constante). Las líneas con
+// override manual (logCostManual=true) no se tocan.
+function onContainerCountChange() {
+  const newN = parseInt(document.getElementById('containerCount').value) || 0;
+  const motor = window._motorCalc;
+  if (motor && motor.nContainers > 0 && newN > 0 && newN !== motor.nContainers) {
+    const ratio = newN / motor.nContainers;
+    lines.forEach(l => {
+      if (l.logCostManual) return;
+      l.logUnitCost = (l.logUnitCost || 0) * ratio;
+    });
+    motor.nContainers = newN;  // nueva referencia para futuras reescaladas
+    const state = document.getElementById('logisticsState');
+    if (state) {
+      state.innerHTML += ` · <span style="color:#b8860b;">ajustado a ${newN} cont.</span>`;
+    }
+  }
+  recalcAll();
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function checkFxWarning() {
+  const input = document.getElementById('fxInput');
+  const warnDiv = document.getElementById('fxWarning');
+  if (!input || !warnDiv) return;
+  const official = parseFloat(input.dataset.official) || 0;
+  const current = parseFloat(input.value) || 0;
+  if (official <= 0 || current <= 0) { warnDiv.style.display = 'none'; return; }
+  const diffPct = Math.abs(current - official) / official * 100;
+  if (diffPct > 5) {
+    warnDiv.innerHTML = `⚠ FX ${current.toFixed(3)} difiere ${diffPct.toFixed(1)}% del oficial (${official.toFixed(3)}). Verifica antes de emitir.`;
+    warnDiv.style.display = 'block';
+  } else {
+    warnDiv.style.display = 'none';
+  }
+}
 
 function fmtN(n, dec) {
   if (dec === undefined) dec = 2;
@@ -447,34 +545,10 @@ function recalcAll() {
   });
   const palletsLogistic = Math.ceil(totalPallets);
 
-  // Family breakdown for container optimization
-  const famBreakdown = {};
-  lines.forEach(l => { famBreakdown[l.family] = (famBreakdown[l.family] || 0) + 1; });
-  const containerRec = estimateContainersJS(palletsLogistic, totalWeight, famBreakdown);
-
-  // Container auto-calc: siempre actualizar con la recomendación
+  // El número de contenedores lo fija el usuario (input manual) o
+  // el motor nuevo con el botón "🔄 Calcular logística".
   const manualContainers = document.getElementById('containerCount');
   let containerCount = parseInt(manualContainers.value) || 0;
-  if (containerRec && containerRec.units > 0) {
-    containerCount = containerRec.units;
-    manualContainers.value = containerCount;
-  }
-
-  // Show recommendation
-  const advDiv = document.getElementById('containerAdvice');
-  if (containerRec && lines.length > 0) {
-    const palOcc = (containerRec.palletOcc * 100).toFixed(0);
-    const weiOcc = (containerRec.weightOcc * 100).toFixed(0);
-    const fams = Object.keys(famBreakdown).join(', ');
-    advDiv.innerHTML = '<b>' + containerRec.units + ' x ' + containerRec.label + '</b>'
-      + ' · Palés: ' + fmtQ(palletsLogistic) + '/' + fmtQ(containerRec.palCap) + ' (' + palOcc + '%)'
-      + ' · Peso: ' + fmtQ(totalWeight) + '/' + fmtQ(containerRec.weiCap) + ' kg (' + weiOcc + '%)'
-      + ' · Familias: ' + fams
-      + (containerRec.note ? ' · <b>' + containerRec.note + '</b>' : '');
-    advDiv.style.display = 'block';
-  } else {
-    advDiv.style.display = 'none';
-  }
 
   // Logistics cost + margin
   const _lm = parseFloat(document.getElementById('logMarginInput').value);
@@ -485,12 +559,10 @@ function recalcAll() {
     const routeSel = document.getElementById('routeSelect');
     const routeOpt = routeSel.options[routeSel.selectedIndex];
     if (routeOpt && routeOpt.value) {
-      if (containerRec) {
-        const rateKey = {'20': 'c20', '40': 'c40', '40HC': 'c40hc'}[containerRec.key] || 'c40hc';
-        oceanFreight = parseFloat(routeOpt.dataset[rateKey]) || parseFloat(routeOpt.dataset.c40hc) || 0;
-      } else {
-        oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
-      }
+      // Sin estimación previa se asume 40HC (el motor nuevo usa 40HC por
+      // defecto). Si el usuario luego cambia el tipo, recomputeLogistics
+      // recalcula con el contenedor real.
+      oceanFreight = parseFloat(routeOpt.dataset.c40hc) || parseFloat(routeOpt.dataset.c40) || 0;
     }
     const logBase = oceanFreight * containerCount;
     logisticCost = logMargin > 0 ? logBase / (1 - logMargin) : logBase;
@@ -507,13 +579,21 @@ function recalcAll() {
   let totalCost = 0;
   let totalSale = 0;
 
+  let totalLogistics = 0;
   lines.forEach((line, i) => {
     const qtyW = Math.ceil(line.qty * (1 + wastePct));
-    const lineCost = line.price * qtyW;
+    const logPerUnit = parseFloat(line.logUnitCost) || 0;
+    const logLine = logPerUnit * qtyW;
+    // Margen se aplica SOLO sobre coste de producto.
+    // Logística pasa como pass-through: se suma a venta pero no genera margen.
+    const costProduct = line.price * qtyW;
     const m = (line.margin || 0) / 100;
-    const lineSale = m < 1 ? lineCost / (1 - m) : lineCost;
+    const saleProduct = m < 1 ? costProduct / (1 - m) : costProduct;
+    const lineSale = saleProduct + logLine;
+    const lineCost = costProduct + logLine;
     totalCost += lineCost;
     totalSale += lineSale;
+    totalLogistics += logLine;
     // Alerta de embalaje: mostrar total uds cuando unit es caja/paquete
     const prod = products.find(p => p.sku === line.sku);
     let packAlert = '';
@@ -526,34 +606,172 @@ function recalcAll() {
         packAlert = `<div style="${color}font-size:0.8em;">${fmtQ(qtyW)} ${line.unit}s = ${fmtQ(totalUds)} uds</div>`;
       }
     }
+    const logInputStyle = line.logCostManual ? 'background:#fff4d6;' : '';
     body.innerHTML += `<tr>
       <td class="mono">${escapeHtml(line.sku)}</td>
       <td>${escapeHtml(line.name)}</td>
       <td>${escapeHtml(line.family)}</td>
       <td>${escapeHtml(line.unit)}</td>
       <td class="num">${fmtN(line.price)}</td>
+      <td class="num">${fmtN(line.price * fx)}</td>
       <td class="num"><input type="number" value="${line.qty}" min="1" step="1"
-          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${packAlert}</td>
+          style="width:70px; text-align:right;" onchange="updateLineQty(${i}, this.value)">${
+            wastePct > 0 && qtyW > line.qty
+              ? `<div style="font-size:0.75em; color:#666;" title="Incluye ${(wastePct*100).toFixed(0)}% de merma">+merma → ${fmtQ(qtyW)}</div>`
+              : ''
+          }${packAlert}</td>
+      <td class="num"><input type="number" value="${(logPerUnit || 0).toFixed(4)}" min="0" step="0.0001"
+          style="width:85px; text-align:right; ${logInputStyle}"
+          title="${line.logCostManual ? 'Override manual' : 'Imputación automática del motor'}"
+          onchange="updateLineLogCost(${i}, this.value)"></td>
       <td class="num"><input type="number" value="${line.margin}" min="0" max="90" step="1"
           style="width:50px; text-align:right;" onchange="updateLineMargin(${i}, this.value)"></td>
+      <td class="num">${fmtN((lineSale / qtyW) * fx)}</td>
       <td class="num">${fmtN(lineSale)}</td>
+      <td class="num">${fmtN(lineSale * fx)}</td>
       <td><button type="button" onclick="removeLine(${i})">×</button></td>
     </tr>`;
   });
 
-  const totalSaleWithLogistic = totalSale + logisticCost;
-  const marginEur = totalSaleWithLogistic - totalCost - logisticCost;
-  const avgMargin = totalSaleWithLogistic > 0 ? (marginEur / totalSaleWithLogistic * 100) : 0;
+  // Si el motor nuevo generó imputaciones per-SKU (totalLogistics > 0), éstas son
+  // la fuente autoritativa y ya vienen foldeadas en lineCost / lineSale. Si no, usamos
+  // el lump legacy (logisticCost) que no está imputado por línea.
+  const useLogImputed = totalLogistics > 0;
+  const effectiveLogistic = useLogImputed ? totalLogistics : logisticCost;
+  const totalSaleFinal = useLogImputed ? totalSale : totalSale + logisticCost;
+  const totalCostFinal = useLogImputed ? totalCost : totalCost + logisticCost;
+  const productsOnlyCost = useLogImputed ? totalCost - totalLogistics : totalCost;
+  const marginEur = totalSaleFinal - totalCostFinal;
+  // Margen sobre producto (no sobre venta total). Coincide con el input del usuario
+  // y es coherente en EXW y CIF. La logística pasa pass-through (sin markup).
+  const salesProductsOnly = totalSaleFinal - effectiveLogistic;
+  const marginOnProductPct = salesProductsOnly > 0 ? ((salesProductsOnly - productsOnlyCost) / salesProductsOnly * 100) : 0;
+  const totalSaleWithLogistic = totalSaleFinal;
 
-  document.getElementById('subtotalProducts').textContent = fmtN(totalCost);
+  document.getElementById('subtotalProducts').textContent = fmtN(productsOnlyCost);
   const wpct = (wastePct * 100).toFixed(0);
   document.getElementById('wasteLabel').textContent = wastePct > 0 ? '(+' + wpct + '% desperdicio)' : '';
-  document.getElementById('logisticTotal').textContent = fmtN(logisticCost);
-  document.getElementById('costProduct').textContent = fmtN(totalCost + logisticCost);
+  document.getElementById('logisticTotal').textContent = fmtN(effectiveLogistic);
+  document.getElementById('costProduct').textContent = fmtN(totalCostFinal);
   document.getElementById('marginEur').textContent = fmtN(marginEur);
-  document.getElementById('marginPctLabel').textContent = avgMargin.toFixed(0);
+  // Si el motor imputó, sobrescribimos el display "Coste logístico" con su cifra
+  // (el lump legacy calculaba con tipo de contenedor distinto — discrepancia).
+  if (useLogImputed) {
+    const perCont = containerCount > 0 ? (totalLogistics / containerCount) : 0;
+    document.getElementById('logisticCostDisplay').textContent =
+      fmtN(perCont) + ' €/cont × ' + containerCount + ' = € ' + fmtN(totalLogistics);
+  }
+  document.getElementById('marginPctLabel').textContent = marginOnProductPct.toFixed(0);
   document.getElementById('totalEur').textContent = fmtN(totalSaleWithLogistic);
   document.getElementById('totalUsd').textContent = fmtN(totalSaleWithLogistic * fx);
+
+  renderCompetitionPanel(lines, wastePct, fx);
+  renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount);
+}
+
+// Avisos no bloqueantes antes de generar la oferta. Detecta condiciones
+// que casi siempre son errores de dedo (flete 0 en CIF, margen muy bajo,
+// línea con cantidad 0, etc.) y las muestra en una caja ámbar arriba del
+// botón Generar. No impiden guardar — solo llaman la atención.
+function renderPreflightChecks(incoterm, useLogImputed, effectiveLogistic, containerCount) {
+  const warns = [];
+  const globalMargin = parseFloat(document.getElementById('marginInput').value) || 0;
+  if (lines.length === 0) {
+    document.getElementById('preflightWarnings').style.display = 'none';
+    return;
+  }
+  if (globalMargin > 0 && globalMargin < 5) {
+    warns.push(`Margen base muy bajo (${globalMargin}%). Verifica que es intencional.`);
+  }
+  lines.forEach((l, i) => {
+    if (!l.qty || l.qty <= 0) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): cantidad 0.`);
+    }
+    if (l.margin !== undefined && l.margin !== '' && l.margin < 5) {
+      warns.push(`Línea ${i+1} (${l.sku || '—'}): margen ${l.margin}% — confirmar que es correcto.`);
+    }
+  });
+  if (incoterm !== 'EXW' && !useLogImputed && effectiveLogistic <= 0) {
+    warns.push(`Incoterm ${incoterm} pero flete 0€. Pulsa "🔄 Calcular logística" o introduce coste manual.`);
+  }
+  if (incoterm !== 'EXW' && containerCount <= 0) {
+    warns.push(`Incoterm ${incoterm} sin contenedores definidos. Pulsa "🔄 Calcular logística".`);
+  }
+  const warnDiv = document.getElementById('preflightWarnings');
+  if (warns.length === 0) {
+    warnDiv.style.display = 'none';
+  } else {
+    warnDiv.innerHTML = '<b>⚠ Antes de emitir, revisa:</b><ul style="margin:4px 0 0 18px; padding:0;">'
+      + warns.map(w => `<li>${escapeHtml(w)}</li>`).join('') + '</ul>';
+    warnDiv.style.display = 'block';
+  }
+}
+
+function renderCompetitionPanel(lines, wastePct, fx) {
+  const body = document.getElementById('compBody');
+  body.innerHTML = '';
+  let sumSaleUsd = 0, sumCompUsd = 0, skusBelow = 0, skusAbove = 0, skusSet = 0;
+  lines.forEach((line, i) => {
+    const qtyW = Math.ceil(line.qty * (1 + wastePct));
+    const logPerUnit = parseFloat(line.logUnitCost) || 0;
+    const costProduct = line.price * qtyW;
+    const m = (line.margin || 0) / 100;
+    const saleProduct = m < 1 ? costProduct / (1 - m) : costProduct;
+    const lineSaleEur = saleProduct + (logPerUnit * qtyW);
+    const lineSaleUsd = lineSaleEur * fx;
+    const unitSaleUsd = qtyW > 0 ? (lineSaleUsd / qtyW) : 0;
+    // line.competitorPrice se guarda en EUR (legacy), aquí lo expresamos en USD.
+    const compEur = parseFloat(line.competitorPrice) || 0;
+    const compUsd = compEur * fx;
+    const compLineUsd = compUsd * qtyW;
+    const difUnitUsd = compUsd > 0 ? (compUsd - unitSaleUsd) : null;
+    const difPct = compUsd > 0 ? ((compUsd - unitSaleUsd) / compUsd * 100) : null;
+    sumSaleUsd += lineSaleUsd;
+    sumCompUsd += compLineUsd;
+    if (compUsd > 0) {
+      skusSet++;
+      if (difUnitUsd > 0) skusBelow++;
+      else if (difUnitUsd < 0) skusAbove++;
+    }
+    const color = difUnitUsd == null ? '#888' : (difUnitUsd >= 0 ? '#060' : '#a23');
+    const arrow = difUnitUsd == null ? '' : (difUnitUsd >= 0 ? ' ▼' : ' ▲');
+    body.innerHTML += `<tr>
+      <td class="mono">${escapeHtml(line.sku)}</td>
+      <td class="num">${fmtN(unitSaleUsd)}</td>
+      <td class="num"><input type="number" value="${compUsd > 0 ? compUsd.toFixed(4) : ''}" min="0" step="0.01"
+          placeholder="—" style="width:90px; text-align:right;"
+          onchange="updateLineCompetitor(${i}, this.value)"></td>
+      <td class="num" style="color:${color};">${difUnitUsd == null ? '—' : fmtN(difUnitUsd) + arrow}</td>
+      <td class="num" style="color:${color};">${difPct == null ? '—' : difPct.toFixed(1) + '%'}</td>
+      <td class="num">${fmtN(lineSaleUsd)}</td>
+      <td class="num">${compLineUsd > 0 ? fmtN(compLineUsd) : '—'}</td>
+    </tr>`;
+  });
+  const totalDifUsd = sumCompUsd - sumSaleUsd;
+  const totalDifPct = sumCompUsd > 0 ? (totalDifUsd / sumCompUsd * 100) : null;
+  const tColor = totalDifUsd >= 0 ? '#060' : '#a23';
+  document.getElementById('compTotalSale').textContent = '$ ' + fmtN(sumSaleUsd);
+  document.getElementById('compTotalComp').textContent = sumCompUsd > 0 ? ('$ ' + fmtN(sumCompUsd)) : '—';
+  document.getElementById('compTotalDifUnit').textContent = sumCompUsd > 0 ? ('$ ' + fmtN(totalDifUsd)) : '—';
+  document.getElementById('compTotalDifUnit').style.color = sumCompUsd > 0 ? tColor : '';
+  document.getElementById('compTotalDifPct').textContent = totalDifPct == null ? '—' : totalDifPct.toFixed(1) + '%';
+  document.getElementById('compTotalDifPct').style.color = sumCompUsd > 0 ? tColor : '';
+  const summary = document.getElementById('compSummary');
+  if (skusSet === 0) {
+    summary.textContent = '(sin datos de competencia — rellena precios en USD para ver el análisis)';
+  } else {
+    summary.textContent = `(${skusSet} SKUs · ${skusBelow} bajo · ${skusAbove} sobre · dif total ${totalDifPct == null ? '—' : totalDifPct.toFixed(1) + '%'})`;
+  }
+}
+
+function updateLineCompetitor(i, val) {
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const v = parseFloat(val);
+  // Input está en USD, lo convertimos a EUR para guardar (el field histórico
+  // del modelo es competitor_price_eur). Si mañana flippeamos el resto a USD
+  // base, este conversor desaparece.
+  lines[i].competitorPrice = isNaN(v) || v <= 0 ? 0 : v / fx;
+  recalcAll();
 }
 
 function generateOffer() {
@@ -566,7 +784,9 @@ function generateOffer() {
   const projSel = document.getElementById('projectSelect');
   const projOpt = projSel.options[projSel.selectedIndex];
   const project = (projOpt && projOpt.value) ? projOpt.dataset.name : 'Proyecto sin nombre';
-  const offerNum = document.getElementById('offerNumber').value || '2026-' + Date.now().toString().slice(-4);
+  // En CREATE: dejamos que el backend asigne el número único (ignora lo que enviemos).
+  // En EDIT: respetamos el existente cargado desde la oferta.
+  const offerNum = document.getElementById('offerNumber').value || '';
 
   const _wg = parseFloat(document.getElementById('wasteInput').value);
   const wastePct = isNaN(_wg) ? 5 : _wg;
@@ -593,13 +813,15 @@ function generateOffer() {
   });
 
   const editId = document.getElementById('editOfferId').value;
+  const _vd = parseInt(document.getElementById('validityInput').value);
+  const validityDays = isNaN(_vd) || _vd < 1 ? 30 : _vd;
   const offer = {
     client, project, offerNumber: offerNum,
-    wastePct, margin, fx, incoterm,
+    wastePct, margin, fx, incoterm, validityDays,
     logisticCost, containerCount: containers, routeId,
     totalPallets: Math.ceil(totalPallets),
     totalWeight: Math.round(totalWeight),
-    lines: lines.map(l => ({ sku: l.sku, name: l.name, family: l.family, unit: l.unit, price: l.price, qty: l.qty, margin: l.margin }))
+    lines: lines.map(l => ({ sku: l.sku, name: l.name, family: l.family, unit: l.unit, price: l.price, qty: l.qty, margin: l.margin, log_unit_cost: l.logUnitCost || 0, log_cost_manual: !!l.logCostManual, competitor_price_eur: l.competitorPrice || 0 }))
   };
   if (editId) offer.editId = parseInt(editId);
 
@@ -613,8 +835,10 @@ function generateOffer() {
   .then(data => {
     if (data.ok) {
       const action = editId ? 'actualizada' : 'generada';
+      const assignedNum = data.offer_number || offerNum;
+      document.getElementById('offerNumber').value = assignedNum;
       const banner = document.getElementById('offerBanner');
-      banner.innerHTML = 'Oferta <b>' + escapeHtml(offerNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
+      banner.innerHTML = 'Oferta <b>' + escapeHtml(assignedNum) + '</b> ' + action + '. Total: <b>€ ' + document.getElementById('totalEur').textContent + '</b>. <a href="/presupuestos">Ver presupuestos</a>';
       banner.style.display = 'block';
       if (editId) {
         document.getElementById('editOfferId').value = '';
@@ -631,6 +855,7 @@ document.addEventListener('DOMContentLoaded', function() {
   onFamilyChange();
   onClientSelect();
   onIncotermChange();
+  checkFxWarning();
 
   {% if edit_offer %}
   const editData = {{ edit_offer|tojson }};
@@ -640,7 +865,11 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('offerNumber').value = editData.offer_number || '';
   document.getElementById('wasteInput').value = editData.waste_pct || 0;
   document.getElementById('marginInput').value = editData.margin_pct || 20;
-  if (editData.fx_rate) document.getElementById('fxInput').value = editData.fx_rate;
+  if (editData.validity_days) document.getElementById('validityInput').value = editData.validity_days;
+  if (editData.fx_rate) {
+    document.getElementById('fxInput').value = editData.fx_rate;
+    checkFxWarning();
+  }
   if (editData.incoterm) {
     document.getElementById('incotermSelect').value = editData.incoterm;
     onIncotermChange();
@@ -649,7 +878,10 @@ document.addEventListener('DOMContentLoaded', function() {
   (editData.lines || []).forEach(l => {
     lines.push({
       sku: l.sku, name: l.name, family: l.family, unit: l.unit,
-      price: l.price, qty: l.qty, margin: l.margin || editData.margin_pct || 20
+      price: l.price, qty: l.qty, margin: l.margin || editData.margin_pct || 20,
+      logUnitCost: l.log_unit_cost || 0,
+      logCostManual: !!l.log_cost_manual,
+      competitorPrice: l.competitor_price_eur || 0,
     });
   });
   // Try to select client
