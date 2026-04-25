@@ -130,7 +130,7 @@ def get_current_fx_eur_usd() -> float:
     if row:
         return float(row['rate'])
     row = db.execute("SELECT value FROM app_settings WHERE key='fx_eur_usd'").fetchone()
-    return float(row['value']) if row else 1.085
+    return float(row['value']) if row else 1.18
 
 
 def eur_to_usd(amount_eur: float, fx_rate: float) -> float:
@@ -373,7 +373,7 @@ def init_db() -> None:
             project_name TEXT NOT NULL,
             waste_pct REAL DEFAULT 5,
             margin_pct REAL DEFAULT 33,
-            fx_rate REAL DEFAULT 1.085,
+            fx_rate REAL DEFAULT 1.18,
             lines_json TEXT NOT NULL,
             total_product_eur REAL DEFAULT 0,
             total_logistic_eur REAL DEFAULT 0,
@@ -566,6 +566,7 @@ def init_db() -> None:
     _audit_catalog_completion_20260424(db)
     _sync_fx_sources_20260424(db)
     _logistics_aggregated_calibration_20260425(db)
+    _audit_misc_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1083,6 +1084,60 @@ def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
         )
 
 
+def _audit_misc_20260425(db: sqlite3.Connection) -> None:
+    """Decisiones operativas Oliver 2026-04-25:
+
+    1) Eliminar MM 30 GRIS (SKU 611Y1A) — descatalogado de operativa Arias.
+       Solo elimina si el SKU no aparece en order_lines ni en
+       pending_offers.lines_json (defensivo).
+
+    2) FX EUR/USD oficial corregido a 1.18 (no 1.085 como decía el
+       'Manual Abril 2026'). El 1.085 estaba desfasado; el cambio real
+       de mercado es 1.18 según Oliver. Las ofertas históricas con FX
+       1.18 (#11, #13, #16, #18, #19) estaban bien — eran correctas.
+
+    Idempotente vía flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'audit_misc_20260425_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    deleted_mm30 = 0
+    in_orders = db.execute("SELECT 1 FROM order_lines WHERE sku = '611Y1A' LIMIT 1").fetchone()
+    in_offers = db.execute(
+        "SELECT 1 FROM pending_offers WHERE lines_json LIKE '%611Y1A%' LIMIT 1"
+    ).fetchone()
+    if not in_orders and not in_offers:
+        cursor = db.execute("DELETE FROM products WHERE sku = '611Y1A'")
+        deleted_mm30 = cursor.rowcount
+
+    # FX 1.18 — nuevo registro en fx_rates (mantiene histórico) +
+    # actualizar app_settings.
+    db.execute(
+        "INSERT INTO fx_rates (base_currency, target_currency, rate, updated_at, source) "
+        "VALUES ('EUR', 'USD', 1.18, ?, ?)",
+        (now_iso(), 'Manual 2026-04-25 (corrección Oliver)'),
+    )
+    db.execute(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES ('fx_eur_usd', ?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        ('1.18', now_iso()),
+    )
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('audit_misc_20260425_applied',
+         f'mm30_deleted={deleted_mm30};fx_set=1.18', now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] misc 2026-04-25: MM 30 eliminado ({deleted_mm30}), '
+        f'FX EUR/USD actualizado a 1.18'
+    )
+
+
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
     """Calibración operativa del motor logístico (sesión Oliver 2026-04-25).
 
@@ -1316,7 +1371,7 @@ def seed_db() -> None:
     # Seed FX rates
     if db.execute('SELECT COUNT(*) AS c FROM fx_rates').fetchone()['c'] == 0:
         fx = [
-            ('EUR', 'USD', 1.085, now, 'Manual Abril 2026'),
+            ('EUR', 'USD', 1.18, now, 'Manual Abril 2026'),
             ('EUR', 'DOP', 65.80, now, 'Manual Abril 2026 — Peso Dominicano'),
             ('USD', 'DOP', 60.65, now, 'Manual Abril 2026'),
         ]
@@ -2500,7 +2555,7 @@ def quote():
     routes_data = [dict(r) for r in routes]
     # Fuente única (ver dashboard): el cotizador toma el rate oficial de
     # fx_rates, no app_settings. Si fx_rates está vacío, fallback a
-    # app_settings y luego al hardcoded 1.085.
+    # app_settings y luego al hardcoded 1.18.
     fx_rate = get_current_fx_eur_usd()
     projects_raw = db.execute(
         'SELECT id, client_id, name, area_sqm, incoterm FROM projects ORDER BY created_at DESC'
@@ -3088,7 +3143,7 @@ def config():
                           routes=[dict(r) for r in routes],
                           customs=[dict(c) for c in customs],
                           fx=[dict(f) for f in fx],
-                          fx_eur_usd=float(fx_setting['value']) if fx_setting else 1.085,
+                          fx_eur_usd=float(fx_setting['value']) if fx_setting else 1.18,
                           fx_updated=(fx_setting['updated_at'][:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
 
 
@@ -3104,7 +3159,7 @@ def save_offer():
     waste_pct = _num(data.get('wastePct', 5)) / 100
     margin_pct = _num(data.get('margin', 33)) / 100
     logistic = _num(data.get('logisticCost', 0))
-    fx = _num(data.get('fx', 1.085))
+    fx = _num(data.get('fx', 1.18))
 
     raw_lines = data.get('lines', [])
     input_lines: list[dict[str, Any]] = []
@@ -3268,7 +3323,7 @@ def update_full_offer():
     waste_pct = _num(data.get('wastePct', 5)) / 100
     margin_pct = _num(data.get('margin', 20)) / 100
     logistic = _num(data.get('logisticCost', 0))
-    fx = _num(data.get('fx', 1.085))
+    fx = _num(data.get('fx', 1.18))
 
     input_lines = data.get('lines', [])
     computed: list[dict[str, Any]] = []
@@ -3695,7 +3750,7 @@ def export_cotizacion(offer_id: int):
         (offer_id,)
     ).fetchall()
 
-    fx = offer['fx_rate'] or 1.085
+    fx = offer['fx_rate'] or 1.18
     total_eur = offer['total_final_eur'] or 0
 
     payload = {
@@ -3807,7 +3862,7 @@ def offer_pdf(offer_id):
     
     lines = json.loads(offer['lines_json'])
     total_eur = offer['total_final_eur']
-    fx = offer['fx_rate'] or 1.085
+    fx = offer['fx_rate'] or 1.18
     total_usd = total_eur * fx
     ref_date = offer['created_at'][:10]
 
@@ -4538,7 +4593,7 @@ def orden_logistica_pdf(offer_id):
     product_cost = _num(offer['total_product_eur'])
     logistic_cost = _num(offer['total_logistic_eur'])
     total_final = _num(offer['total_final_eur'])
-    fx = _num(offer['fx_rate']) or 1.085
+    fx = _num(offer['fx_rate']) or 1.18
     cost_rows = [
         ['Coste mercancía EXW', f"€ {product_cost:,.2f}"],
         ['Coste logístico', f"€ {logistic_cost:,.2f}"],
@@ -4762,7 +4817,7 @@ def api_order():
          status, incoterm, container_count, raw_hash, created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
         (order_num, client_name, data.get('project', 'Pedido Bot'),
-         _num(data.get('wastePct', 0)), _num(data.get('margin', 33)), 1.085,
+         _num(data.get('wastePct', 0)), _num(data.get('margin', 33)), 1.18,
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )

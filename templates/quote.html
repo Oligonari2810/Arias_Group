@@ -589,7 +589,7 @@ function fmtQ(n) { return Number(n).toLocaleString('es-ES', {maximumFractionDigi
 function recalcAll() {
   const _w = parseFloat(document.getElementById('wasteInput').value);
   const wastePct = (isNaN(_w) ? 5 : _w) / 100;
-  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.18;
   const incoterm = document.getElementById('incotermSelect').value;
 
   // Pallets + weight for container calc
@@ -826,7 +826,7 @@ function renderCompetitionPanel(lines, wastePct, fx) {
 }
 
 function updateLineCompetitor(i, val) {
-  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.18;
   const v = parseFloat(val);
   // Input está en USD, lo convertimos a EUR para guardar (el field histórico
   // del modelo es competitor_price_eur). Si mañana flippeamos el resto a USD
@@ -853,7 +853,7 @@ function generateOffer() {
   const wastePct = isNaN(_wg) ? 5 : _wg;
   const _mg = parseFloat(document.getElementById('marginInput').value);
   const margin = isNaN(_mg) ? 20 : _mg;
-  const fx = parseFloat(document.getElementById('fxInput').value) || 1.085;
+  const fx = parseFloat(document.getElementById('fxInput').value) || 1.18;
   const incoterm = document.getElementById('incotermSelect').value;
 
   const logisticCost = parseFloat(document.getElementById('logisticTotal').textContent.replace(/\./g,'').replace(',','.')) || 0;
