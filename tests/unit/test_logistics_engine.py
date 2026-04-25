@@ -89,9 +89,13 @@ def test_solo_placas_modelo_agregado_peso_domina():
     assert r.total_cost_eur == pytest.approx(expected_cost, abs=1.0)
 
 
-# ── Imputación por palés totales ──
-def test_imputacion_por_palets_totales():
-    """Coste imputado al SKU = (n_decimal × cost) / total_palés × pallets_sku."""
+# ── Imputación POR PESO (estándar marítimo) ──
+def test_imputacion_por_peso():
+    """Coste imputado al SKU = (peso_sku / peso_total) × coste_total.
+
+    En un proyecto con un solo SKU, este recibe el 100% del coste,
+    independientemente de cuántos palés ocupe. La métrica unitaria es
+    coste_sku / qty_total."""
     sku = SkuInput(
         sku='P-STD', category='PLACAS', qty=67800, unit_weight_kg=9.5,
         unit_area_m2=3.0, units_per_pallet=120,
@@ -100,13 +104,47 @@ def test_imputacion_por_palets_totales():
         [sku], CONT_40HC_ARIAS, {'PLACAS': PALLET_PLACAS}, cost_per_container_eur=5000,
     )
     sc = r.skus[0]
-    # n_decimal × 5000 = ~137.660 € repartido entre 565 palés = ~243,6 €/palé.
-    # 243,6 / 120 uds = 2,03 €/ud.
-    cost_per_pallet = r.n_containers_decimal * 5000 / sc.pallets
-    expected_unit_cost = cost_per_pallet / 120
+    # Coste total = n_decimal × 5000. Como hay un solo SKU, paga el 100%.
+    # Por unidad: coste_total / qty_total.
+    qty_total = sc.pallets * 120
+    expected_unit_cost = (r.n_containers_decimal * 5000) / qty_total
     assert sc.unit_log_cost_eur == pytest.approx(expected_unit_cost, abs=0.01)
-    # €/m² consistente con €/ud / area_unidad.
     assert sc.m2_log_cost_eur == pytest.approx(sc.unit_log_cost_eur / 3.0, abs=0.01)
+
+
+def test_imputacion_peso_no_se_distorsiona_por_units_per_pallet_malo():
+    """Si units_per_pallet de un SKU está mal (ej. cinta = 20 cuando son 600),
+    el reparto por peso NO se ve afectado — sigue pagando proporcional al peso.
+
+    Esto es la mejora clave vs imputación por palés: la cinta paga poco porque
+    pesa poco, sin importar cuántos 'palés' diga la DB que ocupa.
+    """
+    placa = SkuInput(
+        sku='PLACA', category='PLACAS', qty=100, unit_weight_kg=25,  # 100 × 25 = 2500 kg
+        unit_area_m2=3.0, units_per_pallet=48,
+    )
+    cinta_dato_malo = SkuInput(  # units_per_pallet=20 (rollos/caja, no palé)
+        sku='CINTA-BAD', category='TORNILLOS', qty=600, unit_weight_kg=0.6,  # 600 × 0.6 = 360 kg
+        unit_area_m2=0, units_per_pallet=20,
+    )
+    r = compute_logistics(
+        [placa, cinta_dato_malo], CONT_40HC_ARIAS,
+        {'PLACAS': PALLET_PLACAS, 'TORNILLOS': PALLET_EURO},
+        cost_per_container_eur=5000,
+    )
+    sc_placa = next(s for s in r.skus if s.sku == 'PLACA')
+    sc_cinta = next(s for s in r.skus if s.sku == 'CINTA-BAD')
+
+    # Pesos relativos: placa 2500 + 2 palé × 22 = 2544 kg / cinta 360 + 30 palé × 22 = 1020 kg
+    # Total ~ 3564 kg. Placa ~71%, cinta ~29% del peso.
+    # Cinta NO debe pagar más que la placa por unidad: pesa menos.
+    coste_placa_por_kg = sc_placa.unit_log_cost_eur / 25
+    coste_cinta_por_kg = sc_cinta.unit_log_cost_eur / 0.6
+    # Coste por kg debe ser idéntico (regla "por peso") — diferencia <1%.
+    assert abs(coste_placa_por_kg - coste_cinta_por_kg) / coste_placa_por_kg < 0.05
+    # Y por unidad: cinta paga MUCHO menos que placa (porque cada rollo pesa
+    # 0,6 kg vs 25 kg de la placa).
+    assert sc_cinta.unit_log_cost_eur < sc_placa.unit_log_cost_eur
 
 
 # ── Mix de familias: complementario ocupa suelo sin abrir containers extra ──
