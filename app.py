@@ -568,6 +568,7 @@ def init_db() -> None:
     _logistics_aggregated_calibration_20260425(db)
     _audit_misc_20260425(db)
     _cleanup_demo_data_20260425(db)
+    _schema_cleanup_and_client_fk_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1196,6 +1197,82 @@ def _audit_misc_20260425(db: sqlite3.Connection) -> None:
     print(
         f'[migration] misc 2026-04-25: MM 30 eliminado ({deleted_mm30}), '
         f'FX EUR/USD actualizado a 1.18'
+    )
+
+
+def _schema_cleanup_and_client_fk_20260425(db: sqlite3.Connection) -> None:
+    """Limpieza de schema decidida en auditoría 2026-04-25:
+
+    1) DROP `pickup_pricing` — tabla muerta. 0 referencias en código fuera del
+       CREATE original (idea de pickup points alternativos que no se llevó a
+       producción). Solo se borra si está vacía (defensivo).
+
+    2) ADD `pending_offers.client_id INTEGER` — el enlace actual a clientes va
+       por `client_name` (texto), lo que rompe silenciosamente si renombras al
+       cliente. Backfill por matching exacto sobre `clients.name` o
+       `clients.company`. `client_name` se mantiene por compat (no lo
+       borramos: las ofertas históricas son inmutables y su texto es contrato).
+
+    Idempotente vía flag en app_settings. El paso 2 también es idempotente
+    porque _safe_add_column comprueba si la columna ya existe.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'schema_cleanup_and_client_fk_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Drop pickup_pricing si existe y está vacía.
+    pp_dropped = False
+    pp_exists = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pickup_pricing'"
+    ).fetchone()
+    if pp_exists:
+        rows = db.execute('SELECT COUNT(*) AS c FROM pickup_pricing').fetchone()['c']
+        if rows == 0:
+            db.execute('DROP TABLE pickup_pricing')
+            pp_dropped = True
+        else:
+            print(f'[migration] pickup_pricing tiene {rows} filas — no se borra (revisar manualmente)')
+
+    # 2) Añadir client_id a pending_offers + backfill.
+    offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
+    backfilled = 0
+    if 'client_id' not in offer_cols:
+        _safe_add_column(db, 'pending_offers', 'client_id', 'INTEGER')
+        # Backfill: emparejar offer.client_name con clients.name o clients.company.
+        cursor = db.execute("""
+            UPDATE pending_offers
+            SET client_id = (
+                SELECT id FROM clients
+                WHERE clients.name = pending_offers.client_name
+                   OR clients.company = pending_offers.client_name
+                LIMIT 1
+            )
+            WHERE client_id IS NULL
+        """)
+        backfilled = cursor.rowcount
+        # Diagnóstico: ofertas que NO encontraron cliente (texto fuera de DB).
+        orphan = db.execute(
+            "SELECT COUNT(*) AS c FROM pending_offers WHERE client_id IS NULL"
+        ).fetchone()['c']
+        if orphan:
+            print(
+                f'[migration] {orphan} oferta(s) sin client_id tras backfill — '
+                f'su client_name no matchea ningún clients.name/company. '
+                f'Revisa manualmente o crea el cliente.'
+            )
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('schema_cleanup_and_client_fk_20260425',
+         f'pickup_pricing_dropped={pp_dropped};client_id_backfilled={backfilled}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] schema cleanup 2026-04-25: pickup_pricing dropped={pp_dropped}, '
+        f'pending_offers.client_id backfilled={backfilled}'
     )
 
 
