@@ -459,16 +459,6 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_logistics_orders_offer ON logistics_orders(offer_id);
 
-        CREATE TABLE IF NOT EXISTS pickup_pricing (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id INTEGER NOT NULL,
-            pickup_point TEXT NOT NULL,
-            price_eur_unit REAL NOT NULL,
-            notes TEXT,
-            FOREIGN KEY(product_id) REFERENCES products(id),
-            UNIQUE(product_id, pickup_point)
-        );
-
         CREATE TABLE IF NOT EXISTS family_defaults (
             category TEXT PRIMARY KEY,
             discount_pct REAL NOT NULL DEFAULT 50,
