@@ -563,6 +563,7 @@ def init_db() -> None:
     _catalog_real_data_from_pdf_20260425(db)
     _catalog_real_weights_20260425(db)
     _catalog_pdf_extras_and_discontinued_20260425(db)
+    _catalog_discontinued_skus_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1911,6 +1912,105 @@ def _catalog_pdf_extras_and_discontinued_20260425(db: sqlite3.Connection) -> Non
         f'[migration] catalog pdf-extras 2026-04-25: +{cols_added} cols '
         f'(is_active+discontinued_reason), {perfiles_updated} perfiles con upp/min/dims real, '
         f'{box_updated} SKUs con box_units explícito'
+    )
+
+
+# Lista de SKUs descartados — decisión Oliver 2026-04-25:
+#
+# - Placas con longitud > 2.600 mm: la dimensión hace que el flete por
+#   m² sea inviable para distribución Caribe (no caben optimizadas en
+#   contenedor 40HC y bloquean el aprovechamiento). Demanda pequeña de
+#   placas largas en proyectos RD.
+# - Perfil TC 47 5.300 mm: idéntica razón — un perfil de 5.30 m
+#   desperdicia el contenedor (12,03 m útiles → 2 piezas y media).
+#
+# Trampillas, EXTERNA, SILENS, LIGNUM, FASSATHERM se MANTIENEN. La
+# dimensión es lo que filtra, no el tipo de placa.
+_DISCONTINUED_OVERSIZED = [
+    # Placas STD > 2.600 mm
+    ('P00A000270A0', 'oversized_logistics'),  # STD BA 10mm 1200×2700 (Calliano)
+    ('P00A003270A0', 'oversized_logistics'),  # STD BA 13mm 1200×2700
+    ('P00A003280A0', 'oversized_logistics'),  # STD BA 13mm 1200×2800
+    ('P00A000300A0', 'oversized_logistics'),  # STD BA 10mm 1200×3000
+    ('P00A003300A0', 'oversized_logistics'),  # STD BA 13mm 1200×3000
+    ('P00A005300A0', 'oversized_logistics'),  # STD BA 15mm 1200×3000
+    ('P00A008300A0', 'oversized_logistics'),  # STD BA 18mm 1200×3000
+    ('P00A003320A0', 'oversized_logistics'),  # STD BA 13mm 1200×3200 (Calliano)
+    ('P00A003360A0', 'oversized_logistics'),  # STD BA 13mm 1200×3600 (Calliano)
+    # Placas SIMPLY > 2.600 mm
+    ('P00Y003280A0', 'oversized_logistics'),  # GypsoSIMPLY BA 13mm 1200×2800
+    ('P00Y003300A0', 'oversized_logistics'),  # GypsoSIMPLY BA 13mm 1200×3000
+    # Placas AQUA H2 > 2.600 mm
+    ('P00H003280A0', 'oversized_logistics'),  # AQUA H2 BA 13mm 1200×2800
+    ('P00H003300A0', 'oversized_logistics'),  # AQUA H2 BA 13mm 1200×3000
+    ('P00H005300A0', 'oversized_logistics'),  # AQUA H2 BA 15mm 1200×3000
+    # Placas AQUASUPER > 2.600 mm
+    ('P00W003300A0', 'oversized_logistics'),  # AQUASUPER BA 13mm 1200×3000
+    ('P00W005300A0', 'oversized_logistics'),  # AQUASUPER BA 15mm 1200×3000
+    ('P00W008300A0', 'oversized_logistics'),  # AQUASUPER BA 18mm 1200×3000
+    # Placas FOCUS > 2.600 mm
+    ('P00F005280A0', 'oversized_logistics'),  # FOCUS BA 15mm 1200×2800
+    ('P00F003300A0', 'oversized_logistics'),  # FOCUS BA 13mm 1200×3000
+    ('P00F005300A2', 'oversized_logistics'),  # FOCUS BA 15mm 1200×3000
+    # Placa LIGNUM > 2.600 mm
+    ('P00LB03300AC', 'oversized_logistics'),  # GypsoLIGNUM BA 13mm 1200×3000
+    # Perfil más largo que un contenedor 40HC útil
+    ('C174717530A', 'oversized_logistics'),   # Perfil TC 47 Z1 — 5.300mm
+]
+
+
+def _catalog_discontinued_skus_20260425(db: sqlite3.Connection) -> None:
+    """Marca como descartados los 22 SKUs cuya dimensión hace inviable la
+    logística Caribe (Oliver 2026-04-25):
+
+      - 21 placas con longitud > 2.600 mm (STD, SIMPLY, AQUA H2, AQUASUPER,
+        FOCUS, LIGNUM)
+      - 1 perfil TC 47 Z1 — 5.300 mm
+
+    El criterio NO es por tipo de placa (EXTERNA, SILENS, LIGNUM, FASSATHERM
+    se MANTIENEN — son productos válidos para Caribe). Solo se descartan por
+    DIMENSIÓN > 2.600 mm que hace inviable el flete optimizado en contenedor
+    40HC (12,03 m útiles).
+
+    Verificado: 0 ofertas activas usan estos 22 SKUs (consulta cruzada
+    pending_offers + order_lines, status != cancelled).
+
+    REGLA OFERTAS INMUTABLES: si en futuro alguna oferta histórica los
+    cita, NO se actualiza — el catálogo refleja la operativa actual, las
+    ofertas mantienen su precio congelado.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_discontinued_skus_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    discontinued = 0
+    not_found = []
+    for sku, reason in _DISCONTINUED_OVERSIZED:
+        cur = db.execute(
+            "UPDATE products SET is_active = 0, discontinued_reason = ? "
+            "WHERE sku = ? AND (is_active IS NULL OR is_active = 1)",
+            (reason, sku),
+        )
+        if cur.rowcount == 0:
+            not_found.append(sku)
+        else:
+            discontinued += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_discontinued_skus_20260425',
+         f'discontinued={discontinued};not_found={",".join(not_found) or "none"}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog discontinued 2026-04-25: {discontinued} SKUs '
+        f'descartados por oversized_logistics (placas >2600mm + TC 47 5.300mm). '
+        f'Not found: {not_found or "none"}'
     )
 
 
