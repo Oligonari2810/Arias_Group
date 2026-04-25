@@ -102,11 +102,12 @@ def legacy_sqlite(tmp_path):
             id INTEGER PRIMARY KEY AUTOINCREMENT, offer_number TEXT NOT NULL,
             client_name TEXT NOT NULL, project_name TEXT NOT NULL,
             waste_pct REAL DEFAULT 0.05, margin_pct REAL DEFAULT 0.33,
-            fx_rate REAL DEFAULT 1.085, lines_json TEXT NOT NULL,
+            fx_rate REAL DEFAULT 1.18, lines_json TEXT NOT NULL,
             total_product_eur REAL DEFAULT 0, total_logistic_eur REAL DEFAULT 0,
             total_final_eur REAL DEFAULT 0, status TEXT DEFAULT 'pending',
             incoterm TEXT DEFAULT 'EXW', route_id INTEGER,
-            container_count INTEGER DEFAULT 0, created_at TEXT NOT NULL,
+            container_count INTEGER DEFAULT 0, validity_days INTEGER DEFAULT 30,
+            client_id INTEGER, created_at TEXT NOT NULL,
             updated_at TEXT, raw_hash TEXT
         );
         CREATE TABLE order_lines (
@@ -124,10 +125,6 @@ def legacy_sqlite(tmp_path):
         CREATE TABLE doc_sequences (
             id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT UNIQUE NOT NULL,
             last_number INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE pickup_pricing (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL,
-            pickup_point TEXT NOT NULL, price_eur_unit REAL NOT NULL, notes TEXT
         );
         CREATE TABLE family_defaults (
             category TEXT PRIMARY KEY, discount_pct REAL NOT NULL DEFAULT 50,

@@ -45,7 +45,7 @@ def test_all_expected_tables_exist(migrated_engine):
         'clients', 'products', 'systems', 'system_components', 'projects',
         'project_quotes', 'stage_events', 'shipping_routes', 'customs_rates',
         'fx_rates', 'users', 'pending_offers', 'order_lines', 'audit_log',
-        'doc_sequences', 'pickup_pricing', 'family_defaults', 'price_history',
+        'doc_sequences', 'family_defaults', 'price_history',
         'app_settings',
     }
     with migrated_engine.connect() as conn:
@@ -144,7 +144,7 @@ def test_foreign_keys_exist(migrated_engine):
         ('stage_events', 'project_id', 'projects'),
         ('order_lines', 'offer_id', 'pending_offers'),
         ('pending_offers', 'route_id', 'shipping_routes'),
-        ('pickup_pricing', 'product_id', 'products'),
+        ('pending_offers', 'client_id', 'clients'),
         ('price_history', 'product_id', 'products'),
     ]
     with migrated_engine.connect() as conn:
