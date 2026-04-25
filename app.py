@@ -2664,11 +2664,12 @@ def quote_pdf(project_id: int, quote_id: int):
         title=f"Oferta {quote['version_label']} - {project['name']}",
     )
 
-    NAVY   = colors.HexColor('#0D1B4B')
-    BLUE   = colors.HexColor('#1A3A8F')
-    GOLD   = colors.HexColor('#C9A84C')
-    LGRAY  = colors.HexColor('#F2F0EB')
-    MGRAY  = colors.HexColor('#888888')
+    # Paleta oficial Arias Group (alineada con offer_pdf y design system).
+    NAVY   = colors.HexColor('#1A3557')
+    BLUE   = colors.HexColor('#2563A8')
+    GOLD   = BLUE                          # acentos antes en dorado → ahora azul
+    LGRAY  = colors.HexColor('#EEF3F9')    # fondo tabla / bloques (BLUE_PALE)
+    MGRAY  = colors.HexColor('#5C7A99')    # labels/meta (STONE)
     WHITE  = colors.white
 
     styles = getSampleStyleSheet()
@@ -2702,11 +2703,20 @@ def quote_pdf(project_id: int, quote_id: int):
 
     # ── REFERENCE ROW ─────────────────────────────────────────────
     ref_date = quote['created_at'][:10]
+    # project_quotes (oferta técnica interna) no tiene columna validity_days; la
+    # validez vive en pending_offers (oferta comercial → offer_pdf). Si en el
+    # futuro se añade la columna o se vuelca al payload result_json, este lookup
+    # la recoge sin tocar más código.
+    quote_keys = quote.keys()
+    if 'validity_days' in quote_keys and quote['validity_days']:
+        validity = int(quote['validity_days'])
+    else:
+        validity = int(_num(summary.get('validity_days', 30)) or 30)
     ref_data = [[
         Paragraph(f"<b>Ref:</b> {quote['version_label']}", S['body']),
         Paragraph(f"<b>Fecha:</b> {ref_date}", S['body']),
         Paragraph(f"<b>Incoterm:</b> {project['incoterm']}", S['body']),
-        Paragraph(f"<b>Validez:</b> 30 días", S['body']),
+        Paragraph(f"<b>Validez:</b> {validity} días", S['body']),
     ]]
     ref_tbl = Table(ref_data, colWidths=[W*0.28, W*0.24, W*0.24, W*0.24])
     ref_tbl.setStyle(TableStyle([
@@ -4446,6 +4456,98 @@ def _load_offer_with_lines(offer_id: int):
     return offer, [dict(r) for r in ol]
 
 
+def _logistics_breakdown_for_offer(db, offer, lines):
+    """Recalcula el desglose logístico (floor/weight/cbm + driver dominante) con
+    el motor agregado para mostrarlo en PDFs como diagnóstico.
+
+    NO sobrescribe `offer['container_count']`: ese valor es el que el cliente
+    vio en la oferta firmada y es contractual. Aquí solo se enriquece la
+    presentación con métricas que no afectan al precio.
+
+    Devuelve un LogisticsResult o None si faltan datos.
+    """
+    from logistics.engine import ContainerProfile, PalletProfile, SkuInput, compute_logistics
+
+    log_row = db.execute(
+        'SELECT container_type FROM logistics_orders WHERE offer_id = ? ORDER BY id DESC LIMIT 1',
+        (offer['id'],)
+    ).fetchone()
+    container_type = (log_row['container_type'] if log_row and log_row['container_type'] else '40HC')
+
+    cp_row = db.execute('SELECT * FROM container_profiles WHERE type = ?', (container_type,)).fetchone()
+    if not cp_row:
+        return None
+    floor_stowage = cp_row['floor_stowage_factor'] if 'floor_stowage_factor' in cp_row.keys() else 1.0
+    container = ContainerProfile(
+        type=cp_row['type'],
+        inner_length_m=cp_row['inner_length_m'],
+        inner_width_m=cp_row['inner_width_m'],
+        inner_height_m=cp_row['inner_height_m'],
+        payload_kg=cp_row['payload_kg'],
+        door_clearance_m=cp_row['door_clearance_m'],
+        stowage_factor=cp_row['stowage_factor'],
+        floor_stowage_factor=float(floor_stowage),
+    )
+
+    pallet_profiles: dict[str, PalletProfile] = {}
+    for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
+        pallet_profiles[r['category']] = PalletProfile(
+            category=r['category'],
+            length_m=r['pallet_length_m'],
+            width_m=r['pallet_width_m'],
+            height_m=r['pallet_height_m'],
+            stackable_levels=r['stackable_levels'],
+            allow_mix_floor=bool(r['allow_mix_floor']),
+        )
+
+    cost_per_container = 0.0
+    route_id = offer['route_id'] if 'route_id' in offer.keys() else None
+    if route_id:
+        col_map = {'20': 'container_20_eur', '40': 'container_40_eur', '40HC': 'container_40hc_eur'}
+        col = col_map.get(container_type, 'container_40hc_eur')
+        rt = db.execute(f'SELECT {col} AS c FROM shipping_routes WHERE id = ?', (route_id,)).fetchone()
+        if rt:
+            cost_per_container = float(rt['c'] or 0)
+
+    skus: list[SkuInput] = []
+    for ln in lines:
+        sku = str(ln.get('sku') or '').strip()
+        if not sku:
+            continue
+        qty = _num(ln.get('qty_logistic') or ln.get('qty_input') or ln.get('qty'))
+        if qty <= 0:
+            continue
+        p = db.execute(
+            'SELECT category, kg_per_unit, units_per_pallet, sqm_per_pallet, '
+            'pallet_length_m, pallet_width_m, pallet_height_m, pallet_weight_kg, '
+            'stackable_levels FROM products WHERE sku = ?', (sku,)
+        ).fetchone()
+        if not p or p['category'] not in pallet_profiles:
+            continue
+        upp = p['units_per_pallet'] or 0
+        sqm_pp = p['sqm_per_pallet']
+        unit_area_m2 = (float(sqm_pp) / float(upp)) if (upp and sqm_pp) else 0
+        skus.append(SkuInput(
+            sku=sku, category=p['category'], qty=qty,
+            unit_weight_kg=float(p['kg_per_unit'] or 0),
+            unit_area_m2=unit_area_m2,
+            units_per_pallet=float(upp) if upp else 1,
+            pallet_length_m=p['pallet_length_m'], pallet_width_m=p['pallet_width_m'],
+            pallet_height_m=p['pallet_height_m'], pallet_weight_kg=p['pallet_weight_kg'],
+            stackable_levels=p['stackable_levels'],
+        ))
+
+    if not skus:
+        return None
+    try:
+        return compute_logistics(skus, container, pallet_profiles, cost_per_container)
+    except (KeyError, ValueError):
+        return None
+
+
+_DRIVER_LABELS = {'floor': 'Suelo (huella palés)', 'weight': 'Peso bruto', 'cbm': 'Volumen'}
+
+
 # ── PDF: PreOrden Fábrica ─────────────────────────────────────────
 
 @app.route('/api/preorden-pdf/<int:offer_id>')
@@ -4564,15 +4666,22 @@ def orden_logistica_pdf(offer_id):
     db.commit()
 
     ref_date = (offer['created_at'] or '')[:10]
-    total_pal = total_kg = total_m2 = 0
-    fam_breakdown: dict[str, int] = {}
-    for l in lines:
-        total_pal += int(_num(l.get('pallets_logistic', 0)))
-        total_kg += _num(l.get('weight_total_kg', 0))
-        total_m2 += _num(l.get('m2_total', 0))
-        f = l.get('family') or '?'
-        fam_breakdown[f] = fam_breakdown.get(f, 0) + 1
-    cont = estimate_containers(total_pal, total_kg, fam_breakdown)
+    total_pal = sum(int(_num(l.get('pallets_logistic', 0))) for l in lines)
+    total_kg = sum(_num(l.get('weight_total_kg', 0)) for l in lines)
+    total_m2 = sum(_num(l.get('m2_total', 0)) for l in lines)
+
+    # Container count CONGELADO de la oferta (lo que el cliente firmó). El nº
+    # impreso aquí debe coincidir con el del cotizador y con el offer_pdf.
+    container_count = int(_num(offer['container_count']) or 0)
+    log_row = db.execute(
+        'SELECT container_type FROM logistics_orders WHERE offer_id = ? ORDER BY id DESC LIMIT 1',
+        (offer['id'],)
+    ).fetchone()
+    container_type = (log_row['container_type'] if log_row and log_row['container_type'] else '40HC')
+
+    # Diagnóstico en vivo (modelo agregado): solo enriquece la presentación,
+    # NO sustituye container_count.
+    log_result = _logistics_breakdown_for_offer(db, offer, lines)
 
     # ── PAGE 1: Calculadora Logística ─────────────────────────────
     for el in _ag_unified_header('ORDEN LOGÍSTICA — CALCULADORA', W):
@@ -4621,16 +4730,21 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 4*mm))
 
     story.append(Paragraph('CONTENEDORES', S['h2']))
-    if cont:
-        pal_occ = f"{cont['pallet_occupancy']*100:.0f}%"
-        wei_occ = f"{cont['weight_occupancy']*100:.0f}%"
-        cont_rows = [
-            ['Recomendación', f"{cont['units']} x {cont['recommended']}"],
-            ['Palés totales', f"{total_pal} (capacidad {cont['pallets_capacity_per_unit']}/cont.)"],
-            ['Ocupación palés', pal_occ],
-            ['Peso total', f"{total_kg:,.0f} kg (capacidad {cont['weight_capacity_per_unit_kg']:,}/cont.)"],
-            ['Ocupación peso', wei_occ],
-        ]
+    if container_count > 0:
+        cont_rows = [['Recomendación', f"{container_count} × {container_type}"]]
+        if log_result:
+            driver_label = _DRIVER_LABELS.get(log_result.dominant_driver, log_result.dominant_driver or '—')
+            cont_rows += [
+                ['Driver dominante', driver_label],
+                ['Suelo (huella palés)', f"{log_result.total_floor_m2:.1f} m² · ocupa {log_result.n_by_floor:.2f} cont."],
+                ['Peso bruto', f"{log_result.total_weight_kg:,.0f} kg · ocupa {log_result.n_by_weight:.2f} cont."],
+                ['Volumen', f"{log_result.total_cbm:.1f} m³ · ocupa {log_result.n_by_cbm:.2f} cont."],
+            ]
+        else:
+            cont_rows += [
+                ['Palés totales', str(total_pal)],
+                ['Peso total', f"{total_kg:,.0f} kg"],
+            ]
     else:
         cont_rows = [['Sin datos logísticos suficientes', '']]
     ct = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in cont_rows],
@@ -4702,7 +4816,7 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 3*mm))
 
     story.append(Paragraph('DETALLE LOGÍSTICO', S['h2']))
-    cont_txt = f"{cont['units']} x {cont['recommended']}" if cont else 'Por determinar'
+    cont_txt = f"{container_count} × {container_type}" if container_count > 0 else 'Por determinar'
     det = [
         ['Contenedores necesarios', cont_txt],
         ['Peso bruto total', f"{total_kg:,.0f} kg" if total_kg else 'Por determinar'],
