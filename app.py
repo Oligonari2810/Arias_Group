@@ -567,6 +567,7 @@ def init_db() -> None:
     _sync_fx_sources_20260424(db)
     _logistics_aggregated_calibration_20260425(db)
     _audit_misc_20260425(db)
+    _cleanup_demo_data_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1084,6 +1085,66 @@ def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
         )
 
 
+def _cleanup_demo_data_20260425(db: sqlite3.Connection) -> None:
+    """Elimina cliente y proyecto 'demo' del seed inicial.
+
+    El seed creaba un cliente "Promotor Demo / Arias Group Demo" con un
+    proyecto "Torre piloto - baños" para que la app no estuviera vacía
+    en demos. Tras la audit 2026-04-25 con datos reales en producción,
+    Oliver lo considera ruido visual.
+
+    Idempotente: marca flag en app_settings, comprueba que el demo no
+    tenga ofertas asociadas (defensivo).
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'cleanup_demo_data_20260425_applied'"
+    ).fetchone()
+    if flag:
+        return
+
+    # Identificar cliente demo por email canónico (más robusto que ID).
+    demo = db.execute(
+        "SELECT id FROM clients WHERE email = 'demo@example.com' OR name = 'Promotor Demo' LIMIT 1"
+    ).fetchone()
+    deleted_clients = 0
+    deleted_projects = 0
+    deleted_events = 0
+
+    if demo:
+        demo_id = demo['id']
+        # Verificación defensiva: si alguna oferta lo referencia, abortar.
+        ofertas_demo = db.execute(
+            "SELECT COUNT(*) AS c FROM pending_offers "
+            "WHERE client_name IN (SELECT name FROM clients WHERE id = ?)",
+            (demo_id,),
+        ).fetchone()['c']
+        if ofertas_demo == 0:
+            # Cascada manual: stage_events → projects → clients.
+            res = db.execute(
+                "DELETE FROM stage_events WHERE project_id IN "
+                "(SELECT id FROM projects WHERE client_id = ?)",
+                (demo_id,),
+            )
+            deleted_events = res.rowcount
+            res = db.execute("DELETE FROM projects WHERE client_id = ?", (demo_id,))
+            deleted_projects = res.rowcount
+            res = db.execute("DELETE FROM clients WHERE id = ?", (demo_id,))
+            deleted_clients = res.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('cleanup_demo_data_20260425_applied',
+         f'clients={deleted_clients};projects={deleted_projects};events={deleted_events}',
+         now_iso()),
+    )
+    db.commit()
+    if deleted_clients or deleted_projects:
+        print(
+            f'[migration] demo data eliminada: {deleted_clients} cliente(s), '
+            f'{deleted_projects} proyecto(s), {deleted_events} stage_events'
+        )
+
+
 def _audit_misc_20260425(db: sqlite3.Connection) -> None:
     """Decisiones operativas Oliver 2026-04-25:
 
@@ -1281,18 +1342,10 @@ def seed_db() -> None:
             row,
         )
 
-    if db.execute('SELECT COUNT(*) AS c FROM clients').fetchone()['c'] == 0:
-        db.execute(
-            'INSERT INTO clients (name, company, email, phone, country, score, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            ('Promotor Demo', 'Arias Group Demo', 'demo@example.com', '+1 809 000 0000', 'República Dominicana', 78, now),
-        )
-        client_id = db.execute('SELECT id FROM clients WHERE email = ?', ('demo@example.com',)).fetchone()['id']
-        db.execute(
-            '''INSERT INTO projects
-            (client_id, name, project_type, location, area_sqm, stage, go_no_go, incoterm, fx_rate, target_margin_pct, freight_eur, customs_pct, logistics_notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (client_id, 'Torre piloto - baños', 'Hotelería', 'Punta Cana', 800, 'CÁLCULO DETALLADO', 'GO', 'EXW', 1.0, 0.33, 4200, 0.18, 'Demo seeded project', now),
-        )
+    # Cliente y proyecto demo eliminados (Oliver 2026-04-25): la DB de
+    # producción ya tiene clientes y proyectos reales — el demo era ruido
+    # visual. Para entornos nuevos (CI, dev local), los clientes se crean
+    # via UI o vía _seed_calc_fixtures en tests.
 
     # Seed shipping routes
     if db.execute('SELECT COUNT(*) AS c FROM shipping_routes').fetchone()['c'] == 0:
