@@ -503,40 +503,57 @@ function onContainerCountChange() {
   recalcAll();
 }
 
-// Panel de "capacidad libre" tras Calcular logística. Avisa al vendedor
-// cuando sobran peso/suelo/volumen en los contenedores dominantes, para
-// que pueda añadir pastas, cintas, cubos o cajas con mejor margen sin
-// abrir contenedor extra. UI-only (no toca el PDF).
-// Regla: no aparece si is_optimized=true (caso típico: placas 1200×2000
-// rotadas que llenan por peso hasta el tope y no dejan hueco útil).
+// Panel de "capacidad libre" tras Calcular logística. Siempre muestra los
+// 3 drivers (peso, suelo, volumen) con semáforo según el % libre por cont.:
+//   >40% libre → ROJO (mucha capacidad sin usar, oportunidad clara)
+//   10-40%     → ÁMBAR (hueco moderado, cross-sell opcional)
+//   <10%       → VERDE (carga óptima)
+// UI-only (no toca el PDF).
 function renderCapacityAlert(fc, nCont, dominantFamily) {
   const div = document.getElementById('capacityAlert');
   if (!div) return;
   if (!fc || nCont <= 0) { div.style.display = 'none'; return; }
-  if (fc.is_optimized) {
-    div.style.background = '#eef7ea';
-    div.style.border = '1px solid #5a8';
-    div.innerHTML = `✅ <b>Contenedores optimizados.</b> Carga máxima alcanzada (peso dominante). No cabe producto adicional.`;
-    div.style.display = 'block';
-    return;
-  }
+
+  // Capacidades nominales de un 40HC (coherentes con container_profiles.py).
+  const CAP_40HC = { weight_kg: 25200, floor_m2: 28.3, cbm: 68.5 };
   const per = fc.per_container || {};
-  const tot = fc.total || {};
   const weightPer = Number(per.weight_kg || 0);
   const floorPer = Number(per.floor_m2 || 0);
   const cbmPer = Number(per.cbm || 0);
-  // Umbral mínimo para llamar la atención (evita ruido con huecos irrelevantes).
-  if (weightPer < 500 && floorPer < 2 && cbmPer < 3) {
-    div.style.display = 'none';
-    return;
+  const pctWeight = Math.min(100, (weightPer / CAP_40HC.weight_kg) * 100);
+  const pctFloor  = Math.min(100, (floorPer  / CAP_40HC.floor_m2)  * 100);
+  const pctCbm    = Math.min(100, (cbmPer    / CAP_40HC.cbm)       * 100);
+
+  function tag(label, value, unit, pct) {
+    let color, bg;
+    if (pct > 40)      { color = '#a23'; bg = '#fbe5e5'; }  // rojo — sobra mucho
+    else if (pct > 10) { color = '#b8860b'; bg = '#fffbea'; }  // ámbar — moderado
+    else               { color = '#060'; bg = '#eef7ea'; }  // verde — óptimo
+    return `<span style="display:inline-block; margin-right:12px; padding:2px 8px; background:${bg}; color:${color}; border-radius:3px;">
+              <b>${fmtN(value)} ${unit}</b> ${label} libre <small>(${pct.toFixed(0)}%)</small>
+            </span>`;
   }
-  div.style.background = '#fffbea';
-  div.style.border = '1px solid #b8860b';
+
+  const tot = fc.total || {};
+  const header = fc.is_optimized
+    ? `✅ <b>Contenedores optimizados.</b> Carga al tope — no cabe producto adicional.`
+    : `✨ <b>Oportunidad: queda capacidad en tus ${nCont} contenedores.</b>`;
+
+  const suggestion = fc.is_optimized
+    ? ''
+    : `<div style="margin-top:6px; font-size:0.85em; color:#666;">Considera añadir pastas / cintas / cubos / cajas en palés (mejor margen) sin abrir contenedor extra.</div>`;
+
+  div.style.background = fc.is_optimized ? '#eef7ea' : '#fffbea';
+  div.style.border = fc.is_optimized ? '1px solid #5a8' : '1px solid #b8860b';
   div.innerHTML =
-    `✨ <b>Oportunidad: queda capacidad en tus ${nCont} contenedores.</b>` +
-    `<div style="margin-top:4px;">Por cont.: <b>${fmtN(weightPer)} kg</b> peso · <b>${fmtN(floorPer)} m²</b> suelo · <b>${fmtN(cbmPer)} m³</b> volumen.</div>` +
-    `<div>Total: <b>${fmtN(tot.weight_kg || 0)} kg</b> · <b>${fmtN(tot.floor_m2 || 0)} m²</b> · <b>${fmtN(tot.cbm || 0)} m³</b>.</div>` +
-    `<div style="margin-top:4px; font-size:0.85em; color:#666;">Considera añadir pastas / cintas / cubos / cajas en palés (mejor margen que placas) sin abrir contenedor extra.</div>`;
+    header +
+    `<div style="margin-top:6px;"><b>Por contenedor:</b> ` +
+    tag('peso',   weightPer, 'kg', pctWeight) +
+    tag('suelo',  floorPer,  'm²', pctFloor)  +
+    tag('volumen',cbmPer,    'm³', pctCbm)    +
+    `</div>` +
+    `<div style="margin-top:4px;"><b>Total (${nCont} cont.):</b> ${fmtN(tot.weight_kg || 0)} kg · ${fmtN(tot.floor_m2 || 0)} m² · ${fmtN(tot.cbm || 0)} m³ libres.</div>` +
+    suggestion;
   div.style.display = 'block';
 }
 
