@@ -559,6 +559,7 @@ def init_db() -> None:
     _audit_misc_20260425(db)
     _cleanup_demo_data_20260425(db)
     _schema_cleanup_and_client_fk_20260425(db)
+    _catalog_discount_completion_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1263,6 +1264,69 @@ def _schema_cleanup_and_client_fk_20260425(db: sqlite3.Connection) -> None:
     print(
         f'[migration] schema cleanup 2026-04-25: pickup_pricing dropped={pp_dropped}, '
         f'pending_offers.client_id backfilled={backfilled}'
+    )
+
+
+def _catalog_discount_completion_20260425(db: sqlite3.Connection) -> None:
+    """Auditoría de catálogo 2026-04-25 (Oliver):
+
+    1) `discount_extra_pct` estaba NULL en 191 SKUs cuando debería ser 5.0.
+       El precio Arias YA reflejaba el descuento compuesto (50%+5% = ratio
+       0,475 sobre PVP), pero la columna no lo declaraba. Cosmético, pero
+       confunde la UI y rompe queries de auditoría. Backfill a 5.0.
+
+    2) 2 SKUs FASSACOL (PASTAS) tenían precio_arias desviado del descuento
+       estándar — no era política comercial diferente, era un error de
+       carga. Se corrige a `precio_arias_eur_unit = pvp_eur_unit × 0,475`:
+         - 1773Y1A FASSACOL MULTI GRIS: 5,83 → 5,52 €
+         - 1775Y1A FASSACOL FLEX GRIS: 6,60 → 6,27 €
+       También se actualiza `unit_price_eur` (campo legacy que el motor
+       todavía lee y debe quedar sincronizado con `precio_arias_eur_unit`).
+
+    REGLA OFERTAS INMUTABLES: las 4 ofertas que ya contienen estos SKUs
+    (#13, #18, #19, #21) NO se tocan. `lines_json` y `total_final_eur`
+    son contractuales — el cliente firmó con el precio del momento. El
+    nuevo precio aplica solo a futuras ofertas.
+
+    Idempotente vía flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_discount_completion_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Backfill discount_extra_pct = 5.0 donde sea NULL.
+    cursor = db.execute(
+        "UPDATE products SET discount_extra_pct = 5.0 WHERE discount_extra_pct IS NULL"
+    )
+    extra_backfilled = cursor.rowcount
+
+    # 2) Corregir las 2 PASTAS desviadas. PVP × 0,475 redondeado a 2 decimales.
+    fassacol_fixes = [
+        ('1773Y1A', 5.52),  # PVP 11,63 × 0,475 = 5,52425 → 5,52
+        ('1775Y1A', 6.27),  # PVP 13,20 × 0,475 = 6,27000 → 6,27
+    ]
+    pastas_fixed = 0
+    for sku, new_arias in fassacol_fixes:
+        cur = db.execute(
+            "UPDATE products SET unit_price_eur = ?, precio_arias_eur_unit = ? "
+            "WHERE sku = ? AND ABS(precio_arias_eur_unit - ?) > 0.01",
+            (new_arias, new_arias, sku, new_arias),
+        )
+        pastas_fixed += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_discount_completion_20260425',
+         f'extra_pct_backfilled={extra_backfilled};fassacol_fixed={pastas_fixed}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog 2026-04-25: discount_extra_pct backfilled='
+        f'{extra_backfilled}, FASSACOL precios corregidos={pastas_fixed} '
+        f'(ofertas históricas intactas)'
     )
 
 
