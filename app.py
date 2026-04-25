@@ -561,6 +561,7 @@ def init_db() -> None:
     _schema_cleanup_and_client_fk_20260425(db)
     _catalog_discount_completion_20260425(db)
     _catalog_real_data_from_pdf_20260425(db)
+    _catalog_real_weights_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1626,6 +1627,109 @@ def _catalog_real_data_from_pdf_20260425(db: sqlite3.Connection) -> None:
         f'{placas_filled} placas con length_mm, {perfiles_filled} perfiles con kg/ml, '
         f'{perfiles_kg_recalc} perfiles con kg_per_unit recalculado real, '
         f'cache dropped: {cache_dropped or "none"}'
+    )
+
+
+# ── Pesos reales aportados por Oliver 2026-04-25 (cintas, tornillos,
+# accesorios, trampillas, GypsoCOMETE). Derivados de proformas + albaranes.
+# Cada fila: (sku, kg_per_unit_final_en_unidad_de_venta, fuente_nota).
+# La regla de unidad de venta sigue lo que publica el catálogo Fassa:
+#   TORNILLOS, ACCESORIOS, GYPSOCOMETE → caja/embalaje
+#   CINTAS                              → rollo
+#   TRAMPILLAS                          → unidad
+# Cuando Oliver dio el peso por unidad individual y la unidad de venta es
+# caja, multiplicamos por uds/caja para alinear con el motor logístico
+# (qty × kg_per_unit donde qty va en la unidad de venta).
+_REAL_WEIGHTS_20260425 = [
+    # CINTAS (kg/rollo, directo)
+    ('304056', 0.28),  # Cinta Juntas 50mm×23m
+    ('304057', 0.60),  # Cinta Juntas 50mm×75m
+    ('304058', 1.15),  # Cinta Juntas 50mm×150m
+    ('301121', 5.60),  # Malla Externa Light 50m
+    ('304075', 0.53),  # Banda Estanca 50mm×30m
+    # TORNILLOS (kg/caja, directo)
+    ('304101', 1.40),  # PM Punta Clavo Ø3,5×25 — 1.000ud
+    ('304104', 1.84),  # PM Punta Clavo Ø3,5×35 — 1.000ud
+    ('304115', 1.45),  # PM Punta Broca Ø3,5×25 — 1.000ud
+    ('304134', 1.05),  # MM Punta Broca Ø3,5×9,5 — 1.000ud
+    ('301244', 1.15),  # Externa Light Ø4,0×32 — 500ud
+    # TRAMPILLAS (kg/unidad, directo)
+    ('304081', 1.25),  # Trampilla Click Metálica 300×300
+    ('304082', 1.80),  # Trampilla Click Metálica 400×400
+    ('304086', 2.10),  # Trampilla Click Aluminio Aqua H1 300×300
+    # ACCESORIOS (Oliver dio kg/unidad → multiplicar × uds/caja)
+    # Cruceta TC 60: 0.05 kg/ud × 25 ud/caja = 1.25 kg/caja
+    ('304015', 1.25),
+    # Suspensión TC 47 90mm: 0.06 × 100 = 6.00 kg/caja
+    ('304021', 6.00),
+    # Cantonera Yeso 2.6m: 0.65 × 100 = 65.00 kg/caja
+    ('1091001Y', 65.00),
+    # GYPSOCOMETE (Oliver dio kg/unidad → multiplicar × uds/embalaje)
+    # ANGLE 240×240: 0.45 × 2 = 0.90 kg/embalaje
+    ('301600', 0.90),
+    # LINE 2000mm — solo existe la versión XL en la DB; aplico ahí: 2.40 × 5 = 12 kg/caja
+    ('301605XL', 12.00),
+]
+
+
+def _catalog_real_weights_20260425(db: sqlite3.Connection) -> None:
+    """Pesos reales aportados por Oliver 2026-04-25 para 17 SKUs de cintas,
+    tornillos, accesorios, trampillas y GypsoCOMETE.
+
+    Regla de unidad de venta (según catálogo Fassa Abril 2026):
+      - TORNILLOS, ACCESORIOS, GYPSOCOMETE → caja/embalaje
+      - CINTAS                              → rollo
+      - TRAMPILLAS                          → unidad
+
+    Cuando Oliver dio el peso por unidad individual y la unidad de venta es
+    caja (accesorios + GypsoCOMETE), se multiplica por uds/caja para que el
+    motor logístico (qty × kg_per_unit, qty en unidad de venta) calcule peso
+    correcto. Eso ya está hecho en la tabla embebida _REAL_WEIGHTS_20260425.
+
+    Pendientes de confirmación (no se aplican):
+      - 304000 Pieza Empalme TC 47 (no existe en DB; Oliver pendiente confirmar
+        si quería decir 304007).
+      - 304015 — el peso 0,05 kg corresponde a "Cruceta TC 47" según Oliver,
+        pero en la DB el SKU 304015 es CRUCETA TC 60 (304014 es la TC 47).
+        Aquí se aplica el peso al SKU 304015 (TC 60) calculado como 0,05 × 25
+        uds/caja = 1,25 kg/caja, asumiendo que Oliver se refería al SKU que
+        existe; pendiente confirmar si quería al 304014.
+
+    Limpia la marca [peso estimado] de los notes de cada SKU actualizado.
+    Idempotente vía flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_real_weights_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    not_found = []
+    for sku, kg in _REAL_WEIGHTS_20260425:
+        cur = db.execute(
+            "UPDATE products SET kg_per_unit = ?, "
+            "notes = TRIM(REPLACE(REPLACE(COALESCE(notes, ''), "
+            "'[peso estimado 2026-04-24]', ''), '[peso estimado]', '')) "
+            "WHERE sku = ?",
+            (kg, sku),
+        )
+        if cur.rowcount == 0:
+            not_found.append(sku)
+        else:
+            updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_real_weights_20260425',
+         f'updated={updated};not_found={",".join(not_found) or "none"}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog real-weights 2026-04-25: {updated} SKUs con peso '
+        f'real aplicado (cintas+tornillos+accesorios+trampillas+gypsocomete). '
+        f'Not found: {not_found or "none"}'
     )
 
 
