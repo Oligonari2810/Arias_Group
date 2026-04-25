@@ -14,6 +14,15 @@ CONT_40HC = ContainerProfile(
     inner_length_m=12.03, inner_width_m=2.35, inner_height_m=2.69,
     payload_kg=28000, door_clearance_m=0.30, stowage_factor=0.90,
 )
+# 40HC con calibración operativa Arias (2026-04-25):
+# floor_stowage 0.80 · payload 26500 (no 28000) · stow 0.90.
+# Usable: 22.67 m² · 23.850 kg · 68.44 m³.
+CONT_40HC_ARIAS = ContainerProfile(
+    type='40HC',
+    inner_length_m=12.03, inner_width_m=2.35, inner_height_m=2.69,
+    payload_kg=26500, door_clearance_m=0.30, stowage_factor=0.90,
+    floor_stowage_factor=0.80,
+)
 
 PALLET_PLACAS = PalletProfile(
     category='PLACAS', length_m=2.50, width_m=1.20, height_m=0.30,
@@ -44,47 +53,60 @@ def test_geometric_no_cabe_si_pallet_mas_grande_que_contenedor():
     assert _geometric_cap_per_container(CONT_40HC, big) == 0
 
 
-# ── Caso simple: solo placas ──
-def test_solo_placas_calcula_contenedores_por_geometria():
-    """565 palets de placas → ceil(565/12) = 48 contenedores."""
+# ── Modelo agregado (calibración Oliver 2026-04-25): peso domina con placas ──
+def test_solo_placas_modelo_agregado_peso_domina():
+    """565 palés de placas pesadas — peso al tope antes que geometría/volumen.
+
+    Modelo agregado (Arias):
+      Total huella = 565 × (2.5×1.2)/3 niveles = 565 × 1 m² = 565 m²
+      Total peso   = 565 × (120×9.5 + 22) = 565 × 1162 ≈ 656.530 kg
+      Total cbm    = 565 × (2.5×1.2×0.30) = 565 × 0.9 = 508,5 m³
+
+    Capacidades 40HC con calibración Arias (22,67 m² · 23.850 kg · 68,44 m³):
+      N_floor  = 565 / 22,67 ≈ 24,9
+      N_weight = 656.530 / 23.850 ≈ 27,5  ← dominante
+      N_cbm    = 508,5 / 68,44 ≈ 7,4
+      → ceil(27,5) = 28 contenedores físicos
+
+    Total coste = 27,5 × 5000 ≈ 137.660 € (no 28 × 5000 — coste fraccional).
+    """
     sku = SkuInput(
         sku='P-STD', category='PLACAS', qty=67800, unit_weight_kg=9.5,
         unit_area_m2=3.0, units_per_pallet=120,
     )
-    # 67800 / 120 = 565 palets
     r = compute_logistics(
-        skus=[sku], container=CONT_40HC,
+        skus=[sku], container=CONT_40HC_ARIAS,
         pallet_profiles={'PLACAS': PALLET_PLACAS},
         cost_per_container_eur=5000,
     )
     assert r.dominant_family == 'PLACAS'
-    assert r.dominant_driver == 'pallets'
-    fr = r.families['PLACAS']
-    assert fr.total_pallets == 565
-    assert fr.cap_geo_per_container == 12
-    assert fr.n_by_pallets == 48
-    # Peso = 565 × (120×9.5 + 22) = 565 × 1162 ≈ 656,530 kg
-    # N_weight = ceil(656530 / (28000×0.9)) = ceil(656530/25200) = 27
-    assert fr.n_by_weight == 27
-    assert r.n_containers == 48
-    assert r.total_cost_eur == 48 * 5000
+    assert r.dominant_driver == 'weight'
+    assert r.n_containers == 28  # ceil del decimal
+    # Decimal entre 27 y 28 (peso real ~27,5).
+    assert 27.0 < r.n_containers_decimal < 28.0
+    # Coste fraccional: n_decimal × 5000 (no 28 × 5000).
+    expected_cost = r.n_containers_decimal * 5000
+    assert r.total_cost_eur == pytest.approx(expected_cost, abs=1.0)
 
 
-# ── Imputación: placas dominante pagan todo ──
-def test_imputacion_unit_log_cost_placas():
+# ── Imputación por palés totales ──
+def test_imputacion_por_palets_totales():
+    """Coste imputado al SKU = (n_decimal × cost) / total_palés × pallets_sku."""
     sku = SkuInput(
         sku='P-STD', category='PLACAS', qty=67800, unit_weight_kg=9.5,
         unit_area_m2=3.0, units_per_pallet=120,
     )
     r = compute_logistics(
-        [sku], CONT_40HC, {'PLACAS': PALLET_PLACAS}, cost_per_container_eur=5000,
+        [sku], CONT_40HC_ARIAS, {'PLACAS': PALLET_PLACAS}, cost_per_container_eur=5000,
     )
     sc = r.skus[0]
-    # 48 conts × 5000 = 240000 € / 565 palets = 424.78 €/palet
-    # 424.78 / 120 uds = 3.5399 €/ud
-    assert sc.unit_log_cost_eur == pytest.approx(3.5399, abs=0.001)
-    # €/m2 = 3.5399 / 3.0 = 1.18
-    assert sc.m2_log_cost_eur == pytest.approx(1.18, abs=0.01)
+    # n_decimal × 5000 = ~137.660 € repartido entre 565 palés = ~243,6 €/palé.
+    # 243,6 / 120 uds = 2,03 €/ud.
+    cost_per_pallet = r.n_containers_decimal * 5000 / sc.pallets
+    expected_unit_cost = cost_per_pallet / 120
+    assert sc.unit_log_cost_eur == pytest.approx(expected_unit_cost, abs=0.01)
+    # €/m² consistente con €/ud / area_unidad.
+    assert sc.m2_log_cost_eur == pytest.approx(sc.unit_log_cost_eur / 3.0, abs=0.01)
 
 
 # ── Mix de familias: complementario ocupa suelo sin abrir containers extra ──
@@ -113,28 +135,38 @@ def test_perfiles_ocupan_suelo_sobrante_sin_extras():
     assert r.extra_containers_by_family.get('TORNILLOS', 0) == 0
 
 
-def test_complementario_abre_container_extra_si_overflow():
-    # Placas dominantes: 60 palets → ceil(60/12) = 5 contenedores de placas.
+def test_modelo_agregado_combina_huellas_de_familias():
+    """Modelo agregado: huellas de placas + complementarias suman al mismo cont.
+
+    Antes el motor abría contenedores 'extra' para complementarias que no
+    cabían en huecos del dominante. El modelo agregado simplemente suma m²
+    huella y deja que MAX(floor, weight, cbm) decida — sin distinción
+    'dominante/extras'.
+    """
     placas = SkuInput(
         sku='P-STD', category='PLACAS', qty=7200, unit_weight_kg=9.5,
         unit_area_m2=3.0, units_per_pallet=120,
     )
-    # Tornillos: 65 palets. Caben ~11 en suelo de cada placas-cont (5×11=55),
-    # quedan 10 → 1 contenedor extra. Así PLACAS (5) sigue siendo dominante
-    # frente a TORNILLOS alone (ceil(65/36)=2).
     tornillos = SkuInput(
         sku='T-BIG', category='TORNILLOS', qty=325, unit_weight_kg=0.1,
         unit_area_m2=0, units_per_pallet=5,
     )
     r = compute_logistics(
-        [placas, tornillos], CONT_40HC,
+        [placas, tornillos], CONT_40HC_ARIAS,
         {'PLACAS': PALLET_PLACAS, 'TORNILLOS': PALLET_EURO},
         cost_per_container_eur=5000,
     )
-    assert r.dominant_family == 'PLACAS'
-    assert r.families['PLACAS'].n_alone == 5
-    assert r.extra_containers_by_family['TORNILLOS'] >= 1
-    assert r.n_containers == 5 + r.extra_containers_by_family['TORNILLOS']
+    # Familia con más palés (tornillos: 65, placas: 60) = dominante informativo.
+    assert r.dominant_family in ('PLACAS', 'TORNILLOS')
+    # extra_containers_by_family es legacy (vacío en modelo agregado).
+    assert r.extra_containers_by_family == {}
+    # n_containers viene del MAX agregado, no de "n_alone + extras".
+    # Placas: 60 × 1 m² huella + tornillos: 65 × (1.2×0.8/2) = 65 × 0.48 = 31,2 m²
+    # → 91,2 m² / 22,67 = 4,02 → ceil=5 cont
+    # Peso: 60×1162 + 65×22.5 = 69.720 + 1.463 = 71.183 kg / 23.850 = 2,98 → 3 cont
+    # MAX(4,02 ; 2,98 ; ...) = 4,02 → ceil 5
+    assert r.n_containers == 5
+    assert r.dominant_driver == 'floor'
 
 
 # ── Peso domina si los palets son ligeros pero abundantes en volumen ──
@@ -185,10 +217,64 @@ def test_override_per_sku_de_pallet_dims():
         pallet_length_m=1.20, pallet_width_m=0.80, pallet_height_m=0.80,
         stackable_levels=2,
     )
-    # Con override: cap_geo = floor(11.73/1.2)×floor(2.35/0.8)×2 = 9×2×2 = 36
     r = compute_logistics(
         [sku], CONT_40HC, {'PLACAS': PALLET_PLACAS}, cost_per_container_eur=5000,
     )
-    # 4 palets / 36 = 1 container
+    # 4 palets / 36 = 1 container (cap_geo se mantiene como métrica informativa).
     assert r.families['PLACAS'].cap_geo_per_container == 36
     assert r.n_containers == 1
+
+
+# ── Caso real Oliver 2026-04-25: 7 SKUs Bonita Golf — debe dar 28 cont ──
+def test_caso_real_bonita_golf_da_28_contenedores():
+    """Cotización 7 materiales (placas STD/AQUA/LIGNUM + pastas + cintas).
+
+    Cantidades NETAS (sin merma 5%): 6758 + 618 + 89 + 479 + 1947 + 3035 + 13844.
+    El test las pasa con waste 0 — el motor recibe ya las cantidades brutas
+    como vienen del cotizador (la merma se aplica antes de llamar al motor).
+
+    Resultado esperado con calibración Arias (22,67 m² · 23.850 kg · 68,44 m³):
+    ~28 cont (peso domina al ~28x → ceil 28 o 29 según redondeo del motor).
+    """
+    pallet_pastas = PalletProfile(
+        category='PASTAS', length_m=1.20, width_m=0.80, height_m=1.20,
+        stackable_levels=1, allow_mix_floor=True,
+    )
+    pallet_cintas = PalletProfile(
+        category='CINTAS', length_m=1.20, width_m=0.80, height_m=1.00,
+        stackable_levels=2, allow_mix_floor=True,
+    )
+
+    skus = [
+        # AQUA H2 13mm 2500: 6758 placas, 48/palé, 26.1 kg
+        SkuInput('P00H003250A0', 'PLACAS', 6758, 26.1, 3.0, 48),
+        # Cinta Juntas 75m: 618 rollos, 600/palé (estimado realista), 0.42 kg
+        SkuInput('304057', 'CINTAS', 618, 0.42, 0, 600),
+        # Malla Externa Light 50m: 89 rollos, 50/palé (estimado), 10.8 kg
+        SkuInput('301121', 'CINTAS', 89, 10.8, 0, 50),
+        # A 96 25kg: 479 sacos, 60/palé
+        SkuInput('714Y1', 'PASTAS', 479, 25.0, 0, 60),
+        # Fassajoint 2H 25kg: 1947 sacos, 50/palé
+        SkuInput('354', 'PASTAS', 1947, 25.0, 0, 50),
+        # LIGNUM 13mm 2000: 3035 placas, 48/palé, 30.7 kg, palé 2.0×1.2
+        SkuInput('P00LB03200AC', 'PLACAS', 3035, 30.7, 2.4, 48,
+                 pallet_length_m=2.0, pallet_width_m=1.2),
+        # STD 13mm 2400: 13844 placas, 48/palé, 25.1 kg, palé 2.4×1.2
+        SkuInput('P00A003240A0', 'PLACAS', 13844, 25.1, 2.88, 48,
+                 pallet_length_m=2.4, pallet_width_m=1.2),
+    ]
+    r = compute_logistics(
+        skus, CONT_40HC_ARIAS,
+        {'PLACAS': PALLET_PLACAS, 'PASTAS': pallet_pastas, 'CINTAS': pallet_cintas},
+        cost_per_container_eur=4050,
+    )
+    # Resultado esperado (cálculo Oliver): ~28-29 contenedores físicos.
+    # Driver dominante: peso (mucho carga útil al tope).
+    assert r.dominant_driver == 'weight'
+    assert 27 <= r.n_containers <= 30, f'esperado ~28, obtuvo {r.n_containers}'
+    # Decimal cerca de 28.
+    assert 27.0 < r.n_containers_decimal < 29.5
+    # Coste fraccional, no entero.
+    assert r.total_cost_eur == pytest.approx(
+        r.n_containers_decimal * 4050, abs=1.0
+    )

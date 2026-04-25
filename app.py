@@ -497,6 +497,8 @@ def init_db() -> None:
         );
 
         -- Perfil físico de contenedor (§3 spec logística). Editable sin redeploy.
+        -- floor_stowage_factor: techo de carga geométrica del suelo en estiba real
+        -- con placas (operativa Arias: 0.80 = 80% del suelo aprovechable).
         CREATE TABLE IF NOT EXISTS container_profiles (
             type TEXT PRIMARY KEY,               -- '20', '40', '40HC'
             inner_length_m REAL NOT NULL,
@@ -504,7 +506,8 @@ def init_db() -> None:
             inner_height_m REAL NOT NULL,
             payload_kg REAL NOT NULL,
             door_clearance_m REAL NOT NULL DEFAULT 0.30,
-            stowage_factor REAL NOT NULL DEFAULT 0.90,  -- 0.85-0.95 según estiba
+            stowage_factor REAL NOT NULL DEFAULT 0.90,  -- peso/volumen
+            floor_stowage_factor REAL NOT NULL DEFAULT 1.0,  -- m² suelo
             notes TEXT
         );
 
@@ -562,6 +565,7 @@ def init_db() -> None:
     _audit_logistics_fixes_20260424(db)
     _audit_catalog_completion_20260424(db)
     _sync_fx_sources_20260424(db)
+    _logistics_aggregated_calibration_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1079,6 +1083,39 @@ def _audit_catalog_completion_20260424(db: sqlite3.Connection) -> None:
         )
 
 
+def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
+    """Calibración operativa del motor logístico (sesión Oliver 2026-04-25).
+
+    Replica en SQLite la migración Alembic 0003_aggregated_logistics:
+    - 40HC y 40' payload_kg 28000 → 26500 (nominal real Fassa).
+    - Nueva columna container_profiles.floor_stowage_factor (default 1.0,
+      0.80 para todos los tipos: representa el techo de carga geométrica
+      con placas según operativa Arias).
+
+    Idempotente vía flag en app_settings.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'logistics_aggregated_calibration_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    cols = {r[1] for r in db.execute("PRAGMA table_info(container_profiles)").fetchall()}
+    if 'floor_stowage_factor' not in cols:
+        db.execute(
+            "ALTER TABLE container_profiles ADD COLUMN floor_stowage_factor REAL NOT NULL DEFAULT 1.0"
+        )
+    db.execute("UPDATE container_profiles SET payload_kg = 26500 WHERE type IN ('40', '40HC')")
+    db.execute("UPDATE container_profiles SET floor_stowage_factor = 0.80")
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('logistics_aggregated_calibration_20260425', 'applied', now_iso()),
+    )
+    db.commit()
+    print('[migration] logística agregada calibrada: 40HC payload 26500, floor_stowage 0.80')
+
+
 def _sync_fx_sources_20260424(db: sqlite3.Connection) -> None:
     """Sincroniza app_settings.fx_eur_usd con fx_rates EUR→USD.
 
@@ -1236,20 +1273,21 @@ def seed_db() -> None:
                 VALUES (?,?,?,?,?,?,?)''', c)
 
     # Seed perfiles físicos de contenedor (§3 spec logística).
-    # Dimensiones interiores estándar ISO. payload 40' = 28000 kg por criterio
-    # operativo Arias (industria típica 26500-26700; ajustable vía UI de config).
+    # Dimensiones interiores estándar ISO. payload nominal Fassa Arias = 26500 kg.
+    # floor_stowage_factor 0.80 representa el techo de carga geométrica con placas
+    # según operativa Arias (calibración Oliver 2026-04-25).
     if db.execute('SELECT COUNT(*) AS c FROM container_profiles').fetchone()['c'] == 0:
         profiles = [
-            # type, inner_length_m, inner_width_m, inner_height_m, payload_kg, door, stow, notes
-            ('20',   5.90,  2.35, 2.39, 21500, 0.30, 0.90, 'Contenedor 20 pies estándar'),
-            ('40',   12.03, 2.35, 2.39, 28000, 0.30, 0.90, 'Contenedor 40 pies estándar — payload operativo Arias'),
-            ('40HC', 12.03, 2.35, 2.69, 28000, 0.30, 0.90, 'Contenedor 40 High Cube — 30cm más alto que 40 estándar'),
+            # type, inner_length, inner_width, inner_height, payload_kg, door, stow_w/v, stow_floor, notes
+            ('20',   5.90,  2.35, 2.39, 21500, 0.30, 0.90, 0.80, 'Contenedor 20 pies estándar'),
+            ('40',   12.03, 2.35, 2.39, 26500, 0.30, 0.90, 0.80, 'Contenedor 40 pies — payload operativo Arias 26500 kg'),
+            ('40HC', 12.03, 2.35, 2.69, 26500, 0.30, 0.90, 0.80, 'Contenedor 40 High Cube — 30cm más alto'),
         ]
         for p in profiles:
             db.execute('''INSERT INTO container_profiles
                 (type, inner_length_m, inner_width_m, inner_height_m, payload_kg,
-                 door_clearance_m, stowage_factor, notes)
-                VALUES (?,?,?,?,?,?,?,?)''', p)
+                 door_clearance_m, stowage_factor, floor_stowage_factor, notes)
+                VALUES (?,?,?,?,?,?,?,?,?)''', p)
 
     # Seed perfiles de palé por familia (§2 spec logística).
     # Valores iniciales editables desde UI de masters; cada SKU puede overridear
@@ -3395,6 +3433,9 @@ def api_compute_logistics():
     ).fetchone()
     if not cp_row:
         return jsonify({'ok': False, 'error': f'container_type {container_type!r} no existe'}), 400
+    # floor_stowage_factor puede no existir en DBs creadas antes de la
+    # migración 0003 — usamos 1.0 como fallback (comportamiento previo).
+    floor_stowage = cp_row['floor_stowage_factor'] if 'floor_stowage_factor' in cp_row.keys() else 1.0
     container = ContainerProfile(
         type=cp_row['type'],
         inner_length_m=cp_row['inner_length_m'],
@@ -3403,6 +3444,7 @@ def api_compute_logistics():
         payload_kg=cp_row['payload_kg'],
         door_clearance_m=cp_row['door_clearance_m'],
         stowage_factor=cp_row['stowage_factor'],
+        floor_stowage_factor=float(floor_stowage),
     )
 
     # Pallet profiles por familia.
@@ -3467,11 +3509,20 @@ def api_compute_logistics():
 
     return jsonify({
         'ok': True,
-        'n_containers': result.n_containers,
+        'n_containers': result.n_containers,                  # entero (físicos a reservar)
+        'n_containers_decimal': result.n_containers_decimal,  # decimal (para coste imputado)
         'dominant_family': result.dominant_family,
         'dominant_driver': result.dominant_driver,
         'total_cost_eur': result.total_cost_eur,
         'extra_containers_by_family': result.extra_containers_by_family,
+        'aggregate': {
+            'total_floor_m2': result.total_floor_m2,
+            'total_weight_kg': result.total_weight_kg,
+            'total_cbm': result.total_cbm,
+            'n_by_floor': result.n_by_floor,
+            'n_by_weight': result.n_by_weight,
+            'n_by_cbm': result.n_by_cbm,
+        },
         'families': {
             cat: {
                 'total_pallets': fr.total_pallets,
