@@ -175,13 +175,24 @@ def _specs(warnings: list[str]) -> dict[str, TableSpec]:
             ('units_per_pallet', 'units_per_pallet', _decimal),
             ('sqm_per_pallet', 'sqm_per_pallet', _decimal),
             ('notes', 'notes', None),
-            ('pvp_per_m2', 'pvp_per_m2', _decimal),
-            ('precio_arias_m2', 'precio_arias_m2', _decimal),
+            # pvp_per_m2 y precio_arias_m2 dropeadas en migración 0008
+            # (cache que generaba drift; se calculan on-the-fly).
             ('content_per_unit', 'content_per_unit', None),
             ('pack_size', 'pack_size', None),
             ('pvp_eur_unit', 'pvp_eur_unit', _decimal),
             ('precio_arias_eur_unit', 'precio_arias_eur_unit', _decimal),
             ('discount_pct', 'discount_pct', _decimal),
+            # Nuevas columnas migración 0008 (datos extraídos de tarifa Fassa).
+            ('length_mm', 'length_mm', None),
+            ('width_mm', 'width_mm', None),
+            ('thickness_mm', 'thickness_mm', _decimal),
+            ('kg_per_ml', 'kg_per_ml', _decimal),
+            ('box_units', 'box_units', None),
+            ('peso_saco_kg', 'peso_saco_kg', _decimal),
+            ('dispo_tarancon', 'dispo_tarancon', None),
+            ('tariff_origen', 'tariff_origen', None),
+            ('color', 'color', None),
+            ('norma_text', 'norma_text', None),
         ]),
         'systems': TableSpec('systems', [
             ('id', 'id', None),

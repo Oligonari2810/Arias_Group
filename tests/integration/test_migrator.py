@@ -43,9 +43,12 @@ def legacy_sqlite(tmp_path):
             subfamily TEXT, source_catalog TEXT NOT NULL, unit TEXT NOT NULL,
             unit_price_eur REAL NOT NULL, kg_per_unit REAL,
             units_per_pallet REAL, sqm_per_pallet REAL, notes TEXT,
-            pvp_per_m2 REAL, precio_arias_m2 REAL, content_per_unit TEXT,
+            content_per_unit TEXT,
             pack_size TEXT, pvp_eur_unit REAL, precio_arias_eur_unit REAL,
-            discount_pct REAL DEFAULT 50
+            discount_pct REAL DEFAULT 50,
+            length_mm INTEGER, width_mm INTEGER, thickness_mm REAL,
+            kg_per_ml REAL, box_units INTEGER, peso_saco_kg REAL,
+            dispo_tarancon TEXT, tariff_origen TEXT, color TEXT, norma_text TEXT
         );
         CREATE TABLE systems (
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
