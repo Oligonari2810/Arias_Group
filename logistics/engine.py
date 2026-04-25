@@ -114,6 +114,22 @@ class LogisticsResult:
     skus: list[SkuComputed]
     extra_containers_by_family: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Capacidad libre por contenedor dominante (el que abren las placas).
+    # Útil para alertar al vendedor que queda hueco para cross-sell de
+    # familias complementarias con mejor margen (pastas, cintas, etc.).
+    # Los contenedores "extras" (abiertos por complementarias que no cupieron
+    # en huecos) no cuentan en el cálculo: se asumen razonablemente cargados.
+    free_weight_kg_per_cont: float = 0.0
+    free_cbm_per_cont: float = 0.0
+    free_floor_m2_per_cont: float = 0.0
+    free_weight_kg_total: float = 0.0
+    free_cbm_total: float = 0.0
+    free_floor_m2_total: float = 0.0
+    # True si el contenedor dominante no admite carga complementaria útil:
+    # < 5% del payload libre Y < 10% del suelo libre. Caso típico: placas
+    # 1200×2000 rotadas que llenan por peso hasta el tope. El cotizador
+    # usa este flag para mostrar "optimizado" en vez de "oportunidad".
+    is_optimized: bool = False
 
 
 def _effective_pallet_profile(sku: SkuInput, family_profile: PalletProfile) -> PalletProfile:
@@ -344,6 +360,74 @@ def compute_logistics(
         if extra > 0:
             impute(cat, extra)
 
+    # ─────────────────────────────────────────────────────────────────────
+    # CAPACIDAD LIBRE en los contenedores dominantes (no en los extras).
+    # El vendedor ve esto como "oportunidad de cross-sell" en la UI.
+    #   free_weight = payload_efectivo − peso_palés_dominantes_prom
+    #                                 − peso_palés_complementarios_en_huecos
+    #   free_floor  = suelo_interior − suelo_ocupado_por_dominantes_planta_baja
+    #                                − suelo_ocupado_por_complementarios_en_huecos
+    #   free_cbm    = cbm_efectivo  − cbm_mercancía_paletizada
+    # ─────────────────────────────────────────────────────────────────────
+    n_dom_cont = dom.n_alone  # solo los contenedores del dominante
+    cont_floor_m2 = container.inner_length_m * container.inner_width_m
+    cont_cbm_eff = container.effective_cbm
+    cont_weight_eff = container.effective_payload_kg
+
+    if n_dom_cont > 0:
+        # Dominante: peso y cbm promediados por contenedor (total/N).
+        # Suelo: solo planta baja — los niveles superiores del palé
+        # dominante no liberan espacio aprovechable (están apilados).
+        dom_pallets_per_cont = dom.total_pallets / n_dom_cont
+        dom_pallets_on_floor = math.ceil(
+            dom_pallets_per_cont / max(dom_pallet.stackable_levels, 1)
+        )
+        dom_floor_used = dom_pallets_on_floor * dom_pallet.length_m * dom_pallet.width_m
+        dom_weight_used = dom.total_weight_kg / n_dom_cont
+        dom_cbm_used = dom.total_cbm / n_dom_cont
+
+        # Complementarias que CABEN en huecos de dominantes (no las que abren extras).
+        comp_floor_used = 0.0
+        comp_weight_used = 0.0
+        comp_cbm_used = 0.0
+        for cat, fr in family_results.items():
+            if cat == dom_cat:
+                continue
+            extras_by_this = extra_by_family.get(cat, 0)
+            comp_pallet_obj = effective_pallet_by_family[cat]
+            # Palés de esta complementaria alojados en huecos de dominantes:
+            pallets_in_extras = extras_by_this * max(fr.cap_geo_per_container, 1)
+            pallets_in_dom_huecos = max(0, fr.total_pallets - pallets_in_extras)
+            if pallets_in_dom_huecos <= 0:
+                continue
+            # Planta baja del complementario en huecos (sin niveles superiores):
+            comp_floor_pallets = math.ceil(
+                pallets_in_dom_huecos / max(comp_pallet_obj.stackable_levels, 1)
+            )
+            comp_floor_used += (
+                comp_floor_pallets * comp_pallet_obj.length_m * comp_pallet_obj.width_m
+            ) / n_dom_cont
+            comp_weight_used += (
+                pallets_in_dom_huecos * (fr.total_weight_kg / max(fr.total_pallets, 1))
+            ) / n_dom_cont
+            comp_cbm_used += (
+                pallets_in_dom_huecos * (fr.total_cbm / max(fr.total_pallets, 1))
+            ) / n_dom_cont
+
+        free_weight = max(0.0, cont_weight_eff - dom_weight_used - comp_weight_used)
+        free_floor = max(0.0, cont_floor_m2 - dom_floor_used - comp_floor_used)
+        free_cbm = max(0.0, cont_cbm_eff - dom_cbm_used - comp_cbm_used)
+
+        # Umbrales de "optimizado": < 5% peso libre Y < 10% suelo libre.
+        pct_weight_free = free_weight / cont_weight_eff if cont_weight_eff > 0 else 0
+        pct_floor_free = free_floor / cont_floor_m2 if cont_floor_m2 > 0 else 0
+        optimized = pct_weight_free < 0.05 and pct_floor_free < 0.10
+    else:
+        free_weight = 0.0
+        free_floor = 0.0
+        free_cbm = 0.0
+        optimized = True
+
     return LogisticsResult(
         container_type=container.type,
         n_containers=n_containers,
@@ -353,4 +437,11 @@ def compute_logistics(
         families=family_results,
         skus=skus_computed,
         extra_containers_by_family=extra_by_family,
+        free_weight_kg_per_cont=round(free_weight, 2),
+        free_cbm_per_cont=round(free_cbm, 2),
+        free_floor_m2_per_cont=round(free_floor, 2),
+        free_weight_kg_total=round(free_weight * n_dom_cont, 2),
+        free_cbm_total=round(free_cbm * n_dom_cont, 2),
+        free_floor_m2_total=round(free_floor * n_dom_cont, 2),
+        is_optimized=optimized,
     )
