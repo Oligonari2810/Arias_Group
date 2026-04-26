@@ -565,6 +565,7 @@ def init_db() -> None:
     _catalog_pdf_extras_and_discontinued_20260425(db)
     _catalog_discontinued_skus_20260425(db)
     _fix_cinta_guardavivos_names_20260425(db)
+    _catalog_fill_gaps_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2053,6 +2054,89 @@ def _fix_cinta_guardavivos_names_20260425(db: sqlite3.Connection) -> None:
     )
     db.commit()
     print(f'[migration] cinta guardavivos names: {updated} SKUs renombrados')
+
+
+def _catalog_fill_gaps_20260425(db: sqlite3.Connection) -> None:
+    """Rellena huecos detectados en la auditoría 2026-04-25 (familia por
+    familia) — datos extraíbles del name del SKU sin necesidad de input
+    externo.
+
+    1) PLACAS — 3 SKUs con thickness_mm vacío:
+       - STD BA 10mm (P00A000250A0, P00A000260A0) → thickness=9,5
+       - EXTERNA LIGHT BR 13mm 1200×2000 (P00XL03200EI) → thickness=12,5
+
+    2) TORNILLOS — 17 SKUs sin box_units (uds/caja explícito está en el
+       name como '— 1.000ud', '— 500ud', etc). Regex en Python para extraer.
+
+    3) ACCESORIOS — Cantonera 1091001Y → box_units=100 (el name lo dice).
+
+    4) CINTAS — Fassanet 700960 (rollo 1×50m) → box_units=1.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_fill_gaps_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) PLACAS thickness.
+    placas_thickness = [
+        ('P00A000250A0', 9.5),
+        ('P00A000260A0', 9.5),
+        ('P00XL03200EI', 12.5),
+    ]
+    placas_fixed = 0
+    for sku, thick in placas_thickness:
+        cur = db.execute(
+            'UPDATE products SET thickness_mm = ? WHERE sku = ? AND thickness_mm IS NULL',
+            (thick, sku),
+        )
+        placas_fixed += cur.rowcount
+
+    # 2) TORNILLOS — extraer box_units del name con regex robusto.
+    # Patrones: "— 1.000ud", "— 500ud", "— 250ud", "— 5.000ud"
+    tornillos = db.execute(
+        "SELECT id, sku, name FROM products "
+        "WHERE category = 'TORNILLOS' AND box_units IS NULL"
+    ).fetchall()
+    tornillos_fixed = 0
+    for t in tornillos:
+        m = re.search(r'—\s*(\d{1,3}(?:\.\d{3})*)\s*ud', t['name'] or '')
+        if m:
+            n = int(m.group(1).replace('.', ''))
+            if 1 <= n <= 100000:
+                db.execute(
+                    'UPDATE products SET box_units = ? WHERE id = ?',
+                    (n, t['id']),
+                )
+                tornillos_fixed += 1
+
+    # 3) ACCESORIOS — Cantonera Yeso (100 ud/caja según name).
+    cur = db.execute(
+        "UPDATE products SET box_units = 100 WHERE sku = '1091001Y' AND box_units IS NULL"
+    )
+    cantonera_fixed = cur.rowcount
+
+    # 4) CINTAS — Fassanet 160 (1 rollo por venta).
+    cur = db.execute(
+        "UPDATE products SET box_units = 1 WHERE sku = '700960' AND box_units IS NULL"
+    )
+    fassanet_fixed = cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_fill_gaps_20260425',
+         f'placas_thickness={placas_fixed};tornillos_box={tornillos_fixed};'
+         f'cantonera={cantonera_fixed};fassanet={fassanet_fixed}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog fill-gaps 2026-04-25: '
+        f'+{placas_fixed} thickness placas, +{tornillos_fixed} box_units tornillos, '
+        f'+{cantonera_fixed} cantonera, +{fassanet_fixed} fassanet'
+    )
 
 
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
