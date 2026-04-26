@@ -566,6 +566,7 @@ def init_db() -> None:
     _catalog_discontinued_skus_20260425(db)
     _fix_cinta_guardavivos_names_20260425(db)
     _catalog_fill_gaps_20260425(db)
+    _cintas_by_caja_and_verify_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2136,6 +2137,95 @@ def _catalog_fill_gaps_20260425(db: sqlite3.Connection) -> None:
         f'[migration] catalog fill-gaps 2026-04-25: '
         f'+{placas_fixed} thickness placas, +{tornillos_fixed} box_units tornillos, '
         f'+{cantonera_fixed} cantonera, +{fassanet_fixed} fassanet'
+    )
+
+
+# Pesos kg/caja confirmados por Oliver contra Tarifa Fassa Hispania
+# (auditoría 2026-04-25). La unidad de venta operativa es la CAJA porque
+# Fassa solo sirve cajas completas (no rollos sueltos), aunque en factura
+# al cliente final se cuente por rollos. El motor logístico calcula
+# qty × kg_per_unit con qty en cajas.
+_CINTAS_KG_PER_CAJA = [
+    # (sku, kg_caja, source: 'oficial' o 'derivado_de_kg_rollo_existente')
+    ('301121', 33.60, 'oficial'),    # Malla Externa Light 50m × 6 rollos = 33,6
+    ('304056',  6.72, 'derivado'),   # Cinta Juntas 23m × 24 rollos × 0,28
+    ('304057', 12.00, 'derivado'),   # Cinta Juntas 75m × 20 × 0,60
+    ('304058', 11.50, 'oficial'),
+    ('304064',  3.00, 'derivado'),   # Guardavivos 12,5m × 10 × 0,30 (pendiente confirmar)
+    ('304065', 17.38, 'oficial'),    # Guardavivos 30m — corregido (era 10,00 → 17,38)
+    ('304075', 11.58, 'oficial'),
+    ('304076', 17.42, 'oficial'),    # Banda Estanca 70mm — corregido (era 10,50 → 17,42)
+    ('304078',  4.75, 'oficial'),    # Malla FV 45m — corregido (era 8,10 → 4,75)
+    ('304079', 14.38, 'oficial'),    # Malla FV 153m — corregido (era 6,00 → 14,38)
+    ('700960',  8.10, 'oficial'),    # Fassanet 160 (1 rollo = 1 caja)
+]
+
+# SKUs cuyo peso ha sido verificado oficialmente contra Tarifa Fassa.
+# Se les quita la marca [peso estimado] del campo notes.
+_VERIFIED_NO_LONGER_ESTIMATED = [
+    # TORNILLOS confirmados Oliver 2026-04-25 vs Tarifa Fassa
+    '301240', '304102', '304109', '304117',
+    # TRAMPILLAS confirmadas
+    '304090', '301462', '301764',
+    # GYPSOCOMETE confirmadas
+    '301602XL',
+]
+
+
+def _cintas_by_caja_and_verify_20260425(db: sqlite3.Connection) -> None:
+    """Migración 2026-04-25: alinear CINTAS al modelo "venta por caja"
+    (Fassa Hispania solo sirve cajas completas, no rollos sueltos).
+
+    Cambios en CINTAS activas:
+      1) `unit` pasa de 'rollo' a 'caja'.
+      2) `kg_per_unit` pasa de kg/rollo a kg/caja (valores Tarifa Fassa).
+         Esto corrige 4 SKUs cuyo peso/rollo era erróneo (304065, 304076,
+         304078, 304079).
+
+    Y limpia la marca `[peso estimado]` de 8 SKUs ya verificados oficialmente
+    contra Tarifa Fassa Hispania (4 tornillos + 3 trampillas + 1 GypsoCOMETE).
+
+    REGLA OFERTAS INMUTABLES: solo `products`. Las ofertas existentes
+    quedan con sus pesos congelados en lines_json.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'cintas_by_caja_and_verify_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) CINTAS — unit→caja + kg/caja oficiales.
+    cintas_updated = 0
+    for sku, kg_caja, _src in _CINTAS_KG_PER_CAJA:
+        cur = db.execute(
+            "UPDATE products SET unit = 'caja', kg_per_unit = ? WHERE sku = ? AND category = 'CINTAS'",
+            (kg_caja, sku),
+        )
+        cintas_updated += cur.rowcount
+
+    # 2) Quitar [peso estimado] de los SKUs verificados oficialmente.
+    cleaned = 0
+    placeholder = ', '.join('?' for _ in _VERIFIED_NO_LONGER_ESTIMATED)
+    cur = db.execute(
+        f"UPDATE products SET notes = TRIM(REPLACE(REPLACE(COALESCE(notes,''), "
+        f"'[peso estimado 2026-04-24]', ''), '[peso estimado]', '')) "
+        f"WHERE sku IN ({placeholder})",
+        _VERIFIED_NO_LONGER_ESTIMATED,
+    )
+    cleaned = cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('cintas_by_caja_and_verify_20260425',
+         f'cintas_to_caja={cintas_updated};estimated_cleaned={cleaned}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] cintas-by-caja: {cintas_updated} cintas a kg/caja, '
+        f'{cleaned} SKUs sin marca [peso estimado]'
     )
 
 

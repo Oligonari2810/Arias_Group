@@ -32,14 +32,14 @@ TARGETS = {
 # whenever these functions are edited or code is inserted above them — otherwise
 # the gate measures the wrong lines and either fails spuriously or passes blindly.
 FUNCTION_LINE_RANGES = {
-    '_num':                 (2421, 2425),
-    'detect_family':        (2428, 2429),
-    'compute_line':         (2432, 2488),
-    '_container_result':    (2491, 2507),
-    'estimate_containers':  (2510, 2544),
-    'compute_totals':       (2667, 2687),
-    'dedup_alerts':         (2690, 2698),
-    'calculate_quote':      (2799, 2885),
+    '_num':                 (2511, 2515),
+    'detect_family':        (2518, 2519),
+    'compute_line':         (2522, 2578),
+    '_container_result':    (2581, 2597),
+    'estimate_containers':  (2600, 2634),
+    'compute_totals':       (2757, 2777),
+    'dedup_alerts':         (2780, 2788),
+    'calculate_quote':      (2889, 2975),
 }
 
 
