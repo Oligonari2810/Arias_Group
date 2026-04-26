@@ -568,6 +568,7 @@ def init_db() -> None:
     _catalog_fill_gaps_20260425(db)
     _cintas_by_caja_and_verify_20260425(db)
     _revert_cintas_to_rollo_20260425(db)
+    _add_sku_560901_and_rendimiento_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2295,6 +2296,87 @@ def _revert_cintas_to_rollo_20260425(db: sqlite3.Connection) -> None:
     )
     db.commit()
     print(f'[migration] cintas revertidas a unit=rollo: {updated} SKUs')
+
+
+def _add_sku_560901_and_rendimiento_20260425(db: sqlite3.Connection) -> None:
+    """Añade el SKU 560901 (Fassajoint 1H formato 25 kg, Tarancón) y la columna
+    `rendimiento_kg_per_m2` para registrar el consumo unitario de pasta/cinta
+    por m² de pared. El cotizador podrá auto-calcular cantidades cuando se
+    cotice por m² (futuro).
+
+    Datos 560901 (Tarifa Fassa Hispania Abr 2026 — Oliver 2026-04-25):
+      - PVP 23,63 €/saco (50% + 5% extra → Arias 11,22 €)
+      - 50 sacos/palé · 1.250 kg/palé neto
+      - kg_per_unit = 25 kg
+      - Origen: Tarancón
+      - Tiempo trabajabilidad: 60 min (1 hora)
+      - Color: Blanco · Norma: UNE EN 13963
+
+    Rendimiento Fassajoint 1H = 0,4 kg/m² (default conservador
+    intermedio en el rango 0,3-0,5 que aporta Oliver).
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'add_sku_560901_and_rendimiento_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Añadir columna `rendimiento_kg_per_m2` si no existe.
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    if 'rendimiento_kg_per_m2' not in existing:
+        _safe_add_column(db, 'products', 'rendimiento_kg_per_m2', 'REAL')
+
+    # 2) Crear SKU 560901 si no existe.
+    exists = db.execute("SELECT 1 FROM products WHERE sku = '560901'").fetchone()
+    sku_created = 0
+    if not exists:
+        db.execute(
+            """INSERT INTO products
+               (sku, name, category, subfamily, source_catalog, unit,
+                unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet,
+                pvp_eur_unit, precio_arias_eur_unit,
+                discount_pct, discount_extra_pct,
+                peso_saco_kg, color, norma_text, dispo_tarancon,
+                tariff_origen, tiempo_trabajab_min, rendimiento_kg_per_m2,
+                box_units, is_active, notes)
+               VALUES (?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?,
+                       ?, ?,
+                       ?, ?,
+                       ?, ?, ?, ?,
+                       ?, ?, ?,
+                       ?, ?, ?)""",
+            ('560901', 'FASSAJOINT 1H BLANCO 25kg', 'PASTAS', 'Pastas de juntas',
+             'Gypsotech Abr2026', 'saco',
+             11.22, 25.0, 50, None,
+             23.63, 11.22,
+             50.0, 5.0,
+             25.0, 'Blanco', 'UNE EN 13963', 'green',
+             'Tarancón', 60, 0.4,
+             1, 1, '25 kg/saco · 1.250 kg/palé · Tarifa Abr 2026'),
+        )
+        sku_created = 1
+
+    # 3) Backfill rendimiento para Fassajoint 1H 10kg también (mismo producto,
+    #    formato distinto). Conservador 0,4 kg/m².
+    db.execute(
+        "UPDATE products SET rendimiento_kg_per_m2 = 0.4 "
+        "WHERE sku IN ('560901', '351E1') AND rendimiento_kg_per_m2 IS NULL"
+    )
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('add_sku_560901_and_rendimiento_20260425',
+         f'sku_560901_created={sku_created};rendimiento_col_added={"rendimiento_kg_per_m2" not in existing}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] sku 560901 + rendimiento: created={sku_created}, '
+        f'rendimiento col added={"rendimiento_kg_per_m2" not in existing}'
+    )
 
 
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
