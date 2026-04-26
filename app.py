@@ -564,6 +564,13 @@ def init_db() -> None:
     _catalog_real_weights_20260425(db)
     _catalog_pdf_extras_and_discontinued_20260425(db)
     _catalog_discontinued_skus_20260425(db)
+    _fix_cinta_guardavivos_names_20260425(db)
+    _catalog_fill_gaps_20260425(db)
+    _cintas_by_caja_and_verify_20260425(db)
+    _revert_cintas_to_rollo_20260425(db)
+    _add_sku_560901_and_rendimiento_20260425(db)
+    _rendimientos_and_fixes_20260425(db)
+    _add_skus_revocos_yeso_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2014,6 +2021,548 @@ def _catalog_discontinued_skus_20260425(db: sqlite3.Connection) -> None:
     )
 
 
+def _fix_cinta_guardavivos_names_20260425(db: sqlite3.Connection) -> None:
+    """Auditoría 2026-04-25: 2 cintas Guardavivos tenían nombres mezclados con
+    Malla FV (45m/153m + 54/12 rollos/caja). Verificado contra Anexo Gypsotech
+    Noviembre 2025: las cintas Guardavivos correctas son 12,5m y 30m con 10
+    rollos/caja.
+
+    Corrige a:
+      - 304064 → "Cinta Guardavivos 50mm×12,5m — 10 rollos/caja"
+      - 304065 → "Cinta Guardavivos 50mm×30m — 10 rollos/caja"
+
+    Verificado: 0 ofertas activas usan estos SKUs (ofertas inmutables OK).
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'fix_cinta_guardavivos_names_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    fixes = [
+        ('304064', 'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja'),
+        ('304065', 'Cinta Guardavivos 50mm×30m — 10 rollos/caja'),
+    ]
+    updated = 0
+    for sku, new_name in fixes:
+        cur = db.execute(
+            'UPDATE products SET name = ? WHERE sku = ? AND name != ?',
+            (new_name, sku, new_name),
+        )
+        updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('fix_cinta_guardavivos_names_20260425', f'updated={updated}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] cinta guardavivos names: {updated} SKUs renombrados')
+
+
+def _catalog_fill_gaps_20260425(db: sqlite3.Connection) -> None:
+    """Rellena huecos detectados en la auditoría 2026-04-25 (familia por
+    familia) — datos extraíbles del name del SKU sin necesidad de input
+    externo.
+
+    1) PLACAS — 3 SKUs con thickness_mm vacío:
+       - STD BA 10mm (P00A000250A0, P00A000260A0) → thickness=9,5
+       - EXTERNA LIGHT BR 13mm 1200×2000 (P00XL03200EI) → thickness=12,5
+
+    2) TORNILLOS — 17 SKUs sin box_units (uds/caja explícito está en el
+       name como '— 1.000ud', '— 500ud', etc). Regex en Python para extraer.
+
+    3) ACCESORIOS — Cantonera 1091001Y → box_units=100 (el name lo dice).
+
+    4) CINTAS — Fassanet 700960 (rollo 1×50m) → box_units=1.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'catalog_fill_gaps_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) PLACAS thickness.
+    placas_thickness = [
+        ('P00A000250A0', 9.5),
+        ('P00A000260A0', 9.5),
+        ('P00XL03200EI', 12.5),
+    ]
+    placas_fixed = 0
+    for sku, thick in placas_thickness:
+        cur = db.execute(
+            'UPDATE products SET thickness_mm = ? WHERE sku = ? AND thickness_mm IS NULL',
+            (thick, sku),
+        )
+        placas_fixed += cur.rowcount
+
+    # 2) TORNILLOS — extraer box_units del name con regex robusto.
+    # Patrones: "— 1.000ud", "— 500ud", "— 250ud", "— 5.000ud"
+    tornillos = db.execute(
+        "SELECT id, sku, name FROM products "
+        "WHERE category = 'TORNILLOS' AND box_units IS NULL"
+    ).fetchall()
+    tornillos_fixed = 0
+    for t in tornillos:
+        m = re.search(r'—\s*(\d{1,3}(?:\.\d{3})*)\s*ud', t['name'] or '')
+        if m:
+            n = int(m.group(1).replace('.', ''))
+            if 1 <= n <= 100000:
+                db.execute(
+                    'UPDATE products SET box_units = ? WHERE id = ?',
+                    (n, t['id']),
+                )
+                tornillos_fixed += 1
+
+    # 3) ACCESORIOS — Cantonera Yeso (100 ud/caja según name).
+    cur = db.execute(
+        "UPDATE products SET box_units = 100 WHERE sku = '1091001Y' AND box_units IS NULL"
+    )
+    cantonera_fixed = cur.rowcount
+
+    # 4) CINTAS — Fassanet 160 (1 rollo por venta).
+    cur = db.execute(
+        "UPDATE products SET box_units = 1 WHERE sku = '700960' AND box_units IS NULL"
+    )
+    fassanet_fixed = cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('catalog_fill_gaps_20260425',
+         f'placas_thickness={placas_fixed};tornillos_box={tornillos_fixed};'
+         f'cantonera={cantonera_fixed};fassanet={fassanet_fixed}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] catalog fill-gaps 2026-04-25: '
+        f'+{placas_fixed} thickness placas, +{tornillos_fixed} box_units tornillos, '
+        f'+{cantonera_fixed} cantonera, +{fassanet_fixed} fassanet'
+    )
+
+
+# Pesos kg/caja confirmados por Oliver contra Tarifa Fassa Hispania
+# (auditoría 2026-04-25). La unidad de venta operativa es la CAJA porque
+# Fassa solo sirve cajas completas (no rollos sueltos), aunque en factura
+# al cliente final se cuente por rollos. El motor logístico calcula
+# qty × kg_per_unit con qty en cajas.
+_CINTAS_KG_PER_CAJA = [
+    # (sku, kg_caja, source: 'oficial' o 'derivado_de_kg_rollo_existente')
+    ('301121', 33.60, 'oficial'),    # Malla Externa Light 50m × 6 rollos = 33,6
+    ('304056',  6.72, 'derivado'),   # Cinta Juntas 23m × 24 rollos × 0,28
+    ('304057', 12.00, 'derivado'),   # Cinta Juntas 75m × 20 × 0,60
+    ('304058', 11.50, 'oficial'),
+    ('304064',  3.00, 'derivado'),   # Guardavivos 12,5m × 10 × 0,30 (pendiente confirmar)
+    ('304065', 17.38, 'oficial'),    # Guardavivos 30m — corregido (era 10,00 → 17,38)
+    ('304075', 11.58, 'oficial'),
+    ('304076', 17.42, 'oficial'),    # Banda Estanca 70mm — corregido (era 10,50 → 17,42)
+    ('304078',  4.75, 'oficial'),    # Malla FV 45m — corregido (era 8,10 → 4,75)
+    ('304079', 14.38, 'oficial'),    # Malla FV 153m — corregido (era 6,00 → 14,38)
+    ('700960',  8.10, 'oficial'),    # Fassanet 160 (1 rollo = 1 caja)
+]
+
+# SKUs cuyo peso ha sido verificado oficialmente contra Tarifa Fassa.
+# Se les quita la marca [peso estimado] del campo notes.
+_VERIFIED_NO_LONGER_ESTIMATED = [
+    # TORNILLOS confirmados Oliver 2026-04-25 vs Tarifa Fassa
+    '301240', '304102', '304109', '304117',
+    # TRAMPILLAS confirmadas
+    '304090', '301462', '301764',
+    # GYPSOCOMETE confirmadas
+    '301602XL',
+]
+
+
+def _cintas_by_caja_and_verify_20260425(db: sqlite3.Connection) -> None:
+    """Migración 2026-04-25: alinear CINTAS al modelo "venta por caja"
+    (Fassa Hispania solo sirve cajas completas, no rollos sueltos).
+
+    Cambios en CINTAS activas:
+      1) `unit` pasa de 'rollo' a 'caja'.
+      2) `kg_per_unit` pasa de kg/rollo a kg/caja (valores Tarifa Fassa).
+         Esto corrige 4 SKUs cuyo peso/rollo era erróneo (304065, 304076,
+         304078, 304079).
+
+    Y limpia la marca `[peso estimado]` de 8 SKUs ya verificados oficialmente
+    contra Tarifa Fassa Hispania (4 tornillos + 3 trampillas + 1 GypsoCOMETE).
+
+    REGLA OFERTAS INMUTABLES: solo `products`. Las ofertas existentes
+    quedan con sus pesos congelados en lines_json.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'cintas_by_caja_and_verify_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) CINTAS — unit→caja + kg/caja oficiales.
+    cintas_updated = 0
+    for sku, kg_caja, _src in _CINTAS_KG_PER_CAJA:
+        cur = db.execute(
+            "UPDATE products SET unit = 'caja', kg_per_unit = ? WHERE sku = ? AND category = 'CINTAS'",
+            (kg_caja, sku),
+        )
+        cintas_updated += cur.rowcount
+
+    # 2) Quitar [peso estimado] de los SKUs verificados oficialmente.
+    cleaned = 0
+    placeholder = ', '.join('?' for _ in _VERIFIED_NO_LONGER_ESTIMATED)
+    cur = db.execute(
+        f"UPDATE products SET notes = TRIM(REPLACE(REPLACE(COALESCE(notes,''), "
+        f"'[peso estimado 2026-04-24]', ''), '[peso estimado]', '')) "
+        f"WHERE sku IN ({placeholder})",
+        _VERIFIED_NO_LONGER_ESTIMATED,
+    )
+    cleaned = cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('cintas_by_caja_and_verify_20260425',
+         f'cintas_to_caja={cintas_updated};estimated_cleaned={cleaned}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] cintas-by-caja: {cintas_updated} cintas a kg/caja, '
+        f'{cleaned} SKUs sin marca [peso estimado]'
+    )
+
+
+# Pesos kg/ROLLO (unidad de venta real) calculados a partir de los pesos
+# kg/caja oficiales aportados por Oliver (Tarifa Fassa Hispania
+# 2026-04-25), divididos por uds/caja del PDF Anexo Nov 2025.
+#
+# Modelo: las CINTAS se venden por rollo al cliente final. Fassa solo
+# sirve cajas completas (= mínimo de pedido), pero eso es restricción
+# logística, NO unidad de venta. El motor cotiza qty × kg_per_unit con
+# qty en rollos.
+_CINTAS_KG_PER_ROLLO = [
+    # (sku, kg_caja_oficial, uds_caja → kg_rollo = caja/uds)
+    ('301121', 33.60,  6),  # 5.6   kg/rollo
+    ('304056',  6.72, 24),  # 0.28  (igual que antes)
+    ('304057', 12.00, 20),  # 0.60  (igual)
+    ('304058', 11.50, 10),  # 1.15  (igual)
+    ('304064',  3.00, 10),  # 0.30  (sigue estimado)
+    ('304065', 17.38, 10),  # 1.738 (era 1.00, corregido)
+    ('304075', 11.58, 22),  # 0.526 (~igual)
+    ('304076', 17.42, 15),  # 1.161 (era 0.70, corregido)
+    ('304078',  4.75, 54),  # 0.088 (era 0.15, corregido)
+    ('304079', 14.38, 12),  # 1.198 (era 0.50, corregido)
+    ('700960',  8.10,  1),  # 8.10  (igual; 1 rollo = 1 caja)
+]
+
+
+def _revert_cintas_to_rollo_20260425(db: sqlite3.Connection) -> None:
+    """Corrige el bug introducido por la migración previa _cintas_by_caja_:
+    NO se debe cambiar la unidad de venta a 'caja' — las cintas se siguen
+    cotizando por rollo (cliente pide rollos sueltos). El "kg/caja" de la
+    Tarifa Fassa Hispania que aportó Oliver es información operativa
+    (logística: Fassa solo sirve cajas completas como mínimo de pedido),
+    NO unidad comercial.
+
+    Esta migración:
+      1) Devuelve `unit` a 'rollo' para todas las cintas activas.
+      2) Establece `kg_per_unit` = kg/rollo = kg_caja_oficial / box_units.
+      3) Esto SÍ corrige los 4 valores erróneos previos (304065, 304076,
+         304078, 304079) usando los kg/caja oficiales como fuente de verdad.
+
+    Sin esto, ofertas históricas con qty=100 rollos serían recalculadas
+    como 100 × kg_caja → ~10x el peso real. Bug crítico.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'revert_cintas_to_rollo_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    for sku, kg_caja, uds_caja in _CINTAS_KG_PER_ROLLO:
+        kg_rollo = round(kg_caja / uds_caja, 4)
+        cur = db.execute(
+            "UPDATE products SET unit = 'rollo', kg_per_unit = ? "
+            "WHERE sku = ? AND category = 'CINTAS'",
+            (kg_rollo, sku),
+        )
+        updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('revert_cintas_to_rollo_20260425', f'updated={updated}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] cintas revertidas a unit=rollo: {updated} SKUs')
+
+
+def _add_sku_560901_and_rendimiento_20260425(db: sqlite3.Connection) -> None:
+    """Añade el SKU 560901 (Fassajoint 1H formato 25 kg, Tarancón) y la columna
+    `rendimiento_kg_per_m2` para registrar el consumo unitario de pasta/cinta
+    por m² de pared. El cotizador podrá auto-calcular cantidades cuando se
+    cotice por m² (futuro).
+
+    Datos 560901 (Tarifa Fassa Hispania Abr 2026 — Oliver 2026-04-25):
+      - PVP 23,63 €/saco (50% + 5% extra → Arias 11,22 €)
+      - 50 sacos/palé · 1.250 kg/palé neto
+      - kg_per_unit = 25 kg
+      - Origen: Tarancón
+      - Tiempo trabajabilidad: 60 min (1 hora)
+      - Color: Blanco · Norma: UNE EN 13963
+
+    Rendimiento Fassajoint 1H = 0,4 kg/m² (default conservador
+    intermedio en el rango 0,3-0,5 que aporta Oliver).
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'add_sku_560901_and_rendimiento_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Añadir columna `rendimiento_kg_per_m2` si no existe.
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    if 'rendimiento_kg_per_m2' not in existing:
+        _safe_add_column(db, 'products', 'rendimiento_kg_per_m2', 'REAL')
+
+    # 2) Crear SKU 560901 si no existe.
+    exists = db.execute("SELECT 1 FROM products WHERE sku = '560901'").fetchone()
+    sku_created = 0
+    if not exists:
+        db.execute(
+            """INSERT INTO products
+               (sku, name, category, subfamily, source_catalog, unit,
+                unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet,
+                pvp_eur_unit, precio_arias_eur_unit,
+                discount_pct, discount_extra_pct,
+                peso_saco_kg, color, norma_text, dispo_tarancon,
+                tariff_origen, tiempo_trabajab_min, rendimiento_kg_per_m2,
+                box_units, is_active, notes)
+               VALUES (?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?,
+                       ?, ?,
+                       ?, ?,
+                       ?, ?, ?, ?,
+                       ?, ?, ?,
+                       ?, ?, ?)""",
+            ('560901', 'FASSAJOINT 1H BLANCO 25kg', 'PASTAS', 'Pastas de juntas',
+             'Gypsotech Abr2026', 'saco',
+             11.22, 25.0, 50, None,
+             23.63, 11.22,
+             50.0, 5.0,
+             25.0, 'Blanco', 'UNE EN 13963', 'green',
+             'Tarancón', 60, 0.4,
+             1, 1, '25 kg/saco · 1.250 kg/palé · Tarifa Abr 2026'),
+        )
+        sku_created = 1
+
+    # 3) Backfill rendimiento para Fassajoint 1H 10kg también (mismo producto,
+    #    formato distinto). Conservador 0,4 kg/m².
+    db.execute(
+        "UPDATE products SET rendimiento_kg_per_m2 = 0.4 "
+        "WHERE sku IN ('560901', '351E1') AND rendimiento_kg_per_m2 IS NULL"
+    )
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('add_sku_560901_and_rendimiento_20260425',
+         f'sku_560901_created={sku_created};rendimiento_col_added={"rendimiento_kg_per_m2" not in existing}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] sku 560901 + rendimiento: created={sku_created}, '
+        f'rendimiento col added={"rendimiento_kg_per_m2" not in existing}'
+    )
+
+
+# Rendimientos kg/m² verificados Oliver 2026-04-25 (Tarifa Fassa Hispania).
+# Cada entrada: (sku, kg_per_m2, capa_mm, descripcion)
+_RENDIMIENTOS_KG_M2 = [
+    # PASTAS DE JUNTAS — Fassajoint family (default 0,4 kg/m²)
+    ('351E1', 0.4, '—',  'FASSAJOINT 1H 10kg'),  # ya aplicado en 0017, idempotente
+    ('352E1', 0.4, '—',  'FASSAJOINT 2H 5kg'),
+    ('353E1', 0.4, '—',  'FASSAJOINT 2H 10kg'),
+    ('354',   0.4, '—',  'FASSAJOINT 2H 25kg'),
+    ('356',   0.4, '—',  'FASSAJOINT 3H 25kg'),
+    ('358U3', 0.4, '—',  'Fassajoint 8h 25kg'),
+    # ACABADOS Y REVOCOS — alto consumo por m²
+    ('1259Y1', 15.0, '10mm', 'KX 16 W2 Extra-blanco (revoco proyectar)'),
+    # MASA DE AGARRE — Gypsomaf (capa fina, 2mm)
+    ('359',   1.0, '2mm',  'Gypsomaf 25kg'),
+    ('360E1', 1.0, '2mm',  'Gypsomaf 10kg'),
+]
+
+# Rendimientos L/m² para pinturas (consumo por capa).
+# Default Fassa: 4-5 m²/L → 0,20-0,25 L/m². Conservador 0,20 L/m².
+_RENDIMIENTOS_L_M2 = [
+    ('GYP010000', 0.20, 'GYPSOPAINT 14L'),
+    ('GYP010001', 0.20, 'GYPSOPAINT 5L'),
+]
+
+# Bug: regex peso_saco_kg de migración 0008 matcheaba "5 kg" dentro de "25 kg".
+# Corregir SKUs cuyo peso_saco_kg está mal porque kg_per_unit y name contradicen.
+_PESO_SACO_FIXES = [
+    ('1259Y1', 25.0),  # KX 16 W2 25kg (era 5,0)
+    ('359',    25.0),  # Gypsomaf 25kg (era 5,0)
+]
+
+
+def _rendimientos_and_fixes_20260425(db: sqlite3.Connection) -> None:
+    """Migración 2026-04-25 (continuación) — datos técnicos Oliver verificados:
+
+    1) Backfill rendimiento_kg_per_m2 para PASTAS y REVOCOS:
+       - Fassajoint family (0,4 kg/m²)
+       - KX 16 W2 (15,0 kg/m² capa 10mm)
+       - Gypsomaf (1,0 kg/m² capa 2mm)
+
+    2) Añade columna `rendimiento_l_per_m2` REAL para pinturas y backfill:
+       - GypsoPaint 14L y 5L → 0,20 L/m² (capa standard)
+
+    3) Corrige peso_saco_kg de 2 SKUs (bug regex de migración 0008 que
+       matcheaba "5 kg" dentro de "25 kg"):
+       - 1259Y1 KX 16 W2 25kg: 5,0 → 25,0
+       - 359    Gypsomaf 25kg: 5,0 → 25,0
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'rendimientos_and_fixes_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Backfill rendimiento_kg_per_m2.
+    kg_updated = 0
+    for sku, kg_m2, _capa, _desc in _RENDIMIENTOS_KG_M2:
+        cur = db.execute(
+            'UPDATE products SET rendimiento_kg_per_m2 = ? WHERE sku = ? '
+            'AND (rendimiento_kg_per_m2 IS NULL OR rendimiento_kg_per_m2 != ?)',
+            (kg_m2, sku, kg_m2),
+        )
+        kg_updated += cur.rowcount
+
+    # 2) Columna nueva rendimiento_l_per_m2 + backfill pinturas.
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    col_added = False
+    if 'rendimiento_l_per_m2' not in existing:
+        _safe_add_column(db, 'products', 'rendimiento_l_per_m2', 'REAL')
+        col_added = True
+    l_updated = 0
+    for sku, l_m2, _desc in _RENDIMIENTOS_L_M2:
+        cur = db.execute(
+            'UPDATE products SET rendimiento_l_per_m2 = ? WHERE sku = ?',
+            (l_m2, sku),
+        )
+        l_updated += cur.rowcount
+
+    # 3) Fix peso_saco_kg de SKUs con bug regex.
+    saco_fixed = 0
+    for sku, peso in _PESO_SACO_FIXES:
+        cur = db.execute(
+            'UPDATE products SET peso_saco_kg = ? WHERE sku = ? AND peso_saco_kg != ?',
+            (peso, sku, peso),
+        )
+        saco_fixed += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('rendimientos_and_fixes_20260425',
+         f'kg_m2={kg_updated};l_m2={l_updated};col_added={col_added};peso_saco_fixed={saco_fixed}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] rendimientos+fixes: +{kg_updated} kg/m² SKUs, '
+        f'+{l_updated} L/m² pinturas, peso_saco corregido en {saco_fixed} SKUs'
+    )
+
+
+# 3 SKUs nuevos — Tarifa Fassa Hispania Abr 2026 (Oliver 2026-04-25):
+# Revocos KS 9 / MH 19 + Yeso proyectar Yesodur 1.
+# PVP × 0,475 = precio Arias (descuento estándar 50% + 5%).
+_SKUS_REVOCOS_YESO = [
+    # (sku, name, subfamily, pvp, kg_saco, upp, color, norma, rendimiento_kg_m2)
+    ('405Y1',
+     'KS 9 Revoco fondo Gris — 25kg',
+     'Revocos y morteros',
+     3.23, 25.0, 64, 'Gris', 'EN 998-1', 13.3),
+    ('1060',
+     'MH 19 Revoco hidrófugo Gris — 25kg',
+     'Revocos y morteros',
+     3.74, 25.0, 64, 'Gris', 'EN 998-1', 15.0),
+    ('1264Y1',
+     'Yesodur 1 Yeso proyectar Blanco — 17kg',
+     'Yesos proyectar',
+     4.40, 17.0, 80, 'Blanco', 'EN 13279-1', 10.0),
+]
+
+
+def _add_skus_revocos_yeso_20260425(db: sqlite3.Connection) -> None:
+    """Crea 3 SKUs nuevos en PASTAS — Tarifa Fassa Hispania Abr 2026:
+
+      - 405Y1  KS 9 Revoco fondo (3,23 €, 64 sacos/palé, gris, EN 998-1)
+      - 1060   MH 19 Revoco hidrófugo (3,74 €, 64 sacos/palé, gris, EN 998-1)
+      - 1264Y1 Yesodur 1 Yeso proyectar (4,40 €, 80 sacos/palé, blanco, EN 13279-1)
+
+    Todos:
+      - Origen: Tarancón
+      - Suministro por palé completo (uds/caja=1, ya que cada saco es la unidad)
+      - Descuento Arias estándar 50% + 5% extra (ratio 0,475)
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'add_skus_revocos_yeso_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    created = 0
+    for sku, name, subfam, pvp, kg, upp, color, norma, rend_m2 in _SKUS_REVOCOS_YESO:
+        # No re-crear si ya existe (idempotente extra).
+        exists = db.execute("SELECT 1 FROM products WHERE sku = ?", (sku,)).fetchone()
+        if exists:
+            continue
+        arias = round(pvp * 0.475, 4)
+        db.execute(
+            """INSERT INTO products
+               (sku, name, category, subfamily, source_catalog, unit,
+                unit_price_eur, kg_per_unit, units_per_pallet,
+                pvp_eur_unit, precio_arias_eur_unit,
+                discount_pct, discount_extra_pct,
+                peso_saco_kg, color, norma_text, dispo_tarancon,
+                tariff_origen, rendimiento_kg_per_m2,
+                box_units, is_active, notes)
+               VALUES (?, ?, 'PASTAS', ?, 'Gypsotech Abr2026', 'saco',
+                       ?, ?, ?,
+                       ?, ?,
+                       50.0, 5.0,
+                       ?, ?, ?, 'green',
+                       'Tarancón', ?,
+                       1, 1, ?)""",
+            (sku, name, subfam,
+             arias, kg, upp,
+             pvp, arias,
+             kg, color, norma,
+             rend_m2,
+             f'{kg:.0f} kg/saco · {int(kg*upp)} kg/palé · Tarifa Abr 2026'),
+        )
+        created += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('add_skus_revocos_yeso_20260425', f'created={created}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] SKUs revocos+yeso: {created} creados (KS 9, MH 19, Yesodur 1)')
+
+
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
     """Calibración operativa del motor logístico (sesión Oliver 2026-04-25).
 
@@ -2930,12 +3479,20 @@ def clients():
 @login_required
 def products():
     db = get_db()
-    rows = db.execute('''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
+    # Por defecto solo SKUs activos. ?show_inactive=1 los muestra todos.
+    show_inactive = request.args.get('show_inactive') == '1'
+    where = '' if show_inactive else "WHERE p.is_active = 1 OR p.is_active IS NULL"
+    rows = db.execute(f'''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
                          FROM products p
                          LEFT JOIN family_defaults fd ON fd.category = p.category
+                         {where}
                          ORDER BY cat_order,
                                   COALESCE(p.subfamily, ''),
                                   p.name''').fetchall()
+    # Conteo de descartados (para el badge en el header).
+    inactive_count = db.execute(
+        'SELECT COUNT(*) AS c FROM products WHERE is_active = 0'
+    ).fetchone()['c']
     # Agrupar por categoría y subfamilia
     groups: dict[str, dict[str, list[dict]]] = {}
     for r in rows:
@@ -2957,6 +3514,8 @@ def products():
                            fam_defaults=fam_defaults,
                            fam_extras=fam_extras,
                            fx_eur_usd=fx_eur_usd,
+                           show_inactive=show_inactive,
+                           inactive_count=inactive_count,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 
