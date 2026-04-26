@@ -220,6 +220,17 @@
   <p class="muted" style="font-size:0.85em;">Diferencia positiva (verde) = estás por debajo de competencia. Negativa (rojo) = estás por encima. <b>Precios en USD</b>; la app sigue calculando internamente en EUR y convierte con el FX EUR/USD del input superior.</p>
 </details>
 
+<details style="margin-top:10px;" id="logisticsAnalysisDetails">
+  <summary style="cursor:pointer; font-weight:bold;">▶ Análisis de logística <span class="muted" style="font-weight:normal;" id="logSummary"></span></summary>
+  <div id="logAnalysisBody" style="margin-top:6px;">
+    <p class="muted" style="font-size:0.85em;">Pulsa <b>🔄 Calcular logística</b> para ver el desglose por SKU + driver dominante (suelo/peso/volumen).</p>
+  </div>
+  <p class="muted" style="font-size:0.85em; margin-top:8px;">
+    El motor calcula <code>N = MAX(huella_m² / suelo_útil, peso_kg / payload_útil, volumen_m³ / cbm_útil)</code>.
+    El <b>driver dominante</b> es el que da el N más alto — es el que decide cuántos contenedores necesitas. Calibración 40HC: payload 26.500 kg × 0,90 = 23.850 kg útiles · suelo 12,03×2,35 × 0,80 = 22,62 m² útiles · cbm 12,03×2,35×2,69 × 0,90 = 68,46 m³ útiles.
+  </p>
+</details>
+
 <div id="preflightWarnings" style="display:none; margin-top:8px; padding:8px 12px; border:1px solid #b8860b; background:#fffbea; font-size:0.85em; border-radius:3px;"></div>
 
 <div style="margin-top:8px;">
@@ -235,6 +246,8 @@ const products = {{ products|tojson }};
 const systems = {{ systems|tojson }};
 const subfamilies = {{ subfamilies|tojson }};
 const allProjects = {{ projects|tojson }};
+const PALLET_PROFILES = {{ pallet_profiles|tojson }};
+const CONTAINER_40HC = {{ container_40hc|tojson }};
 let lines = [];
 let mode = 'product';
 
@@ -480,6 +493,7 @@ async function recomputeLogistics() {
       ? ` (carga real ${j.n_containers_decimal.toFixed(2)})` : '';
     state.innerHTML = `<b>${j.n_containers}×${containerType}</b>${decimalLabel} · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
     renderCapacityAlert(j.free_capacity, j.n_containers, j.dominant_family);
+    renderLogisticsAnalysis(j, wastePct);
     recalcAll();
   } catch (e) {
     state.textContent = 'error de red: ' + e.message;
@@ -560,6 +574,122 @@ function renderCapacityAlert(fc, nCont, dominantFamily) {
     `<div style="margin-top:4px;"><b>Total (${nCont} cont.):</b> ${fmtN(tot.weight_kg || 0)} kg · ${fmtN(tot.floor_m2 || 0)} m² · ${fmtN(tot.cbm || 0)} m³ libres.</div>` +
     suggestion;
   div.style.display = 'block';
+}
+
+// Renderiza el desglose de logística: por qué N contenedores.
+// Muestra por SKU sus contribuciones a peso, suelo, volumen + cuál driver es
+// el que decide. El motor calcula N = MAX(suelo, peso, volumen) — el más
+// desfavorable manda. Esta función expone exactamente ese cálculo.
+function renderLogisticsAnalysis(j, wastePctNum) {
+  const body = document.getElementById('logAnalysisBody');
+  const summary = document.getElementById('logSummary');
+  if (!body) return;
+  if (!j || !j.aggregate) {
+    body.innerHTML = '<p class="muted" style="font-size:0.85em;">Sin datos del motor logístico.</p>';
+    summary.textContent = '';
+    return;
+  }
+  const ag = j.aggregate;
+  const cont = CONTAINER_40HC || {};
+  const stow = Number(cont.stowage_factor) || 0.90;
+  const floorStow = Number(cont.floor_stowage_factor) || 0.80;
+  const usableWeight = (Number(cont.payload_kg) || 26500) * stow;
+  const usableFloor = (Number(cont.inner_length_m) || 12.03) * (Number(cont.inner_width_m) || 2.35) * floorStow;
+  const usableCbm = (Number(cont.inner_length_m) || 12.03) * (Number(cont.inner_width_m) || 2.35) * (Number(cont.inner_height_m) || 2.69) * stow;
+
+  // Por SKU: calcular cantidades, palés, peso, huella, cbm.
+  const wasteFactor = 1 + (wastePctNum || 0) / 100;
+  const rows = [];
+  let totalKg = 0, totalFloor = 0, totalCbm = 0;
+  lines.forEach(line => {
+    const prod = products.find(p => p.sku === line.sku);
+    if (!prod) return;
+    const qtyW = Math.ceil((Number(line.qty) || 0) * wasteFactor);
+    if (qtyW <= 0) return;
+    const upp = Number(prod.units_per_pallet) || 1;
+    const kgUd = Number(prod.kg_per_unit) || 0;
+    const cat = prod.category || '?';
+    const pp = PALLET_PROFILES[cat] || {length_m: 1.2, width_m: 0.8, height_m: 1.0, levels: 2};
+    const pallets = Math.ceil(qtyW / upp);
+    const kgTot = qtyW * kgUd;
+    const footprint = (pp.length_m * pp.width_m) / Math.max(pp.levels || 1, 1);
+    const floorTot = pallets * footprint;
+    const cbmTot = pallets * pp.length_m * pp.width_m * pp.height_m;
+    totalKg += kgTot;
+    totalFloor += floorTot;
+    totalCbm += cbmTot;
+    rows.push({sku: line.sku, name: prod.name, cat, qtyW, kgUd, upp, pallets, kgTot, footprint, floorTot, cbmTot});
+  });
+
+  // 3 N drivers usando los totales del motor (que pueden diferir ligeramente
+  // de mi suma local porque el motor agrega por familia con effective pallet).
+  const nFloor = Number(ag.n_by_floor) || 0;
+  const nWeight = Number(ag.n_by_weight) || 0;
+  const nCbm = Number(ag.n_by_cbm) || 0;
+  const nMax = Math.max(nFloor, nWeight, nCbm);
+  const dominant = nMax === nWeight ? 'peso' : (nMax === nFloor ? 'suelo' : 'volumen');
+  const nCeil = Math.ceil(nMax);
+
+  function rowFmt(r) {
+    return `<tr>
+      <td>${escapeHtml(r.sku)}</td>
+      <td>${escapeHtml((r.name || '').slice(0, 40))}</td>
+      <td>${escapeHtml(r.cat)}</td>
+      <td class="num">${fmtQ(r.qtyW)}</td>
+      <td class="num">${fmtN(r.kgUd, 2)}</td>
+      <td class="num">${fmtQ(r.upp)}</td>
+      <td class="num">${fmtQ(r.pallets)}</td>
+      <td class="num">${fmtN(r.kgTot, 0)}</td>
+      <td class="num">${fmtN(r.floorTot, 2)}</td>
+      <td class="num">${fmtN(r.cbmTot, 2)}</td>
+    </tr>`;
+  }
+
+  function driverBlock(label, value, usable, unit, valueDec, isDominant) {
+    const n = value / usable;
+    const bg = isDominant ? '#fffbea' : '#f5f5f5';
+    const border = isDominant ? '2px solid #b8860b' : '1px solid #ddd';
+    const dom = isDominant ? '<b style="color:#b8860b;"> ← DOMINANTE</b>' : '';
+    return `<div style="display:inline-block; margin-right:8px; padding:6px 10px; background:${bg}; border:${border}; border-radius:4px; min-width:220px; vertical-align:top;">
+      <div style="font-size:0.8em; color:#666; text-transform:uppercase;">${label}${dom}</div>
+      <div style="margin-top:2px; font-size:1.05em;"><b>${fmtN(n, 2)} contenedores</b></div>
+      <div class="muted" style="font-size:0.85em; margin-top:2px;">${fmtN(value, valueDec)} ${unit} ÷ ${fmtN(usable, 2)} ${unit}/cont.</div>
+    </div>`;
+  }
+
+  const headerHtml = `<table style="margin-top:6px;">
+    <thead><tr>
+      <th>SKU</th><th>Producto</th><th>Familia</th>
+      <th class="num">Cant.+merma</th>
+      <th class="num">kg/ud</th>
+      <th class="num">Ud/palé</th>
+      <th class="num">Palés</th>
+      <th class="num">Peso (kg)</th>
+      <th class="num">Suelo (m²)</th>
+      <th class="num">Vol (m³)</th>
+    </tr></thead>
+    <tbody>${rows.map(rowFmt).join('')}</tbody>
+    <tfoot><tr style="border-top:2px solid #333; font-weight:bold;">
+      <td colspan="7">Totales</td>
+      <td class="num">${fmtN(totalKg, 0)}</td>
+      <td class="num">${fmtN(totalFloor, 2)}</td>
+      <td class="num">${fmtN(totalCbm, 2)}</td>
+    </tr></tfoot>
+  </table>
+  <div style="margin-top:10px;"><b>N requerido por driver:</b></div>
+  <div style="margin-top:6px;">
+    ${driverBlock('SUELO (m²)',   totalFloor, usableFloor,  'm²', 2, dominant === 'suelo')}
+    ${driverBlock('PESO (kg)',    totalKg,    usableWeight, 'kg', 0, dominant === 'peso')}
+    ${driverBlock('VOLUMEN (m³)', totalCbm,   usableCbm,    'm³', 2, dominant === 'volumen')}
+  </div>
+  <div style="margin-top:10px; padding:8px 12px; background:#eef3f9; border-left:3px solid #2563A8; border-radius:3px;">
+    <b>Resultado:</b> ${nCeil} contenedores 40HC (carga real ${fmtN(nMax, 2)}). El driver dominante es <b>${dominant.toUpperCase()}</b> — es lo que está limitando.
+    ${dominant === 'peso' ? 'Para reducir nº de contenedores, busca producto más ligero por m² o cambia el mix.' : ''}
+    ${dominant === 'suelo' ? 'Producto que ocupa mucho suelo por palé. Subir niveles apilables (si el embalaje lo permite) reduce huella.' : ''}
+    ${dominant === 'volumen' ? 'Producto voluminoso pero ligero. Difícil de optimizar — la geometría del palé manda.' : ''}
+  </div>`;
+  body.innerHTML = headerHtml;
+  summary.textContent = `(${nCeil} cont. · dominante ${dominant} · ${rows.length} SKUs)`;
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }

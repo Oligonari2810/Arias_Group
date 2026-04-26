@@ -3438,11 +3438,35 @@ def quote():
             edit_offer = dict(row)
             edit_offer['lines'] = json.loads(row['lines_json']) if row['lines_json'] else []
 
+    # Perfiles físicos de palé/contenedor para el panel de análisis logístico
+    # del frontend (desglose: ¿por qué N contenedores?). El cálculo real lo hace
+    # /api/compute-logistics; aquí solo exponemos la geometría para mostrarla.
+    pallet_profiles_raw = db.execute(
+        'SELECT category, pallet_length_m, pallet_width_m, pallet_height_m, '
+        'stackable_levels FROM pallet_profiles'
+    ).fetchall()
+    pallet_profiles_data = {
+        r['category']: {
+            'length_m': r['pallet_length_m'],
+            'width_m': r['pallet_width_m'],
+            'height_m': r['pallet_height_m'],
+            'levels': r['stackable_levels'],
+        }
+        for r in pallet_profiles_raw
+    }
+    cp_40hc = db.execute(
+        "SELECT inner_length_m, inner_width_m, inner_height_m, payload_kg, "
+        "stowage_factor, floor_stowage_factor FROM container_profiles WHERE type='40HC'"
+    ).fetchone()
+    container_40hc_data = dict(cp_40hc) if cp_40hc else {}
+
     return render_template('quote.html', products=products_data, clients=clients_data,
                           families=families_ordered,
                           subfamilies=subfamilies_friendly, systems=systems_data,
                           routes=routes_data, fx_rate=fx_rate,
-                          projects=projects_data, edit_offer=edit_offer)
+                          projects=projects_data, edit_offer=edit_offer,
+                          pallet_profiles=pallet_profiles_data,
+                          container_40hc=container_40hc_data)
 
 
 @app.route('/projects/<int:project_id>/quote/<int:quote_id>/pdf')
