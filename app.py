@@ -564,6 +564,7 @@ def init_db() -> None:
     _catalog_real_weights_20260425(db)
     _catalog_pdf_extras_and_discontinued_20260425(db)
     _catalog_discontinued_skus_20260425(db)
+    _fix_cinta_guardavivos_names_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2012,6 +2013,46 @@ def _catalog_discontinued_skus_20260425(db: sqlite3.Connection) -> None:
         f'descartados por oversized_logistics (placas >2600mm + TC 47 5.300mm). '
         f'Not found: {not_found or "none"}'
     )
+
+
+def _fix_cinta_guardavivos_names_20260425(db: sqlite3.Connection) -> None:
+    """Auditoría 2026-04-25: 2 cintas Guardavivos tenían nombres mezclados con
+    Malla FV (45m/153m + 54/12 rollos/caja). Verificado contra Anexo Gypsotech
+    Noviembre 2025: las cintas Guardavivos correctas son 12,5m y 30m con 10
+    rollos/caja.
+
+    Corrige a:
+      - 304064 → "Cinta Guardavivos 50mm×12,5m — 10 rollos/caja"
+      - 304065 → "Cinta Guardavivos 50mm×30m — 10 rollos/caja"
+
+    Verificado: 0 ofertas activas usan estos SKUs (ofertas inmutables OK).
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'fix_cinta_guardavivos_names_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    fixes = [
+        ('304064', 'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja'),
+        ('304065', 'Cinta Guardavivos 50mm×30m — 10 rollos/caja'),
+    ]
+    updated = 0
+    for sku, new_name in fixes:
+        cur = db.execute(
+            'UPDATE products SET name = ? WHERE sku = ? AND name != ?',
+            (new_name, sku, new_name),
+        )
+        updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('fix_cinta_guardavivos_names_20260425', f'updated={updated}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] cinta guardavivos names: {updated} SKUs renombrados')
 
 
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:

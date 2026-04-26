@@ -20,47 +20,96 @@
         <summary><em>{{ subfam }}</em> <span class="muted">· {{ items|length }} ud</span></summary>
     {% endif %}
 
+    {% set dispo_icon = {'green':'🟢','yellow':'🟡','red':'🔴'} %}
     <table style="margin:4px 0 10px {% if subfam %}24px{% else %}12px{% endif %}; font-size:0.92em;">
       <thead>
         <tr>
           <th>SKU</th>
           <th>Producto</th>
-          <th>Suministro</th>
-          <th>Embalaje</th>
           <th>Unidad</th>
           <th class="num">PVP €/ud</th>
           <th class="num" title="PVP convertido a USD al tipo de cambio actual">PVP $/ud</th>
           <th class="num">Arias €/ud</th>
           <th class="num">Desc%</th>
           <th class="num" title="Descuento extra de fábrica (compuesto sobre el base)">Extra%</th>
-          <th class="num">€/m² PVP</th>
-          <th class="num" title="PVP por m² convertido a USD">$/m² PVP</th>
-          <th class="num">€/m² Arias</th>
-          <th class="num">Ud/palé</th>
-          <th class="num">m²/palé</th>
-          <th class="num">kg/ud</th>
+          {% if cat == 'PLACAS' %}
+            <th title="Ancho × Largo × Espesor en mm">Dim. (mm)</th>
+            <th class="num" title="m² por placa">m²/placa</th>
+            <th class="num">Ud/palé</th>
+            <th class="num">m²/palé</th>
+            <th class="num">kg/ud</th>
+            <th class="num" title="Calculado: PVP × Ud-palé / m²-palé">€/m² PVP</th>
+            <th class="num">€/m² Arias</th>
+            <th>Origen</th>
+          {% elif cat == 'PERFILES' %}
+            <th title="Sección C: A×B×C (mm)">A×B×C</th>
+            <th class="num" title="Espesor del acero (mm)">Esp.acero</th>
+            <th class="num">Longitud</th>
+            <th class="num" title="Peso por metro lineal (catálogo Fassa)">kg/ml</th>
+            <th class="num">kg/ud</th>
+            <th class="num">Ud/palé</th>
+            <th class="num" title="Mínimo de pedido (Fassa)">Mín.</th>
+          {% elif cat == 'PASTAS' %}
+            <th class="num">kg/saco</th>
+            <th>Color</th>
+            <th class="num">Sacos/palé</th>
+          {% elif cat in ('TORNILLOS', 'CINTAS', 'ACCESORIOS', 'GYPSOCOMETE') %}
+            <th class="num" title="Unidades dentro de cada caja/embalaje">Ud/caja</th>
+            <th class="num">kg/caja</th>
+            <th class="num">Cajas/palé</th>
+          {% elif cat == 'TRAMPILLAS' %}
+            <th class="num">kg/ud</th>
+          {% endif %}
+          <th title="Disponibilidad Tarancón (verde=stock, amarillo=bajo pedido, rojo=descatalogado)">Disp.</th>
           {% if is_admin %}<th></th>{% endif %}
         </tr>
       </thead>
       <tbody>
       {% for p in items %}
-        <tr data-search="{{ (p['sku'] ~ ' ' ~ p['name'] ~ ' ' ~ (p['subfamily'] or ''))|lower }}" data-id="{{ p['id'] }}">
-          <td class="mono">{{ p['sku'] }}</td>
-          <td>{{ p['name'] }}</td>
-          <td>{{ p['content_per_unit'] or '—' }}</td>
-          <td>{{ p['pack_size'] or '—' }}</td>
+        {% set inactive = (p['is_active'] is not none) and (not p['is_active']) %}
+        {% set tr_style = 'background:#f7f7f7; color:#888;' if inactive else '' %}
+        <tr data-search="{{ (p['sku'] ~ ' ' ~ p['name'] ~ ' ' ~ (p['subfamily'] or ''))|lower }}" data-id="{{ p['id'] }}" style="{{ tr_style }}">
+          <td class="mono">{{ p['sku'] }}{% if inactive %} <span title="Descartado: {{ p['discontinued_reason'] or 'sin motivo' }}" style="color:#a23; font-weight:bold;">⊘</span>{% endif %}</td>
+          <td{% if inactive %} style="text-decoration:line-through;"{% endif %}>{{ p['name'] }}</td>
           <td>{{ p['unit'] }}</td>
           <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</td>
           <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit'] * fx_eur_usd) }}{% else %}—{% endif %}</td>
           <td class="num"><strong>{% if p['precio_arias_eur_unit'] is not none %}{{ '%.2f'|format(p['precio_arias_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</strong></td>
           <td class="num">{{ (p['discount_pct'] or 50)|int }}%</td>
           <td class="num">{% if p['discount_extra_pct'] is not none %}{{ '%.1f'|format(p['discount_extra_pct']) }}%{% else %}<span class="muted" style="font-style:italic;" title="Hereda de la familia">{{ '%.1f'|format(fam_extras.get(p['category'], 5)) }}%*</span>{% endif %}</td>
-          <td class="num">{% if p['pvp_per_m2'] %}{{ '%.2f'|format(p['pvp_per_m2']) }}{% else %}—{% endif %}</td>
-          <td class="num">{% if p['pvp_per_m2'] %}{{ '%.2f'|format(p['pvp_per_m2'] * fx_eur_usd) }}{% else %}—{% endif %}</td>
-          <td class="num">{% if p['precio_arias_m2'] %}{{ '%.2f'|format(p['precio_arias_m2']) }}{% else %}—{% endif %}</td>
-          <td class="num">{{ p['units_per_pallet'] or '—' }}</td>
-          <td class="num">{{ p['sqm_per_pallet'] or '—' }}</td>
-          <td class="num">{{ p['kg_per_unit'] or '—' }}</td>
+          {% if cat == 'PLACAS' %}
+            {% set m2_per_placa = (p['sqm_per_pallet'] / p['units_per_pallet']) if (p['units_per_pallet'] and p['sqm_per_pallet']) else 0 %}
+            {% set pvp_m2 = (p['pvp_eur_unit'] * p['units_per_pallet'] / p['sqm_per_pallet']) if (p['pvp_eur_unit'] and p['units_per_pallet'] and p['sqm_per_pallet']) else 0 %}
+            {% set arias_m2 = (p['precio_arias_eur_unit'] * p['units_per_pallet'] / p['sqm_per_pallet']) if (p['precio_arias_eur_unit'] and p['units_per_pallet'] and p['sqm_per_pallet']) else 0 %}
+            <td>{% if p['width_mm'] and p['length_mm'] and p['thickness_mm'] %}{{ p['width_mm']|int }}×{{ p['length_mm']|int }}×{{ '%.1f'|format(p['thickness_mm']) }}{% else %}—{% endif %}</td>
+            <td class="num">{% if m2_per_placa %}{{ '%.2f'|format(m2_per_placa) }}{% else %}—{% endif %}</td>
+            <td class="num">{{ p['units_per_pallet']|int if p['units_per_pallet'] else '—' }}</td>
+            <td class="num">{{ '%.1f'|format(p['sqm_per_pallet']) if p['sqm_per_pallet'] else '—' }}</td>
+            <td class="num">{{ '%.2f'|format(p['kg_per_unit']) if p['kg_per_unit'] else '—' }}</td>
+            <td class="num">{% if pvp_m2 %}{{ '%.2f'|format(pvp_m2) }}{% else %}—{% endif %}</td>
+            <td class="num">{% if arias_m2 %}<strong>{{ '%.2f'|format(arias_m2) }}</strong>{% else %}—{% endif %}</td>
+            <td>{{ p['tariff_origen'] or '—' }}</td>
+          {% elif cat == 'PERFILES' %}
+            <td>{% if p['dim_a_mm'] and p['dim_b_mm'] %}{{ '%g'|format(p['dim_a_mm']) }}×{{ '%g'|format(p['dim_b_mm']) }}{% if p['dim_c_mm'] %}×{{ '%g'|format(p['dim_c_mm']) }}{% endif %}{% else %}—{% endif %}</td>
+            <td class="num">{{ '%g'|format(p['espesor_acero_mm']) if p['espesor_acero_mm'] else '—' }}</td>
+            <td class="num">{{ p['length_mm']|int if p['length_mm'] else '—' }}</td>
+            <td class="num">{{ '%g'|format(p['kg_per_ml']) if p['kg_per_ml'] else '—' }}</td>
+            <td class="num">{{ '%.3f'|format(p['kg_per_unit']) if p['kg_per_unit'] else '—' }}</td>
+            <td class="num">{{ p['units_per_pallet']|int if p['units_per_pallet'] else '—' }}</td>
+            <td class="num">{{ p['min_order_qty']|int if p['min_order_qty'] else '—' }}</td>
+          {% elif cat == 'PASTAS' %}
+            <td class="num">{{ '%g'|format(p['peso_saco_kg']) if p['peso_saco_kg'] else '—' }}</td>
+            <td>{{ p['color'] or '—' }}</td>
+            <td class="num">{{ p['units_per_pallet']|int if p['units_per_pallet'] else '—' }}</td>
+          {% elif cat in ('TORNILLOS', 'CINTAS', 'ACCESORIOS', 'GYPSOCOMETE') %}
+            {% set boxes_per_pallet = (p['units_per_pallet'] / p['box_units']) if (p['units_per_pallet'] and p['box_units'] and p['box_units'] != p['units_per_pallet']) else None %}
+            <td class="num">{{ p['box_units']|int if p['box_units'] else '—' }}</td>
+            <td class="num">{{ '%.2f'|format(p['kg_per_unit']) if p['kg_per_unit'] else '—' }}</td>
+            <td class="num">{% if boxes_per_pallet and boxes_per_pallet > 1 %}{{ '%.0f'|format(boxes_per_pallet) }}{% else %}—{% endif %}</td>
+          {% elif cat == 'TRAMPILLAS' %}
+            <td class="num">{{ '%.2f'|format(p['kg_per_unit']) if p['kg_per_unit'] else '—' }}</td>
+          {% endif %}
+          <td title="{{ p['dispo_tarancon'] or 'sin info' }}">{{ dispo_icon.get(p['dispo_tarancon'], '·') }}</td>
           {% if is_admin %}<td><button type="button" onclick="openEdit({{ p['id'] }})">Editar</button></td>{% endif %}
         </tr>
       {% endfor %}
