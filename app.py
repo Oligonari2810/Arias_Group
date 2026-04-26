@@ -569,6 +569,7 @@ def init_db() -> None:
     _cintas_by_caja_and_verify_20260425(db)
     _revert_cintas_to_rollo_20260425(db)
     _add_sku_560901_and_rendimiento_20260425(db)
+    _rendimientos_and_fixes_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2376,6 +2377,108 @@ def _add_sku_560901_and_rendimiento_20260425(db: sqlite3.Connection) -> None:
     print(
         f'[migration] sku 560901 + rendimiento: created={sku_created}, '
         f'rendimiento col added={"rendimiento_kg_per_m2" not in existing}'
+    )
+
+
+# Rendimientos kg/m² verificados Oliver 2026-04-25 (Tarifa Fassa Hispania).
+# Cada entrada: (sku, kg_per_m2, capa_mm, descripcion)
+_RENDIMIENTOS_KG_M2 = [
+    # PASTAS DE JUNTAS — Fassajoint family (default 0,4 kg/m²)
+    ('351E1', 0.4, '—',  'FASSAJOINT 1H 10kg'),  # ya aplicado en 0017, idempotente
+    ('352E1', 0.4, '—',  'FASSAJOINT 2H 5kg'),
+    ('353E1', 0.4, '—',  'FASSAJOINT 2H 10kg'),
+    ('354',   0.4, '—',  'FASSAJOINT 2H 25kg'),
+    ('356',   0.4, '—',  'FASSAJOINT 3H 25kg'),
+    ('358U3', 0.4, '—',  'Fassajoint 8h 25kg'),
+    # ACABADOS Y REVOCOS — alto consumo por m²
+    ('1259Y1', 15.0, '10mm', 'KX 16 W2 Extra-blanco (revoco proyectar)'),
+    # MASA DE AGARRE — Gypsomaf (capa fina, 2mm)
+    ('359',   1.0, '2mm',  'Gypsomaf 25kg'),
+    ('360E1', 1.0, '2mm',  'Gypsomaf 10kg'),
+]
+
+# Rendimientos L/m² para pinturas (consumo por capa).
+# Default Fassa: 4-5 m²/L → 0,20-0,25 L/m². Conservador 0,20 L/m².
+_RENDIMIENTOS_L_M2 = [
+    ('GYP010000', 0.20, 'GYPSOPAINT 14L'),
+    ('GYP010001', 0.20, 'GYPSOPAINT 5L'),
+]
+
+# Bug: regex peso_saco_kg de migración 0008 matcheaba "5 kg" dentro de "25 kg".
+# Corregir SKUs cuyo peso_saco_kg está mal porque kg_per_unit y name contradicen.
+_PESO_SACO_FIXES = [
+    ('1259Y1', 25.0),  # KX 16 W2 25kg (era 5,0)
+    ('359',    25.0),  # Gypsomaf 25kg (era 5,0)
+]
+
+
+def _rendimientos_and_fixes_20260425(db: sqlite3.Connection) -> None:
+    """Migración 2026-04-25 (continuación) — datos técnicos Oliver verificados:
+
+    1) Backfill rendimiento_kg_per_m2 para PASTAS y REVOCOS:
+       - Fassajoint family (0,4 kg/m²)
+       - KX 16 W2 (15,0 kg/m² capa 10mm)
+       - Gypsomaf (1,0 kg/m² capa 2mm)
+
+    2) Añade columna `rendimiento_l_per_m2` REAL para pinturas y backfill:
+       - GypsoPaint 14L y 5L → 0,20 L/m² (capa standard)
+
+    3) Corrige peso_saco_kg de 2 SKUs (bug regex de migración 0008 que
+       matcheaba "5 kg" dentro de "25 kg"):
+       - 1259Y1 KX 16 W2 25kg: 5,0 → 25,0
+       - 359    Gypsomaf 25kg: 5,0 → 25,0
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'rendimientos_and_fixes_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    # 1) Backfill rendimiento_kg_per_m2.
+    kg_updated = 0
+    for sku, kg_m2, _capa, _desc in _RENDIMIENTOS_KG_M2:
+        cur = db.execute(
+            'UPDATE products SET rendimiento_kg_per_m2 = ? WHERE sku = ? '
+            'AND (rendimiento_kg_per_m2 IS NULL OR rendimiento_kg_per_m2 != ?)',
+            (kg_m2, sku, kg_m2),
+        )
+        kg_updated += cur.rowcount
+
+    # 2) Columna nueva rendimiento_l_per_m2 + backfill pinturas.
+    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
+    col_added = False
+    if 'rendimiento_l_per_m2' not in existing:
+        _safe_add_column(db, 'products', 'rendimiento_l_per_m2', 'REAL')
+        col_added = True
+    l_updated = 0
+    for sku, l_m2, _desc in _RENDIMIENTOS_L_M2:
+        cur = db.execute(
+            'UPDATE products SET rendimiento_l_per_m2 = ? WHERE sku = ?',
+            (l_m2, sku),
+        )
+        l_updated += cur.rowcount
+
+    # 3) Fix peso_saco_kg de SKUs con bug regex.
+    saco_fixed = 0
+    for sku, peso in _PESO_SACO_FIXES:
+        cur = db.execute(
+            'UPDATE products SET peso_saco_kg = ? WHERE sku = ? AND peso_saco_kg != ?',
+            (peso, sku, peso),
+        )
+        saco_fixed += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('rendimientos_and_fixes_20260425',
+         f'kg_m2={kg_updated};l_m2={l_updated};col_added={col_added};peso_saco_fixed={saco_fixed}',
+         now_iso()),
+    )
+    db.commit()
+    print(
+        f'[migration] rendimientos+fixes: +{kg_updated} kg/m² SKUs, '
+        f'+{l_updated} L/m² pinturas, peso_saco corregido en {saco_fixed} SKUs'
     )
 
 
