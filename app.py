@@ -567,6 +567,7 @@ def init_db() -> None:
     _fix_cinta_guardavivos_names_20260425(db)
     _catalog_fill_gaps_20260425(db)
     _cintas_by_caja_and_verify_20260425(db)
+    _revert_cintas_to_rollo_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2227,6 +2228,73 @@ def _cintas_by_caja_and_verify_20260425(db: sqlite3.Connection) -> None:
         f'[migration] cintas-by-caja: {cintas_updated} cintas a kg/caja, '
         f'{cleaned} SKUs sin marca [peso estimado]'
     )
+
+
+# Pesos kg/ROLLO (unidad de venta real) calculados a partir de los pesos
+# kg/caja oficiales aportados por Oliver (Tarifa Fassa Hispania
+# 2026-04-25), divididos por uds/caja del PDF Anexo Nov 2025.
+#
+# Modelo: las CINTAS se venden por rollo al cliente final. Fassa solo
+# sirve cajas completas (= mínimo de pedido), pero eso es restricción
+# logística, NO unidad de venta. El motor cotiza qty × kg_per_unit con
+# qty en rollos.
+_CINTAS_KG_PER_ROLLO = [
+    # (sku, kg_caja_oficial, uds_caja → kg_rollo = caja/uds)
+    ('301121', 33.60,  6),  # 5.6   kg/rollo
+    ('304056',  6.72, 24),  # 0.28  (igual que antes)
+    ('304057', 12.00, 20),  # 0.60  (igual)
+    ('304058', 11.50, 10),  # 1.15  (igual)
+    ('304064',  3.00, 10),  # 0.30  (sigue estimado)
+    ('304065', 17.38, 10),  # 1.738 (era 1.00, corregido)
+    ('304075', 11.58, 22),  # 0.526 (~igual)
+    ('304076', 17.42, 15),  # 1.161 (era 0.70, corregido)
+    ('304078',  4.75, 54),  # 0.088 (era 0.15, corregido)
+    ('304079', 14.38, 12),  # 1.198 (era 0.50, corregido)
+    ('700960',  8.10,  1),  # 8.10  (igual; 1 rollo = 1 caja)
+]
+
+
+def _revert_cintas_to_rollo_20260425(db: sqlite3.Connection) -> None:
+    """Corrige el bug introducido por la migración previa _cintas_by_caja_:
+    NO se debe cambiar la unidad de venta a 'caja' — las cintas se siguen
+    cotizando por rollo (cliente pide rollos sueltos). El "kg/caja" de la
+    Tarifa Fassa Hispania que aportó Oliver es información operativa
+    (logística: Fassa solo sirve cajas completas como mínimo de pedido),
+    NO unidad comercial.
+
+    Esta migración:
+      1) Devuelve `unit` a 'rollo' para todas las cintas activas.
+      2) Establece `kg_per_unit` = kg/rollo = kg_caja_oficial / box_units.
+      3) Esto SÍ corrige los 4 valores erróneos previos (304065, 304076,
+         304078, 304079) usando los kg/caja oficiales como fuente de verdad.
+
+    Sin esto, ofertas históricas con qty=100 rollos serían recalculadas
+    como 100 × kg_caja → ~10x el peso real. Bug crítico.
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'revert_cintas_to_rollo_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    updated = 0
+    for sku, kg_caja, uds_caja in _CINTAS_KG_PER_ROLLO:
+        kg_rollo = round(kg_caja / uds_caja, 4)
+        cur = db.execute(
+            "UPDATE products SET unit = 'rollo', kg_per_unit = ? "
+            "WHERE sku = ? AND category = 'CINTAS'",
+            (kg_rollo, sku),
+        )
+        updated += cur.rowcount
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('revert_cintas_to_rollo_20260425', f'updated={updated}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] cintas revertidas a unit=rollo: {updated} SKUs')
 
 
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
