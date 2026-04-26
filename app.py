@@ -570,6 +570,7 @@ def init_db() -> None:
     _revert_cintas_to_rollo_20260425(db)
     _add_sku_560901_and_rendimiento_20260425(db)
     _rendimientos_and_fixes_20260425(db)
+    _add_skus_revocos_yeso_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -2480,6 +2481,86 @@ def _rendimientos_and_fixes_20260425(db: sqlite3.Connection) -> None:
         f'[migration] rendimientos+fixes: +{kg_updated} kg/m² SKUs, '
         f'+{l_updated} L/m² pinturas, peso_saco corregido en {saco_fixed} SKUs'
     )
+
+
+# 3 SKUs nuevos — Tarifa Fassa Hispania Abr 2026 (Oliver 2026-04-25):
+# Revocos KS 9 / MH 19 + Yeso proyectar Yesodur 1.
+# PVP × 0,475 = precio Arias (descuento estándar 50% + 5%).
+_SKUS_REVOCOS_YESO = [
+    # (sku, name, subfamily, pvp, kg_saco, upp, color, norma, rendimiento_kg_m2)
+    ('405Y1',
+     'KS 9 Revoco fondo Gris — 25kg',
+     'Revocos y morteros',
+     3.23, 25.0, 64, 'Gris', 'EN 998-1', 13.3),
+    ('1060',
+     'MH 19 Revoco hidrófugo Gris — 25kg',
+     'Revocos y morteros',
+     3.74, 25.0, 64, 'Gris', 'EN 998-1', 15.0),
+    ('1264Y1',
+     'Yesodur 1 Yeso proyectar Blanco — 17kg',
+     'Yesos proyectar',
+     4.40, 17.0, 80, 'Blanco', 'EN 13279-1', 10.0),
+]
+
+
+def _add_skus_revocos_yeso_20260425(db: sqlite3.Connection) -> None:
+    """Crea 3 SKUs nuevos en PASTAS — Tarifa Fassa Hispania Abr 2026:
+
+      - 405Y1  KS 9 Revoco fondo (3,23 €, 64 sacos/palé, gris, EN 998-1)
+      - 1060   MH 19 Revoco hidrófugo (3,74 €, 64 sacos/palé, gris, EN 998-1)
+      - 1264Y1 Yesodur 1 Yeso proyectar (4,40 €, 80 sacos/palé, blanco, EN 13279-1)
+
+    Todos:
+      - Origen: Tarancón
+      - Suministro por palé completo (uds/caja=1, ya que cada saco es la unidad)
+      - Descuento Arias estándar 50% + 5% extra (ratio 0,475)
+
+    Idempotente vía flag.
+    """
+    flag = db.execute(
+        "SELECT value FROM app_settings WHERE key = 'add_skus_revocos_yeso_20260425'"
+    ).fetchone()
+    if flag:
+        return
+
+    created = 0
+    for sku, name, subfam, pvp, kg, upp, color, norma, rend_m2 in _SKUS_REVOCOS_YESO:
+        # No re-crear si ya existe (idempotente extra).
+        exists = db.execute("SELECT 1 FROM products WHERE sku = ?", (sku,)).fetchone()
+        if exists:
+            continue
+        arias = round(pvp * 0.475, 4)
+        db.execute(
+            """INSERT INTO products
+               (sku, name, category, subfamily, source_catalog, unit,
+                unit_price_eur, kg_per_unit, units_per_pallet,
+                pvp_eur_unit, precio_arias_eur_unit,
+                discount_pct, discount_extra_pct,
+                peso_saco_kg, color, norma_text, dispo_tarancon,
+                tariff_origen, rendimiento_kg_per_m2,
+                box_units, is_active, notes)
+               VALUES (?, ?, 'PASTAS', ?, 'Gypsotech Abr2026', 'saco',
+                       ?, ?, ?,
+                       ?, ?,
+                       50.0, 5.0,
+                       ?, ?, ?, 'green',
+                       'Tarancón', ?,
+                       1, 1, ?)""",
+            (sku, name, subfam,
+             arias, kg, upp,
+             pvp, arias,
+             kg, color, norma,
+             rend_m2,
+             f'{kg:.0f} kg/saco · {int(kg*upp)} kg/palé · Tarifa Abr 2026'),
+        )
+        created += 1
+
+    db.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+        ('add_skus_revocos_yeso_20260425', f'created={created}', now_iso()),
+    )
+    db.commit()
+    print(f'[migration] SKUs revocos+yeso: {created} creados (KS 9, MH 19, Yesodur 1)')
 
 
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
