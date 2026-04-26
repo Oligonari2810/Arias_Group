@@ -2971,12 +2971,20 @@ def clients():
 @login_required
 def products():
     db = get_db()
-    rows = db.execute('''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
+    # Por defecto solo SKUs activos. ?show_inactive=1 los muestra todos.
+    show_inactive = request.args.get('show_inactive') == '1'
+    where = '' if show_inactive else "WHERE p.is_active = 1 OR p.is_active IS NULL"
+    rows = db.execute(f'''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
                          FROM products p
                          LEFT JOIN family_defaults fd ON fd.category = p.category
+                         {where}
                          ORDER BY cat_order,
                                   COALESCE(p.subfamily, ''),
                                   p.name''').fetchall()
+    # Conteo de descartados (para el badge en el header).
+    inactive_count = db.execute(
+        'SELECT COUNT(*) AS c FROM products WHERE is_active = 0'
+    ).fetchone()['c']
     # Agrupar por categoría y subfamilia
     groups: dict[str, dict[str, list[dict]]] = {}
     for r in rows:
@@ -2998,6 +3006,8 @@ def products():
                            fam_defaults=fam_defaults,
                            fam_extras=fam_extras,
                            fx_eur_usd=fx_eur_usd,
+                           show_inactive=show_inactive,
+                           inactive_count=inactive_count,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 

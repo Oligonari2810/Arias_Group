@@ -1,7 +1,17 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Catálogo (base de datos)</h1>
-<p class="muted">{{ grand_total }} SKUs · {{ groups|length }} familias{% if missing %} · <span style="color:#a23;">{{ missing }} sin PVP/Arias</span>{% endif %} · Admin: {{ 'sí' if is_admin else 'no' }} · FX EUR→USD: <strong>{{ '%.3f'|format(fx_eur_usd) }}</strong></p>
+<p class="muted">
+  {{ grand_total }} SKUs activos
+  {% if inactive_count and not show_inactive %}
+    · <a href="{{ url_for('products', show_inactive=1) }}" style="color:#888;">+ {{ inactive_count }} descartados</a>
+  {% elif show_inactive %}
+    · <a href="{{ url_for('products') }}" style="color:#888;">solo activos</a>
+  {% endif %}
+  · {{ groups|length }} familias{% if missing %} · <span style="color:#a23;">{{ missing }} sin PVP/Arias</span>{% endif %}
+  · Admin: {{ 'sí' if is_admin else 'no' }}
+  · FX EUR→USD: <strong>{{ '%.3f'|format(fx_eur_usd) }}</strong>
+</p>
 
 <div style="margin:8px 0;">
   <input id="search" type="search" placeholder="Buscar SKU, nombre o subfamilia…"
