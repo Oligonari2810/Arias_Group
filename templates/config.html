@@ -100,7 +100,7 @@
     <td>{{ f['target_currency'] }}</td>
     <td class="num">{{ f['rate'] }}</td>
     <td>{{ f['source'] }}</td>
-    <td>{{ f['updated_at'][:10] }}</td>
+    <td>{{ f['updated_at'][:10] if f['updated_at'] is string else f['updated_at'].strftime('%Y-%m-%d') if f['updated_at'] else '' }}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -119,32 +119,5 @@
   </form>
 </div>
 
-<script>
-function toggle(id) { var e = document.getElementById(id); e.style.display = e.style.display === 'none' ? 'block' : 'none'; }
-
-function editRoute(id, carrier, origin, dest, c20, c40, c40hc) {
-  const f = document.getElementById('routeForm');
-  f.style.display = 'block';
-  f.querySelector('[name=action]').value = 'update_route';
-  f.querySelector('[name=carrier]').value = carrier;
-  f.querySelector('[name=origin_port]').value = origin;
-  f.querySelector('[name=destination_port]').value = dest;
-  f.querySelector('[name=container_20_eur]').value = c20;
-  f.querySelector('[name=container_40_eur]').value = c40;
-  f.querySelector('[name=container_40hc_eur]').value = c40hc;
-  if (!f.querySelector('[name=route_id]')) {
-    var h = document.createElement('input'); h.type='hidden'; h.name='route_id'; f.querySelector('form').appendChild(h);
-  }
-  f.querySelector('[name=route_id]').value = id;
-  f.querySelector('button[type=submit]').textContent = 'Actualizar ruta';
-}
-
-function deleteItem(type, id, label) {
-  if (!confirm('¿Eliminar ' + label + '?')) return;
-  fetch('/api/config-delete', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({type: type, id: id})
-  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); else alert(data.error || 'Error'); });
-}
-</script>
+<script src="{{ url_for('static', filename='js/config.js') }}"></script>
 {% endblock %}

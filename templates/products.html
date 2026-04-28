@@ -83,7 +83,7 @@
           <td{% if inactive %} style="text-decoration:line-through;"{% endif %}>{{ p['name'] }}</td>
           <td>{{ p['unit'] }}</td>
           <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</td>
-          <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format(p['pvp_eur_unit'] * fx_eur_usd) }}{% else %}—{% endif %}</td>
+          <td class="num">{% if p['pvp_eur_unit'] is not none %}{{ '%.2f'|format((p['pvp_eur_unit']|float) * (fx_eur_usd|float)) }}{% else %}—{% endif %}</td>
           <td class="num"><strong>{% if p['precio_arias_eur_unit'] is not none %}{{ '%.2f'|format(p['precio_arias_eur_unit']) }}{% else %}<span style="color:#a23;">—</span>{% endif %}</strong></td>
           <td class="num">{{ (p['discount_pct'] or 50)|int }}%</td>
           <td class="num">{% if p['discount_extra_pct'] is not none %}{{ '%.1f'|format(p['discount_extra_pct']) }}%{% else %}<span class="muted" style="font-style:italic;" title="Hereda de la familia">{{ '%.1f'|format(fam_extras.get(p['category'], 5)) }}%*</span>{% endif %}</td>
@@ -173,76 +173,8 @@
 </dialog>
 
 <script>
-function filterRows() {
-  const q = document.getElementById('search').value.toLowerCase().trim();
-  document.querySelectorAll('tbody tr[data-search]').forEach(tr => {
-    tr.style.display = (!q || tr.dataset.search.includes(q)) ? '' : 'none';
-  });
-}
-function toggleAll(open) {
-  document.querySelectorAll('details.cat-block, details.sub-block').forEach(d => d.open = open);
-}
-// Extra por defecto si el input del producto está vacío (hereda de la familia).
-// El backend tiene la lógica autoritativa; esto es solo para preview en vivo.
-const DEFAULT_EXTRA_PCT = 5;
-function syncArias() {
-  const pvp = parseFloat(document.getElementById('f_pvp_eur_unit').value) || 0;
-  const disc = parseFloat(document.getElementById('f_discount_pct').value) || 0;
-  const extraRaw = document.getElementById('f_discount_extra_pct').value;
-  const extra = extraRaw === '' ? DEFAULT_EXTRA_PCT : (parseFloat(extraRaw) || 0);
-  const arias = pvp * (1 - disc/100) * (1 - extra/100);
-  document.getElementById('f_precio_arias_eur_unit').value = arias.toFixed(4);
-}
-document.addEventListener('DOMContentLoaded', () => {
-  ['f_pvp_eur_unit','f_discount_pct','f_discount_extra_pct'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('input', syncArias);
-  });
-});
-
-async function openEdit(id) {
-  const r = await fetch('/api/products/' + id);
-  const j = await r.json();
-  if (!j.ok) { alert(j.error || 'error'); return; }
-  const p = j.product;
-  document.getElementById('f_id').value = p.id;
-  document.getElementById('modalTitle').textContent = p.sku + ' — ' + p.name;
-  document.getElementById('modalMeta').textContent = 'Categoría: ' + p.category + ' · Unidad: ' + p.unit;
-  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','discount_extra_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
-    const el = document.getElementById('f_' + f);
-    if (el) el.value = (p[f] !== null && p[f] !== undefined) ? p[f] : '';
-  }
-  const hb = document.getElementById('historyBox');
-  if (j.history && j.history.length) {
-    hb.innerHTML = j.history.map(h =>
-      `<div>${h.changed_at.substring(0,16).replace('T',' ')} — <b>${h.field}</b>: ${h.old_value ?? '∅'} → ${h.new_value ?? '∅'} <span class="muted">(${h.username})</span></div>`
-    ).join('');
-  } else {
-    hb.innerHTML = '<span class="muted">Sin historial.</span>';
-  }
-  document.getElementById('saveMsg').textContent = '';
-  document.getElementById('editModal').showModal();
-}
-
-async function saveEdit() {
-  const id = document.getElementById('f_id').value;
-  const payload = {};
-  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','discount_extra_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
-    const v = document.getElementById('f_' + f).value;
-    payload[f] = v === '' ? null : v;
-  }
-  if (!confirm('¿Guardar cambios en este SKU?')) return;
-  document.getElementById('saveBtn').disabled = true;
-  const r = await fetch('/api/products/' + id, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
-  const j = await r.json();
-  document.getElementById('saveBtn').disabled = false;
-  document.getElementById('saveMsg').textContent = j.ok ? (j.changed + ' campos guardados. Recargando…') : ('Error: ' + (j.error || r.status));
-  if (j.ok) setTimeout(() => location.reload(), 800);
-}
+// Products module - carga funciones desde archivo externo
 </script>
+<script src="{{ url_for('static', filename='js/products.js') }}"></script>
 {% endif %}
 {% endblock %}

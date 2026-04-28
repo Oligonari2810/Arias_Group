@@ -14,7 +14,7 @@
     <div>
       <b class="mono">{{ offer['offer_number'] }}</b>
       · {{ offer['client_name'] }} · {{ offer['project_name'] }}
-      · <span class="muted">{{ offer['incoterm'] or 'EXW' }} · {{ offer['created_at'][:10] }}</span>
+      · <span class="muted">{{ offer['incoterm'] or 'EXW' }} · {{ offer['created_at'][:10] if offer['created_at'] is string else offer['created_at'].strftime('%Y-%m-%d')[:10] if offer['created_at'] else '' }}</span>
     </div>
     <div>
       <b>€ {{ "%.2f"|format(offer['total_final_eur']) }}</b>
@@ -124,30 +124,5 @@
 
 {% endif %}
 
-<script>
-function deleteOffer(id) {
-  if (!confirm('¿Eliminar este presupuesto?')) return;
-  fetch('/api/delete-offer', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({id: id})
-  }).then(r => r.json()).then(data => { if (data.ok) location.reload(); });
-}
-function changeStatus(id, status) {
-  const labels = {approved: 'aprobar', rejected: 'rechazar', pending: 'volver a pendiente'};
-  if (!confirm('¿Seguro que quieres ' + labels[status] + ' este presupuesto?')) return;
-  fetch('/api/offer-status', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({id: id, status: status})
-  }).then(r => r.json()).then(data => {
-    if (!data.ok) { alert(data.error || 'Error'); return; }
-    // Si al aprobar se crearon preorden Fassa + orden logística, avisar.
-    if (status === 'approved' && data.factory_order && data.factory_order.created) {
-      alert('✓ Aprobada.\n\nGeneradas automáticamente:\n  🏭 ' +
-            data.factory_order.name + ' (preorden Fassa)\n  🚢 ' +
-            data.logistics_order.name + ' (orden logística)');
-    }
-    location.reload();
-  });
-}
-</script>
+<script src="{{ url_for('static', filename='js/budgets.js') }}"></script>
 {% endblock %}
