@@ -84,5 +84,47 @@
 
 <script>
 function toggle(id) { var e = document.getElementById(id); e.style.display = e.style.display === 'none' ? 'block' : 'none'; }
+
+/**
+ * Valida email (básico)
+ */
+function isValidEmail(email) {
+  if (!email) return true; // opcional
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/**
+ * Valida RNC dominicano (11 dígitos o 13 para gov)
+ */
+function isValidRNC(rnc) {
+  if (!rnc) return true; // opcional
+  const clean = rnc.replace(/[^0-9]/g, '');
+  return clean.length === 11 || clean.length === 13;
+}
+
+/**
+ * Valida formulario de cliente antes de enviar
+ */
+document.addEventListener('DOMContentLoaded', function() {
+  const clientForm = document.querySelector('#clientForm form');
+  if (clientForm) {
+    clientForm.addEventListener('submit', function(e) {
+      const email = clientForm.querySelector('[name=email]').value;
+      const rnc = clientForm.querySelector('[name=rnc]');
+      
+      if (email && !isValidEmail(email)) {
+        e.preventDefault();
+        alert('Email inválido. Verifica el formato.');
+        return false;
+      }
+      
+      if (rnc && rnc.value && !isValidRNC(rnc.value)) {
+        e.preventDefault();
+        alert('RNC inválido. Debe tener 11 dígitos (o 13 para entidades gubernamentales).');
+        return false;
+      }
+    });
+  }
+});
 </script>
 {% endblock %}

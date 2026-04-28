@@ -1,7 +1,7 @@
 """sqlite3.Connection-compatible wrapper over psycopg3.
 
 Purpose: keep app.py's ~100 existing queries working unchanged when the
-backend switches to Postgres.  The adapter exposes the subset of
+backend switches to Postgres. The adapter exposes the subset of
 sqlite3.Connection surface that app.py uses:
 
     db.execute(sql, params)        → _CursorResult
@@ -10,17 +10,13 @@ sqlite3.Connection surface that app.py uses:
     db.rollback()                  → rollback current tx
     db.close()                     → close connection
     db.row_factory = sqlite3.Row   → no-op (always dict-like rows)
+    db.last_insert_rowid()         → PostgreSQL lastval()
 
-Rows are returned as plain dicts (from psycopg's dict_row factory), which
-supports `row['col']` access exactly like sqlite3.Row for the string-key
-patterns used throughout app.py.  Positional row access (row[0]) is only
-done in init_db's PRAGMA code and in PDF-building helpers that work on
-Python tuples, neither of which touches this adapter in production.
+Rows are returned as CompatRow objects which support both `row['col']`
+and `row[0]` access patterns, ensuring compatibility with existing code.
 
-SQL is lightly translated: `?` placeholders become `%s`, and well-known
-SQLite-isms (`INSERT OR IGNORE`) are converted to their Postgres cousins
-(`ON CONFLICT DO NOTHING`).  `PRAGMA` statements raise explicitly — they
-must be guarded in app.py (init_db does so via dialect check).
+SQL is translated: `?` placeholders become `%s`, and well-known
+SQLite-isms are converted to their PostgreSQL cousins.
 """
 from __future__ import annotations
 
@@ -30,47 +26,38 @@ import re
 import psycopg
 from psycopg.rows import dict_row
 
-
-_INSERT_OR_IGNORE = re.compile(r'\bINSERT\s+OR\s+IGNORE\b', re.IGNORECASE)
-_PLACEHOLDER = re.compile(r'\?')
-
-
-def _translate_sql(sql: str) -> str:
-    """Rewrite SQLite-specific SQL to Postgres-compatible SQL."""
-    if 'PRAGMA' in sql.upper():
-        raise NotImplementedError(
-            'PRAGMA statements are not valid on Postgres. '
-            'Guard their usage in app.py via a dialect check.'
-        )
-    # INSERT OR IGNORE → plain INSERT with ON CONFLICT DO NOTHING at the end.
-    if _INSERT_OR_IGNORE.search(sql):
-        sql = _INSERT_OR_IGNORE.sub('INSERT', sql)
-        sql = sql.rstrip().rstrip(';')
-        if 'ON CONFLICT' not in sql.upper():
-            sql = sql + ' ON CONFLICT DO NOTHING'
-    # Replace ? placeholders with %s.
-    sql = _PLACEHOLDER.sub('%s', sql)
-    return sql
-
-
-def _normalize_dsn(url: str) -> str:
-    """psycopg accepts `postgresql://...`; strip SQLAlchemy's `+psycopg` suffix."""
-    if url.startswith('postgresql+psycopg://'):
-        return 'postgresql://' + url[len('postgresql+psycopg://'):]
-    return url
+from .compat import translate_sql, CompatRow, wrap_rows, wrap_row
 
 
 class _CursorResult:
-    """Minimal wrapper exposing fetchone / fetchall / rowcount."""
+    """Minimal wrapper exposing fetchone / fetchall / rowcount.
+    
+    Supports direct iteration for SQLite compatibility:
+        for row in db.execute(sql):  # works!
+            ...
+    """
 
     def __init__(self, cursor):
         self._cur = cursor
 
     def fetchone(self):
-        return self._cur.fetchone()
+        row = self._cur.fetchone()
+        return wrap_row(row)
 
     def fetchall(self):
-        return self._cur.fetchall()
+        rows = self._cur.fetchall()
+        return wrap_rows(rows)
+
+    def __iter__(self):
+        """Enable direct iteration: for row in db.execute(sql)"""
+        return self
+
+    def __next__(self):
+        """Fetch next row during iteration"""
+        row = self._cur.fetchone()
+        if row is None:
+            raise StopIteration
+        return wrap_row(row)
 
     @property
     def rowcount(self) -> int:
@@ -78,8 +65,7 @@ class _CursorResult:
 
     @property
     def lastrowid(self):
-        # psycopg exposes INSERT ... RETURNING, not lastrowid. app.py doesn't
-        # rely on this attribute; provided for API completeness.
+        # psycopg exposes INSERT ... RETURNING, not lastrowid.
         return None
 
 
@@ -93,15 +79,15 @@ class PgConnection:
     # sqlite3-compatible methods ---------------------------------------
 
     def execute(self, sql: str, params=None) -> _CursorResult:
+        translated = translate_sql(sql)
         cur = self._conn.cursor()
-        cur.execute(_translate_sql(sql), params or ())
+        cur.execute(translated, params or ())
         return _CursorResult(cur)
 
     def executescript(self, sql: str):
-        # Naive statement split; good enough for app.py's init_db DDL script.
         cur = self._conn.cursor()
         for stmt in [s.strip() for s in sql.split(';') if s.strip()]:
-            cur.execute(_translate_sql(stmt))
+            cur.execute(translate_sql(stmt))
         return _CursorResult(cur)
 
     def commit(self):
@@ -114,6 +100,13 @@ class PgConnection:
         if not self._conn.closed:
             self._conn.close()
 
+    def last_insert_rowid(self):
+        """Get the last inserted ID (SQLite compatibility)."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT lastval()")
+        result = cur.fetchone()
+        return result[0] if result else None
+
     # No-op setter — app.py assigns `g.db.row_factory = sqlite3.Row` in places.
     @property
     def row_factory(self):
@@ -122,6 +115,13 @@ class PgConnection:
     @row_factory.setter
     def row_factory(self, _value):
         pass
+
+
+def _normalize_dsn(url: str) -> str:
+    """psycopg accepts `postgresql://...`; strip SQLAlchemy's `+psycopg` suffix."""
+    if url.startswith('postgresql+psycopg://'):
+        return 'postgresql://' + url[len('postgresql+psycopg://'):]
+    return url
 
 
 def connect() -> PgConnection:

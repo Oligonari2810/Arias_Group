@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+# Import compatibility layer for PostgreSQL support
+from db.compat import safe_json_loads, safe_slice_date
+
 # Carga .env si existe (dev local). En producción las env vars ya están
 # inyectadas por el runtime (Render, Docker, etc.) y override=False respeta
 # esos valores sin pisarlos.
@@ -3365,7 +3368,7 @@ def dashboard():
     total_pipeline_eur = 0
     total_confirmed_eur = 0
     for o in recent_offers:
-        lines = json.loads(o['lines_json']) if o['lines_json'] else []
+        lines = safe_json_loads(o['lines_json'])
         margin_pct = float(o['margin_pct'] or 20)
         quotes_data.append({
             'id': o['id'], 'offer_number': o['offer_number'],
@@ -3379,7 +3382,7 @@ def dashboard():
             'margin_pct': margin_pct,
             'lines': len(lines),
             'containers': o['container_count'] or 0,
-            'created_at': (o['created_at'] or '')[:10],
+            'created_at': safe_slice_date(o['created_at']),
         })
         if o['status'] in ('pending', 'approved'):
             total_pipeline_eur += o['total_final_eur'] or 0
@@ -3428,8 +3431,7 @@ def dashboard():
     # Familias más cotizadas (de lines_json)
     all_lines = []
     for o in db.execute("SELECT lines_json FROM pending_offers WHERE status IN ('pending','approved')"):
-        lines_data = json.loads(o['lines_json']) if o['lines_json'] else []
-        all_lines.extend(lines_data)
+        all_lines.extend(safe_json_loads(o['lines_json']))
     family_totals: dict[str, float] = {}
     for li in all_lines:
         fam = li.get('family', '?')
@@ -3540,6 +3542,40 @@ def api_update_product(product_id: int):
     if not existing:
         return jsonify({'ok': False, 'error': 'not found'}), 404
     data = request.get_json() or {}
+    
+    # === VALIDACIÓN DE INPUTS ===
+    errors = []
+    
+    # Validar campos numéricos
+    numeric_fields = {
+        'pvp_eur_unit': (0, None, 'PVP debe ser >= 0'),
+        'precio_arias_eur_unit': (0, None, 'Precio Arias debe ser >= 0'),
+        'discount_pct': (0, 100, 'Descuento debe estar entre 0-100%'),
+        'discount_extra_pct': (0, 100, 'Descuento extra debe estar entre 0-100%'),
+        'kg_per_unit': (0, None, 'kg/ud debe ser >= 0'),
+        'units_per_pallet': (0, None, 'Ud/palé debe ser >= 0'),
+        'sqm_per_pallet': (0, None, 'm²/palé debe ser >= 0'),
+    }
+    
+    for field, (min_val, max_val, error_msg) in numeric_fields.items():
+        if field in data and data[field] is not None:
+            try:
+                val = float(data[field])
+                if val < min_val:
+                    errors.append(error_msg)
+                elif max_val is not None and val > max_val:
+                    errors.append(f'{field} excede máximo')
+            except (TypeError, ValueError):
+                errors.append(f'{field} debe ser numérico')
+    
+    # Nombre no vacío
+    if 'name' in data and (not data['name'] or not data['name'].strip()):
+        errors.append('Nombre no puede estar vacío')
+    
+    if errors:
+        return jsonify({'ok': False, 'error': 'Validación fallida', 'errors': errors}), 400
+    # === FIN VALIDACIÓN ===
+    
     # Campos editables
     editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
                 'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
@@ -3720,7 +3756,7 @@ def project_detail(project_id: int):
 
     parsed_quotes = []
     for q in quotes:
-        payload = json.loads(q['result_json'])
+        payload = safe_json_loads(q['result_json'])
         parsed_quotes.append({'meta': q, 'payload': payload})
 
     return render_template('project_detail.html', project=project, systems=systems, quotes=parsed_quotes, events=events, stages=STAGES)
@@ -3957,26 +3993,34 @@ def quote():
                 unique.append({'key': sf, 'label': label})
         subfamilies_friendly[fam] = unique
     
-    systems = db.execute(
-        '''SELECT s.*, GROUP_CONCAT(
-            json_object('sku', p.sku, 'name', p.name, 'category', p.category,
-                        'unit', p.unit, 'unit_price_eur', p.unit_price_eur,
-                        'consumption_per_sqm', sc.consumption_per_sqm,
-                        'waste_pct', sc.waste_pct)
-        ) as components_json
+    # PostgreSQL no tiene json_object, construimos el JSON en Python
+    systems_raw = db.execute(
+        '''SELECT s.id, s.name, s.description,
+                  p.sku, p.name as product_name, p.category, p.unit, p.unit_price_eur,
+                  sc.consumption_per_sqm, sc.waste_pct
            FROM systems s
            LEFT JOIN system_components sc ON sc.system_id = s.id
            LEFT JOIN products p ON p.id = sc.product_id
-           GROUP BY s.id'''
+           ORDER BY s.id'''
     ).fetchall()
-    systems_data = []
-    for s in systems:
-        sd = dict(s)
-        comps = json.loads('[' + (sd.get('components_json') or '') + ']') if sd.get('components_json') else []
-        systems_data.append({
-            'id': sd['id'], 'name': sd['name'], 'description': sd['description'],
-            'components': comps
-        })
+    
+    # Agrupar components por sistema
+    systems_dict = {}
+    for row in systems_raw:
+        sid = row['id']
+        if sid not in systems_dict:
+            systems_dict[sid] = {
+                'id': sid, 'name': row['name'], 'description': row['description'],
+                'components': []
+            }
+        if row['sku']:
+            systems_dict[sid]['components'].append({
+                'sku': row['sku'], 'name': row['product_name'], 'category': row['category'],
+                'unit': row['unit'], 'unit_price_eur': row['unit_price_eur'],
+                'consumption_per_sqm': row['consumption_per_sqm'], 'waste_pct': row['waste_pct']
+            })
+    
+    systems_data = list(systems_dict.values())
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
@@ -3995,7 +4039,8 @@ def quote():
         row = db.execute('SELECT * FROM pending_offers WHERE id = ?', (edit_id,)).fetchone()
         if row:
             edit_offer = dict(row)
-            edit_offer['lines'] = json.loads(row['lines_json']) if row['lines_json'] else []
+            # Handle both SQLite (JSON string) and Postgres (native list)
+            edit_offer['lines'] = safe_json_loads(row['lines_json'])
 
     # Perfiles físicos de palé/contenedor para el panel de análisis logístico
     # del frontend (desglose: ¿por qué N contenedores?). El cálculo real lo hace
@@ -4100,7 +4145,7 @@ def quote_pdf(project_id: int, quote_id: int):
     story.append(Spacer(1, 5*mm))
 
     # ── REFERENCE ROW ─────────────────────────────────────────────
-    ref_date = quote['created_at'][:10]
+    ref_date = safe_slice_date(quote['created_at'])
     # project_quotes (oferta técnica interna) no tiene columna validity_days; la
     # validez vive en pending_offers (oferta comercial → offer_pdf). Si en el
     # futuro se añade la columna o se vuelca al payload result_json, este lookup
@@ -4405,7 +4450,7 @@ def dashboard_financial():
     total_pipeline_eur = 0
     total_confirmed_eur = 0
     for q in recent_quotes:
-        payload = json.loads(q['result_json'])
+        payload = safe_json_loads(q['result_json'])
         s = payload['summary']
         margin_pct = round(s['gross_margin_pct'] * 100, 1)
         quotes_data.append({
@@ -4425,7 +4470,7 @@ def dashboard_financial():
             'price_per_sqm': s['price_per_sqm_eur'],
             'pallets': s['total_pallets'],
             'containers_40': s['containers_40_est'],
-            'created_at': q['created_at'][:10],
+            'created_at': safe_slice_date(q['created_at']),
             'margin_ok': margin_pct >= 18,
         })
         total_pipeline_eur += s['sale_total_eur']
@@ -4605,7 +4650,7 @@ def config():
                           customs=[dict(c) for c in customs],
                           fx=[dict(f) for f in fx],
                           fx_eur_usd=float(fx_setting['value']) if fx_setting else 1.18,
-                          fx_updated=(fx_setting['updated_at'][:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
+                          fx_updated=(str(fx_setting['updated_at'])[:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
 
 
 # ── API: Save pending offer ───────────────────────────────────────
@@ -4616,6 +4661,51 @@ def save_offer():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data'}), 400
+
+    # === VALIDACIÓN DE INPUTS ===
+    errors = []
+    
+    # Cliente requerido
+    if not data.get('client'):
+        errors.append('Cliente requerido')
+    
+    # Líneas no vacías
+    raw_lines = data.get('lines', [])
+    if not raw_lines or len(raw_lines) == 0:
+        errors.append('Al menos una línea requerida')
+    
+    # Validar parámetros numéricos
+    waste_pct = _num(data.get('wastePct', 5))
+    if waste_pct < 0 or waste_pct > 50:
+        errors.append('Desperdicio debe estar entre 0-50%')
+    
+    margin_pct = _num(data.get('margin', 33))
+    if margin_pct < 0 or margin_pct > 100:
+        errors.append('Margen debe estar entre 0-100%')
+    
+    fx = _num(data.get('fx', 1.18))
+    if fx <= 0 or fx > 10:
+        errors.append('FX inválido')
+    
+    # Validar líneas individuales
+    for i, li in enumerate(raw_lines):
+        sku = li.get('sku')
+        qty = _num(li.get('qty', 0))
+        price = _num(li.get('price', 0))
+        line_margin = _num(li.get('margin', 0))
+        
+        if not sku:
+            errors.append(f'Línea {i+1}: SKU requerido')
+        if qty <= 0:
+            errors.append(f'Línea {i+1}: cantidad inválida')
+        if price < 0:
+            errors.append(f'Línea {i+1}: precio inválido')
+        if line_margin < 0 or line_margin > 100:
+            errors.append(f'Línea {i+1}: margen inválido')
+    
+    if errors:
+        return jsonify({'error': 'Validación fallida', 'errors': errors}), 400
+    # === FIN VALIDACIÓN ===
 
     waste_pct = _num(data.get('wastePct', 5)) / 100
     margin_pct = _num(data.get('margin', 33)) / 100
@@ -4711,7 +4801,7 @@ def save_offer():
             now_iso(),
         )
     )
-    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    offer_id = db.last_insert_rowid()
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'OFFER_CREATED',
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -5102,7 +5192,7 @@ def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | 
            VALUES (?, ?, 'draft', 'FASSA', ?)''',
         (offer['id'], name, now_iso())
     )
-    fo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    fo_id = db.last_insert_rowid()
     log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': fo_id, 'name': name, 'created': True}
@@ -5121,7 +5211,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
            VALUES (?, ?, 'draft', ?, ?)''',
         (offer['id'], name, offer['route_id'], now_iso())
     )
-    lo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    lo_id = db.last_insert_rowid()
     log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': lo_id, 'name': name, 'created': True}
@@ -5321,11 +5411,12 @@ def offer_pdf(offer_id):
     if not offer:
         return 'Oferta no encontrada', 404
     
-    lines = json.loads(offer['lines_json'])
+    # Handle both SQLite (JSON string) and Postgres (native list)
+    lines = safe_json_loads(offer['lines_json'])
     total_eur = offer['total_final_eur']
     fx = offer['fx_rate'] or 1.18
     total_usd = total_eur * fx
-    ref_date = offer['created_at'][:10]
+    ref_date = safe_slice_date(offer['created_at'])
 
     client_row = db.execute(
         'SELECT name, company, address, country, rnc FROM clients WHERE name = ? OR company = ? LIMIT 1',
@@ -5843,7 +5934,14 @@ def _load_offer_with_lines(offer_id: int):
         return None, None
     ol = db.execute('SELECT * FROM order_lines WHERE offer_id = ? ORDER BY id', (offer_id,)).fetchall()
     if not ol:
-        raw_lines = json.loads(offer['lines_json']) if offer['lines_json'] else []
+        # Handle both SQLite (JSON string) and Postgres (native list)
+        lines_json = offer['lines_json']
+        if lines_json is None:
+            raw_lines = []
+        elif isinstance(lines_json, (list, dict)):
+            raw_lines = lines_json  # Postgres
+        else:
+            raw_lines = json.loads(lines_json)  # SQLite
         computed = []
         for li in raw_lines:
             prod = db.execute('SELECT * FROM products WHERE sku = ?', (li.get('sku'),)).fetchone()
@@ -6386,7 +6484,7 @@ def api_order():
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    offer_id = db.last_insert_rowid()
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'ORDER_CREATED',
               f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')

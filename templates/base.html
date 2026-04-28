@@ -68,24 +68,7 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </div>
-  <script>
-    // CSRF auto-injection: añade X-CSRFToken a todos los fetch() de mismo origen
-    // que no sean GET/HEAD/OPTIONS. Sin esto, los POST AJAX fallan con 400.
-    (function() {
-      var token = document.querySelector('meta[name="csrf-token"]');
-      if (!token) return;
-      var csrf = token.getAttribute('content');
-      var origFetch = window.fetch;
-      window.fetch = function(input, init) {
-        init = init || {};
-        var method = (init.method || 'GET').toUpperCase();
-        if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-          init.headers = new Headers(init.headers || {});
-          if (!init.headers.has('X-CSRFToken')) init.headers.set('X-CSRFToken', csrf);
-        }
-        return origFetch.call(this, input, init);
-      };
-    })();
-  </script>
+  <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+  {% block extra_js %}{% endblock %}
 </body>
 </html>
