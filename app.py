@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -86,6 +87,38 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 app.config['WTF_CSRF_TIME_LIMIT'] = None  # token vive lo que la sesión
 csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
+
+
+def _setup_logging() -> None:
+    """Configuración básica de logs para operación local/servidor."""
+    if app.logger.handlers:
+        return
+    level = logging.DEBUG if _debug else logging.INFO
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s [%(name)s] %(message)s'
+    ))
+    app.logger.addHandler(handler)
+    app.logger.setLevel(level)
+
+
+_setup_logging()
+
+
+@app.errorhandler(500)
+def handle_internal_error(err):
+    """Return JSON for API 500s so frontend fetch() never receives HTML."""
+    if request.path.startswith('/api/'):
+        db = g.get('db')
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        if app.debug:
+            return jsonify({'ok': False, 'error': f'Internal server error: {err}'}), 500
+        return jsonify({'ok': False, 'error': 'Internal server error'}), 500
+    return err, 500
 
 
 def _safe_next_url(target: str | None) -> str | None:
@@ -213,6 +246,20 @@ def using_postgres() -> bool:
     """True when the current get_db() would return a Postgres adapter."""
     from db import adapter
     return adapter.is_configured()
+
+
+def _last_insert_id(db: Any) -> int | None:
+    """Compat helper: sqlite3 uses SQL function; Pg adapter exposes method."""
+    fn = getattr(db, 'last_insert_rowid', None)
+    if callable(fn):
+        return fn()
+    row = db.execute('SELECT last_insert_rowid()').fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])  # sqlite3.Row positional access
+    except Exception:
+        return int(row['id']) if isinstance(row, dict) and 'id' in row else None
 
 
 def init_db() -> None:
@@ -4776,36 +4823,43 @@ def save_offer():
         }), 409
 
     validity_days = int(_num(data.get('validityDays', 30)) or 30)
-    db.execute(
-        '''INSERT INTO pending_offers
-        (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
-         lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-         status, incoterm, container_count, validity_days, raw_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-        (
-            offer_num,
-            data.get('client', ''),
-            data.get('project', ''),
-            data.get('wastePct', 5),
-            data.get('margin', 33),
-            fx,
-            json.dumps(input_lines),
-            round(product_cost, 2),
-            round(logistic_eur, 2),
-            round(total_final, 2),
-            'pending',
-            data.get('incoterm', 'EXW'),
-            int(container_count),
-            validity_days,
-            raw_hash,
-            now_iso(),
+    try:
+        db.execute(
+            '''INSERT INTO pending_offers
+            (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
+             lines_json, total_product_eur, total_logistic_eur, total_final_eur,
+             status, incoterm, container_count, validity_days, raw_hash, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (
+                offer_num,
+                data.get('client', ''),
+                data.get('project', ''),
+                data.get('wastePct', 5),
+                data.get('margin', 33),
+                fx,
+                json.dumps(input_lines),
+                round(product_cost, 2),
+                round(logistic_eur, 2),
+                round(total_final, 2),
+                'pending',
+                data.get('incoterm', 'EXW'),
+                int(container_count),
+                validity_days,
+                raw_hash,
+                now_iso(),
+            )
         )
-    )
-    offer_id = db.last_insert_rowid()
-    save_order_lines(db, offer_id, computed)
-    log_audit(db, offer_id, 'OFFER_CREATED',
-              f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
-    db.commit()
+        offer_id = _last_insert_id(db)
+        if not offer_id:
+            raise RuntimeError('No se pudo obtener ID de la oferta recién creada')
+        save_order_lines(db, offer_id, computed)
+        log_audit(db, int(offer_id), 'OFFER_CREATED',
+                  f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        app.logger.exception('save_offer failed for offer_number=%s', offer_num)
+        return jsonify({'ok': False, 'error': f'Error al guardar oferta: {exc}'}), 500
     return jsonify({
         'ok': True,
         'offer_number': offer_num,
@@ -5192,7 +5246,7 @@ def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | 
            VALUES (?, ?, 'draft', 'FASSA', ?)''',
         (offer['id'], name, now_iso())
     )
-    fo_id = db.last_insert_rowid()
+    fo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': fo_id, 'name': name, 'created': True}
@@ -5211,7 +5265,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
            VALUES (?, ?, 'draft', ?, ?)''',
         (offer['id'], name, offer['route_id'], now_iso())
     )
-    lo_id = db.last_insert_rowid()
+    lo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': lo_id, 'name': name, 'created': True}
@@ -6484,7 +6538,7 @@ def api_order():
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    offer_id = db.last_insert_rowid()
+    offer_id = _last_insert_id(db)
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'ORDER_CREATED',
               f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -6569,6 +6623,18 @@ if os.environ.get('RUN_INIT_ON_IMPORT') == '1':
         import traceback
         print(f'[bootstrap] init/seed falló: {e}')
         traceback.print_exc()
+
+
+@app.route('/health')
+def health():
+    """Health check simple para operación y supervisión."""
+    try:
+        db = get_db()
+        db.execute('SELECT 1').fetchone()
+        return jsonify({'status': 'healthy', 'db': 'ok'}), 200
+    except Exception as exc:
+        app.logger.exception('health check failed')
+        return jsonify({'status': 'unhealthy', 'error': str(exc)}), 500
 
 
 if __name__ == '__main__':
