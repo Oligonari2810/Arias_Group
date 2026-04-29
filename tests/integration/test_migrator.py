@@ -194,6 +194,15 @@ def clean_postgres():
     cfg.set_main_option('sqlalchemy.url', url)
     os.environ['DATABASE_URL'] = url
     command.upgrade(cfg, 'head')
+
+    # Alembic head now seeds reference rows in some tables (e.g. products,
+    # app_settings). These tests validate SQLite->Postgres copy semantics on an
+    # empty target, so wipe the migrator scope after schema bootstrap.
+    from scripts.migrate_sqlite_to_postgres import TABLES_IN_ORDER
+    with eng.begin() as conn:
+        for table in reversed(TABLES_IN_ORDER):
+            conn.execute(text(f'TRUNCATE TABLE {table} RESTART IDENTITY CASCADE'))
+
     return eng, url
 
 

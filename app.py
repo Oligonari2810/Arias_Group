@@ -88,6 +88,22 @@ csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
 
 
+@app.errorhandler(500)
+def handle_internal_error(err):
+    """Return JSON for API 500s so frontend fetch() never receives HTML."""
+    if request.path.startswith('/api/'):
+        db = g.get('db')
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        if app.debug:
+            return jsonify({'ok': False, 'error': f'Internal server error: {err}'}), 500
+        return jsonify({'ok': False, 'error': 'Internal server error'}), 500
+    return err, 500
+
+
 def _safe_next_url(target: str | None) -> str | None:
     """Permite solo paths internos relativos. Bloquea open redirect a otros hosts."""
     if not target:
