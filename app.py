@@ -4840,14 +4840,14 @@ def save_offer():
         )
     )
     row = cur.fetchone()
-    offer_id = int(row['id']) if row else None  # psycopg con dict_row devuelve dict, acceder por nombre
+    offer_id = int(row['id']) if row and row['id'] else None  # psycopg con dict_row devuelve dict, acceder por nombre
     cur.close()
     
     if not offer_id:
         return jsonify({'ok': False, 'error': 'No se pudo crear la oferta'}), 500
     
     save_order_lines(db, offer_id, computed)
-    log_audit(db, offer_id, 'OFFER_CREATED',
+    log_audit(db, int(offer_id), 'OFFER_CREATED',  # Asegurar que offer_id sea int para audit_log
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
     db.commit()
     return jsonify({
