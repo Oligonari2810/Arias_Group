@@ -105,7 +105,7 @@ class PgConnection:
         cur = self._conn.cursor()
         cur.execute("SELECT lastval()")
         result = cur.fetchone()
-        return result[0] if result else None
+        return result['lastval'] if result else None
 
     # No-op setter — app.py assigns `g.db.row_factory = sqlite3.Row` in places.
     @property
