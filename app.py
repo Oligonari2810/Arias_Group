@@ -4824,7 +4824,7 @@ def save_offer():
         )
     )
     row = cur.fetchone()
-    offer_id = int(row[0]) if row else None  # Acceder por índice [0], no por nombre ['id']
+    offer_id = int(row['id']) if row else None  # psycopg con dict_row devuelve dict, acceder por nombre
     cur.close()
     
     if not offer_id:
