@@ -3712,20 +3712,19 @@ def project_detail(project_id: int):
             db.commit()
             flash('Etapa actualizada.')
         elif action == 'save_project':
+            # Convert percentages to decimal (30 → 0.30) for NUMERIC(5,4) fields
+            area_sqm = float(request.form.get('area_sqm') or 0)
+            fx_rate = float(request.form.get('fx_rate') or 1)
+            target_margin_pct = float(request.form.get('target_margin_pct') or 30) / 100
+            freight_eur = float(request.form.get('freight_eur') or 0)
+            customs_pct = float(request.form.get('customs_pct') or 18) / 100
+            incoterm = request.form.get('incoterm') or 'EXW'
+            go_no_go = request.form.get('go_no_go') or 'PENDING'
+            logistics_notes = request.form.get('logistics_notes')
             db.execute(
                 '''UPDATE projects SET area_sqm = ?, fx_rate = ?, target_margin_pct = ?, freight_eur = ?, customs_pct = ?, incoterm = ?, go_no_go = ?, logistics_notes = ?
                    WHERE id = ?''',
-                (
-                    float(request.form.get('area_sqm') or 0),
-                    float(request.form.get('fx_rate') or 1),
-                    float(request.form.get('target_margin_pct') or 0.30),
-                    float(request.form.get('freight_eur') or 0),
-                    float(request.form.get('customs_pct') or 0.18),
-                    request.form.get('incoterm') or 'EXW',
-                    request.form.get('go_no_go') or 'PENDING',
-                    request.form.get('logistics_notes'),
-                    project_id,
-                ),
+                (area_sqm, fx_rate, target_margin_pct, freight_eur, customs_pct, incoterm, go_no_go, logistics_notes, project_id),
             )
             db.commit()
             flash('Proyecto actualizado.')
@@ -4514,12 +4513,15 @@ def crm():
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'add_client':
+            # Convert score to int (PostgreSQL requires SMALLINT, default 50)
+            score_val = request.form.get('score', '').strip()
+            score_int = int(score_val) if score_val and score_val.isdigit() else 50
             db.execute(
                 '''INSERT INTO clients (name, company, email, phone, country, score, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
                 (request.form['name'], request.form.get('company'),
                  request.form.get('email'), request.form.get('phone'),
-                 request.form.get('country', 'RD'), request.form.get('score', 'C'),
+                 request.form.get('country', 'RD'), score_int,
                  now_iso())
             )
             flash('Cliente creado.')
@@ -4766,7 +4768,20 @@ def save_offer():
     # ('2026-' + Date.now().slice(-4)), lo que causó colisiones históricas
     # (p.ej. ofertas #18 y #19 con el mismo '2026-8464').
     offer_num = generate_offer_number(db)
-    raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
+    
+    # Convertir Decimal a float para JSON serializable
+    input_lines_clean = []
+    for line in input_lines:
+        clean_line = {}
+        for k, v in line.items():
+            from decimal import Decimal
+            if isinstance(v, Decimal):
+                clean_line[k] = float(v)
+            else:
+                clean_line[k] = v
+        input_lines_clean.append(clean_line)
+    
+    raw_hash = compute_raw_hash(json.dumps(input_lines_clean, sort_keys=True))
     dup = find_offer_by_hash(db, raw_hash)
     if dup:
         return jsonify({
@@ -4776,20 +4791,29 @@ def save_offer():
         }), 409
 
     validity_days = int(_num(data.get('validityDays', 30)) or 30)
-    db.execute(
+
+    # Convert percentages to decimal for NUMERIC(5,4) fields
+    waste_pct = float(_num(data.get('wastePct', 5))) / 100
+    margin_pct = float(_num(data.get('margin', 33))) / 100
+
+    # PostgreSQL: RETURNING debe ir inmediatamente después de VALUES
+    # Usamos ejecución directa SIN traducción (ya verificamos duplicados antes)
+    # El INSERT usa %s (PostgreSQL) en vez de ? (SQLite)
+    result = db._conn.cursor()
+    result.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
          status, incoterm, container_count, validity_days, raw_hash, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',
         (
             offer_num,
             data.get('client', ''),
             data.get('project', ''),
-            data.get('wastePct', 5),
-            data.get('margin', 33),
+            waste_pct,
+            margin_pct,
             fx,
-            json.dumps(input_lines),
+            json.dumps(input_lines_clean),
             round(product_cost, 2),
             round(logistic_eur, 2),
             round(total_final, 2),
@@ -4801,7 +4825,7 @@ def save_offer():
             now_iso(),
         )
     )
-    offer_id = db.last_insert_rowid()
+    offer_id = result.fetchone()['id']
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'OFFER_CREATED',
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -4812,9 +4836,9 @@ def save_offer():
         'offer_id': offer_id,
         'product_cost_eur': round(product_cost, 2),
         'total_final_eur': round(total_final, 2),
-        'total_weight_kg': totals['weight_total_kg'],
-        'pallets_logistic': totals['pallets_logistic'],
-        'container_recommendation': totals.get('containers'),
+        'total_weight_kg': float(round(totals['weight_total_kg'], 2)),
+        'pallets_logistic': float(round(totals['pallets_logistic'], 2)),
+        'container_recommendation': float(totals.get('containers', 0)) if totals.get('containers') else None,
         'alerts': dedup_alerts(computed),
         'skipped_skus': skipped,
     })
@@ -4908,6 +4932,18 @@ def update_full_offer():
         })
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
+    # Convertir Decimal a float para JSON serializable
+    from decimal import Decimal
+    input_lines_clean = []
+    for line in input_lines:
+        clean_line = {}
+        for k, v in line.items():
+            if isinstance(v, Decimal):
+                clean_line[k] = float(v)
+            else:
+                clean_line[k] = v
+        input_lines_clean.append(clean_line)
+
     validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
     db.execute(
         '''UPDATE pending_offers SET
@@ -4924,14 +4960,14 @@ def update_full_offer():
             data.get('wastePct', 5),
             data.get('margin', 20),
             fx,
-            json.dumps(input_lines),
+            json.dumps(input_lines_clean),
             round(product_cost, 2),
             round(logistic_eur, 2),
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
             validity_days,
-            compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
+            compute_raw_hash(json.dumps(input_lines_clean, sort_keys=True)),
             now_iso(),
             edit_id,
         )
