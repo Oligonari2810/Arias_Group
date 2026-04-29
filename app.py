@@ -88,6 +88,22 @@ csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
 
 
+@app.errorhandler(500)
+def handle_internal_error(err):
+    """Return JSON for API 500s so frontend fetch() never receives HTML."""
+    if request.path.startswith('/api/'):
+        db = g.get('db')
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        if app.debug:
+            return jsonify({'ok': False, 'error': f'Internal server error: {err}'}), 500
+        return jsonify({'ok': False, 'error': 'Internal server error'}), 500
+    return err, 500
+
+
 def _safe_next_url(target: str | None) -> str | None:
     """Permite solo paths internos relativos. Bloquea open redirect a otros hosts."""
     if not target:
@@ -213,6 +229,20 @@ def using_postgres() -> bool:
     """True when the current get_db() would return a Postgres adapter."""
     from db import adapter
     return adapter.is_configured()
+
+
+def _last_insert_id(db: Any) -> int | None:
+    """Compat helper: sqlite3 uses SQL function; Pg adapter exposes method."""
+    fn = getattr(db, 'last_insert_rowid', None)
+    if callable(fn):
+        return fn()
+    row = db.execute('SELECT last_insert_rowid()').fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])  # sqlite3.Row positional access
+    except Exception:
+        return int(row['id']) if isinstance(row, dict) and 'id' in row else None
 
 
 def init_db() -> None:
@@ -4801,7 +4831,7 @@ def save_offer():
             now_iso(),
         )
     )
-    offer_id = db.last_insert_rowid()
+    offer_id = _last_insert_id(db)
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'OFFER_CREATED',
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -5192,7 +5222,7 @@ def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | 
            VALUES (?, ?, 'draft', 'FASSA', ?)''',
         (offer['id'], name, now_iso())
     )
-    fo_id = db.last_insert_rowid()
+    fo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': fo_id, 'name': name, 'created': True}
@@ -5211,7 +5241,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
            VALUES (?, ?, 'draft', ?, ?)''',
         (offer['id'], name, offer['route_id'], now_iso())
     )
-    lo_id = db.last_insert_rowid()
+    lo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': lo_id, 'name': name, 'created': True}
@@ -6484,7 +6514,7 @@ def api_order():
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    offer_id = db.last_insert_rowid()
+    offer_id = _last_insert_id(db)
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'ORDER_CREATED',
               f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')
