@@ -911,7 +911,21 @@ function generateOffer() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(offer)
   })
-  .then(r => r.json())
+  .then(async (r) => {
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (!ct.includes('application/json')) {
+      const body = await r.text();
+      if (r.status === 401 || r.status === 403 || body.toLowerCase().includes('login')) {
+        throw new Error('Sesión expirada o sin permisos. Recarga la página e inicia sesión de nuevo.');
+      }
+      throw new Error('El servidor devolvió HTML en lugar de JSON (status ' + r.status + ').');
+    }
+    const data = await r.json();
+    if (!r.ok) {
+      throw new Error(data.error || ('Error HTTP ' + r.status));
+    }
+    return data;
+  })
   .then(data => {
     if (data.ok) {
       const action = editId ? 'actualizada' : 'generada';
