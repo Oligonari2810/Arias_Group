@@ -4796,11 +4796,9 @@ def save_offer():
     waste_pct = float(_num(data.get('wastePct', 5))) / 100
     margin_pct = float(_num(data.get('margin', 33))) / 100
 
-    # PostgreSQL: RETURNING debe ir inmediatamente después de VALUES
-    # Usamos ejecución directa SIN traducción (ya verificamos duplicados antes)
-    # El INSERT usa %s (PostgreSQL) en vez de ? (SQLite)
-    result = db._conn.cursor()
-    result.execute(
+    # PostgreSQL: Ejecutar INSERT con RETURNING para obtener ID
+    cur = db._conn.cursor()
+    cur.execute(
         '''INSERT INTO pending_offers
         (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
          lines_json, total_product_eur, total_logistic_eur, total_final_eur,
@@ -4808,8 +4806,8 @@ def save_offer():
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',
         (
             offer_num,
-            data.get('client', ''),
-            data.get('project', ''),
+            data.get('client', '') or '',
+            data.get('project', '') or '',
             waste_pct,
             margin_pct,
             fx,
@@ -4818,14 +4816,20 @@ def save_offer():
             round(logistic_eur, 2),
             round(total_final, 2),
             'pending',
-            data.get('incoterm', 'EXW'),
-            int(container_count),
+            data.get('incoterm', 'EXW') or 'EXW',
+            int(container_count or 0),
             validity_days,
             raw_hash,
             now_iso(),
         )
     )
-    offer_id = result.fetchone()['id']
+    row = cur.fetchone()
+    offer_id = int(row[0]) if row else None  # Acceder por índice [0], no por nombre ['id']
+    cur.close()
+    
+    if not offer_id:
+        return jsonify({'ok': False, 'error': 'No se pudo crear la oferta'}), 500
+    
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'OFFER_CREATED',
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -5079,13 +5083,13 @@ def api_compute_logistics():
     # migración 0003 — usamos 1.0 como fallback (comportamiento previo).
     floor_stowage = cp_row['floor_stowage_factor'] if 'floor_stowage_factor' in cp_row.keys() else 1.0
     container = ContainerProfile(
-        type=cp_row['type'],
-        inner_length_m=cp_row['inner_length_m'],
-        inner_width_m=cp_row['inner_width_m'],
-        inner_height_m=cp_row['inner_height_m'],
-        payload_kg=cp_row['payload_kg'],
-        door_clearance_m=cp_row['door_clearance_m'],
-        stowage_factor=cp_row['stowage_factor'],
+        type=str(cp_row['type']),
+        inner_length_m=float(cp_row['inner_length_m']),
+        inner_width_m=float(cp_row['inner_width_m']),
+        inner_height_m=float(cp_row['inner_height_m']),
+        payload_kg=float(cp_row['payload_kg']),
+        door_clearance_m=float(cp_row['door_clearance_m']),
+        stowage_factor=float(cp_row['stowage_factor']),
         floor_stowage_factor=float(floor_stowage),
     )
 
@@ -5093,11 +5097,11 @@ def api_compute_logistics():
     pallet_profiles: dict[str, PalletProfile] = {}
     for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
         pallet_profiles[r['category']] = PalletProfile(
-            category=r['category'],
-            length_m=r['pallet_length_m'],
-            width_m=r['pallet_width_m'],
-            height_m=r['pallet_height_m'],
-            stackable_levels=r['stackable_levels'],
+            category=str(r['category']),
+            length_m=float(r['pallet_length_m']),
+            width_m=float(r['pallet_width_m']),
+            height_m=float(r['pallet_height_m']),
+            stackable_levels=int(r['stackable_levels']),
             allow_mix_floor=bool(r['allow_mix_floor']),
         )
 
