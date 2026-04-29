@@ -231,6 +231,20 @@ def using_postgres() -> bool:
     return adapter.is_configured()
 
 
+def _last_insert_id(db: Any) -> int | None:
+    """Compat helper: sqlite3 uses SQL function; Pg adapter exposes method."""
+    fn = getattr(db, 'last_insert_rowid', None)
+    if callable(fn):
+        return fn()
+    row = db.execute('SELECT last_insert_rowid()').fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])  # sqlite3.Row positional access
+    except Exception:
+        return int(row['id']) if isinstance(row, dict) and 'id' in row else None
+
+
 def init_db() -> None:
     if using_postgres():
         # On Postgres, Alembic owns the schema. Skip the SQLite DDL script.
@@ -4839,13 +4853,7 @@ def save_offer():
             now_iso(),
         )
     )
-    row = cur.fetchone()
-    offer_id = int(row['id']) if row and row['id'] else None  # psycopg con dict_row devuelve dict, acceder por nombre
-    cur.close()
-    
-    if not offer_id:
-        return jsonify({'ok': False, 'error': 'No se pudo crear la oferta'}), 500
-    
+    offer_id = _last_insert_id(db)
     save_order_lines(db, offer_id, computed)
     log_audit(db, int(offer_id), 'OFFER_CREATED',  # Asegurar que offer_id sea int para audit_log
               f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -5248,7 +5256,7 @@ def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | 
            VALUES (?, ?, 'draft', 'FASSA', ?)''',
         (offer['id'], name, now_iso())
     )
-    fo_id = db.last_insert_rowid()
+    fo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': fo_id, 'name': name, 'created': True}
@@ -5267,7 +5275,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
            VALUES (?, ?, 'draft', ?, ?)''',
         (offer['id'], name, offer['route_id'], now_iso())
     )
-    lo_id = db.last_insert_rowid()
+    lo_id = _last_insert_id(db)
     log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': lo_id, 'name': name, 'created': True}
@@ -6540,7 +6548,7 @@ def api_order():
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    offer_id = db.last_insert_rowid()
+    offer_id = _last_insert_id(db)
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'ORDER_CREATED',
               f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')
