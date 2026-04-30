@@ -65,7 +65,7 @@
   </div>
   <table style="max-width:400px; margin-top:6px;">
     <tr><td>Producto + desperdicio</td><td class="num">€ {{ "%.2f"|format(offer['total_product_eur']) }}</td></tr>
-    <tr><td>+ Coste Variable</td><td class="num">€ <span class="log-total">0.00</span></td></tr>
+    <tr><td>+ Coste Logística</td><td class="num">€ <span class="log-total">0.00</span></td></tr>
     <tr><th>TOTAL</th><td class="num"><b class="final-total">€ {{ "%.2f"|format(offer['total_final_eur']) }}</b></td></tr>
   </table>
 
@@ -78,7 +78,7 @@
   </div>
   <table style="max-width:400px; margin-top:6px;">
     <tr><td>Producto</td><td class="num">€ {{ "%.2f"|format(offer['total_product_eur']) }}</td></tr>
-    <tr><td>+ Coste Variable</td><td class="num">€ {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</td></tr>
+    <tr><td>+ Coste Logística</td><td class="num">€ {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</td></tr>
     <tr><th>TOTAL</th><td class="num"><b>€ {{ "%.2f"|format(offer['total_final_eur']) }}</b></td></tr>
   </table>
   {% endif %}

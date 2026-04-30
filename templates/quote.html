@@ -182,7 +182,7 @@
 
 <table style="max-width:500px; margin-top:8px;">
   <tr><td>Coste producto <span id="wasteLabel"></span></td><td class="num">€ <span id="subtotalProducts">0.00</span></td></tr>
-  <tr><td>+ Coste Variable (<span id="incotermLabel">EXW</span>)</td><td class="num">€ <span id="logisticTotal">0.00</span></td></tr>
+  <tr><td>+ Coste Logística (<span id="incotermLabel">EXW</span>)</td><td class="num">€ <span id="logisticTotal">0.00</span></td></tr>
   <tr><td>= Coste total</td><td class="num">€ <span id="costProduct">0.00</span></td></tr>
   <tr><td>Margen total</td><td class="num">€ <span id="marginEur">0.00</span> (<span id="marginPctLabel">20</span>% s/producto)</td></tr>
   <tr><th>TOTAL VENTA €</th><td class="num"><b>€ <span id="totalEur">0.00</span></b></td></tr>
@@ -223,7 +223,7 @@
 
 <div style="margin-top:8px;">
   <button type="button" onclick="clearAll()">Limpiar</button>
-  <button type="button" onclick="generateOffer()">Generar oferta → Coste Variable</button>
+  <button type="button" onclick="generateOffer()">Generar oferta → Coste Logística</button>
 </div>
 
 <div id="offerBanner" class="flash" style="display:none; margin-top:8px;"></div>
@@ -608,7 +608,7 @@ function recalcAll() {
   lines.forEach((line, i) => {
     const qtyW = Math.ceil(line.qty * (1 + wastePct));
     // Margen se aplica SOLO sobre coste de producto.
-    // Coste Variable es pass-through: se suma globalmente, no por línea.
+    // Coste Logística es pass-through: se suma globalmente, no por línea.
     const costProduct = line.price * qtyW;
     const m = (line.margin || 0) / 100;
     const saleProduct = m < 1 ? costProduct / (1 - m) : costProduct;
@@ -650,7 +650,7 @@ function recalcAll() {
     </tr>`;
   });
 
-  // Coste Variable se calcula globalmente (no prorrateado por línea)
+  // Coste Logística se calcula globalmente (no prorrateado por línea)
   const effectiveLogistic = logisticCost;
   const totalSaleFinal = totalSale + effectiveLogistic;
   const totalCostFinal = totalCost + effectiveLogistic;
@@ -674,7 +674,7 @@ function recalcAll() {
 }
 
 // Avisos no bloqueantes antes de generar la oferta. Detecta condiciones
-// que casi siempre son errores de dedo (coste variable 0 en CIF, margen muy bajo,
+// que casi siempre son errores de dedo (coste logístico 0 en CIF, margen muy bajo,
 // línea con cantidad 0, etc.) y las muestra en una caja ámbar arriba del
 // botón Generar. No impiden guardar — solo llaman la atención.
 function renderPreflightChecks(incoterm, effectiveLogistic, containerCount) {
@@ -696,7 +696,7 @@ function renderPreflightChecks(incoterm, effectiveLogistic, containerCount) {
     }
   });
   if (incoterm !== 'EXW' && effectiveLogistic <= 0) {
-    warns.push(`Incoterm ${incoterm} pero coste variable 0€. Pulsa "🔄 Calcular logística" o introduce coste manual.`);
+    warns.push(`Incoterm ${incoterm} pero coste logístico 0€. Pulsa "🔄 Calcular logística" o introduce coste manual.`);
   }
   if (incoterm !== 'EXW' && containerCount <= 0) {
     warns.push(`Incoterm ${incoterm} sin contenedores definidos. Pulsa "🔄 Calcular logística".`);

@@ -1628,12 +1628,12 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
 
     Regla:
       - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
-      - coste variable por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
-        Si NINGUNA línea trae log_unit_cost, el coste variable global del payload se
+      - coste logístico por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
+        Si NINGUNA línea trae log_unit_cost, el coste logístico global del payload se
         prorratea proporcional al coste de producto por línea (equivalente
         matemáticamente al cálculo global previo, mantiene compat con bot).
       - venta línea = cost_producto / (1 - margen_línea) + coste_variable_línea
-        (coste variable es pass-through: no genera margen, igual que el frontend).
+        (coste logístico es pass-through: no genera margen, igual que el frontend).
     """
     product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
     if product_cost_total <= 0 or not computed:
@@ -2777,7 +2777,7 @@ def quote_pdf(project_id: int, quote_id: int):
 
     fin_rows = [
         ['Coste producto EXW fábrica', f"€ {summary['product_cost_eur']:,.2f}"],
-        ['Coste Variable (Logística)', f"€ {summary['freight_eur']:,.2f}"],
+        ['Coste Logística (Logística)', f"€ {summary['freight_eur']:,.2f}"],
         ['Coste total puesto en destino', f"€ {summary['landed_total_eur']:,.2f}"],
     ]
     fin_tbl = Table(
@@ -2830,7 +2830,7 @@ def quote_pdf(project_id: int, quote_id: int):
         "<b>Plazo de entrega:</b> Según confirmación de fábrica tras recepción de pago. Stock estándar: aprox. 2 días hábiles hasta carga.",
         "<b>Validez de oferta:</b> 30 días naturales desde fecha de emisión.",
         "<b>Normativa:</b> Todos los productos cumplen normativa europea vigente (CE, ETA, EN). Fichas técnicas disponibles bajo solicitud.",
-        "<b>Coste Variable:</b> La logística se cotiza como línea separada para no distorsionar el valor de fábrica de los productos Fassa Bortolo.",
+        "<b>Coste Logística:</b> La logística se cotiza como línea separada para no distorsionar el valor de fábrica de los productos Fassa Bortolo.",
     ]
     for c in conditions:
         story.append(Paragraph(c, S['cond']))
@@ -4257,7 +4257,7 @@ def offer_pdf(offer_id):
         ))
     story.append(Spacer(1, 6*mm))
 
-    # Logistics summary — solo cuando el coste variable lo gestiona Arias (no-EXW).
+    # Logistics summary — solo cuando el coste logístico lo gestiona Arias (no-EXW).
     # En EXW el cliente se encarga del transporte; incluir puerto destino,
     # contenedores, etc. confunde porque no aplica al alcance del pedido.
     incoterm_upper = (offer['incoterm'] or 'EXW').upper()
