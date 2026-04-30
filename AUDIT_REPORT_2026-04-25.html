@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+        h1, h2, h3 { color: #333; }
+        table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #4CAF50; color: white; }
+        code { background-color: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
+        pre { background-color: #f4f4f4; padding: 10px; overflow-x: auto; }
+    </style>
+    <title>Arias_Group Audit Report 2026-04-25</title>
+</head>
+<body>
+<h1>Arias_Group — Comprehensive Security &amp; Code Audit Report</h1>
+<p><strong>Audit Date:</strong> 2026-04-25<br />
+<strong>Repository:</strong> https://github.com/Oligonari2810/Arias_Group.git<br />
+<strong>Commit:</strong> a0bbbe1b1bbb0b81c20847f47998a644b52461fe<br />
+<strong>Auditor:</strong> Qwen Code (AI Assistant)<br />
+<strong>Scope:</strong> Full-stack security, code quality, dependencies, tests, infrastructure</p>
+<hr />
+<h2>Executive Summary</h2>
+<p>The Arias_Group application is a <strong>Flask-based business operating system</strong> for Fassa Bortolo/Gypsotech distribution in the Caribbean. The codebase demonstrates <strong>strong security fundamentals</strong> with several areas requiring immediate attention.</p>
+<h3>Overall Risk Assessment: <strong>MEDIUM</strong></h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Score</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Security</strong></td>
+<td>7.5/10</td>
+<td>⚠️ Needs Attention</td>
+</tr>
+<tr>
+<td><strong>Code Quality</strong></td>
+<td>8.0/10</td>
+<td>✅ Good</td>
+</tr>
+<tr>
+<td><strong>Test Coverage</strong></td>
+<td>8.5/10</td>
+<td>✅ Good (unit tests)</td>
+</tr>
+<tr>
+<td><strong>Dependencies</strong></td>
+<td>6.5/10</td>
+<td>⚠️ Vulnerabilities Found</td>
+</tr>
+<tr>
+<td><strong>Documentation</strong></td>
+<td>9.0/10</td>
+<td>✅ Excellent</td>
+</tr>
+<tr>
+<td><strong>Infrastructure</strong></td>
+<td>8.0/10</td>
+<td>✅ Good</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>1. Security Findings</h2>
+<h3>1.1 Critical Issues (P0)</h3>
+<h4>🔴 VULNERABLE DEPENDENCIES (CVEs Detected)</h4>
+<p><strong>Severity:</strong> HIGH<br />
+<strong>Location:</strong> <code>requirements.txt</code></p>
+<pre><code>Name          Version  Vulnerability ID         Fix Versions
+------------- -------- ------------------------ ------------
+python-dotenv 1.2.1    GHSA-mf9w-mj56-hr94      1.2.2
+pillow        11.3.0   GHSA-cfh3-3jmp-rvhc      12.1.1
+pillow        11.3.0   GHSA-whj4-6x5x-4v2j      12.2.0
+</code></pre>
+<p><strong>Impact:</strong>
+- <code>python-dotenv</code>: Potential environment variable leakage
+- <code>pillow</code>: Remote code execution via malicious image files</p>
+<p><strong>Recommendation:</strong></p>
+<pre><code class="language-bash">pip install --upgrade python-dotenv==1.2.2 pillow==12.2.0
+</code></pre>
+<hr />
+<h3>1.2 High Priority Issues (P1)</h3>
+<h4>🟡 SESSION SECURITY CONFIGURATION</h4>
+<p><strong>Location:</strong> <code>app.py:78-82</code></p>
+<pre><code class="language-python">app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = not _debug  # ✅ Correct
+</code></pre>
+<p><strong>Status:</strong> ✅ <strong>PROPERLY CONFIGURED</strong> — Session cookies have appropriate security flags.</p>
+<hr />
+<h4>🟡 CSRF PROTECTION</h4>
+<p><strong>Location:</strong> <code>app.py:83</code>, <code>templates/base.html</code></p>
+<pre><code class="language-python">csrf = CSRFProtect(app)
+</code></pre>
+<p><strong>Status:</strong> ✅ <strong>PROPERLY IMPLEMENTED</strong>
+- Flask-WTF CSRF protection enabled globally
+- CSRF token injected via meta tag in base template
+- Auto-injection helper for fetch() requests</p>
+<hr />
+<h4>🟡 SQL INJECTION PROTECTION</h4>
+<p><strong>Location:</strong> <code>app.py:90-117</code>, <code>db/adapter.py</code></p>
+<pre><code class="language-python">def _safe_add_column(db: sqlite3.Connection, table: str, col: str, typ: str) -&gt; None:
+    &quot;&quot;&quot;ALTER TABLE seguro: valida identifier y tipo contra allowlist.&quot;&quot;&quot;
+    if not _SAFE_IDENTIFIER_RE.match(table):
+        raise ValueError(f&quot;Identifier inseguro de tabla: {table!r}&quot;)
+    # ... allowlist validation
+</code></pre>
+<p><strong>Status:</strong> ✅ <strong>PROPERLY PROTECTED</strong>
+- Parameterized queries used throughout
+- Allowlist validation for DDL operations
+- SQL translation layer for PostgreSQL compatibility</p>
+<hr />
+<h4>🟡 OPEN REDIRECT PROTECTION</h4>
+<p><strong>Location:</strong> <code>app.py:86-95</code></p>
+<pre><code class="language-python">def _safe_next_url(target: str | None) -&gt; str | None:
+    &quot;&quot;&quot;Permite solo paths internos relativos. Bloquea open redirect a otros hosts.&quot;&quot;&quot;
+    if not target:
+        return None
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    return target if target.startswith('/') and not target.startswith('//') else None
+</code></pre>
+<p><strong>Status:</strong> ✅ <strong>PROPERLY PROTECTED</strong> — Login redirect validation implemented correctly.</p>
+<hr />
+<h4>🟡 PASSWORD HANDLING</h4>
+<p><strong>Location:</strong> <code>app.py:1951-1964</code></p>
+<pre><code class="language-python">password = request.form.get('password', '')
+# ...
+if user and bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+</code></pre>
+<p><strong>Status:</strong> ✅ <strong>PROPERLY IMPLEMENTED</strong>
+- bcrypt password hashing (industry standard)
+- Passwords loaded from environment variables (<code>.env.example</code>)
+- No hardcoded credentials found</p>
+<hr />
+<h3>1.3 Medium Priority Issues (P2)</h3>
+<h4>🟠 MISSING RATE LIMITING</h4>
+<p><strong>Location:</strong> <code>/login</code> endpoint</p>
+<p><strong>Severity:</strong> MEDIUM<br />
+<strong>CWE:</strong> CWE-307 (Improper Restriction of Authentication Attempts)</p>
+<p><strong>Finding:</strong> No brute-force protection on login endpoint.</p>
+<p><strong>Recommendation:</strong></p>
+<pre><code class="language-python"># Add flask-limiter
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+limiter = Limiter(app, key_func=get_remote_address)
+
+@app.route('/login', methods=['GET', 'POST'])
+@limiter.limit(&quot;5 per minute&quot;)
+def login():
+    # ...
+</code></pre>
+<hr />
+<h4>🟠 POTENTIAL IDOR VULNERABILITY</h4>
+<p><strong>Location:</strong> PDF export endpoints (<code>/api/offer-pdf/&lt;id&gt;</code>)</p>
+<p><strong>Severity:</strong> MEDIUM<br />
+<strong>CWE:</strong> CWE-639 (Authorization Bypass Through User-Controlled Key)</p>
+<p><strong>Finding:</strong> Endpoints may not validate ownership of resources.</p>
+<p><strong>Recommendation:</strong> Add ownership validation:</p>
+<pre><code class="language-python">@app.route('/api/offer-pdf/&lt;int:offer_id&gt;')
+@login_required
+def offer_pdf(offer_id):
+    db = get_db()
+    offer = db.execute('SELECT * FROM pending_offers WHERE id = ?', (offer_id,)).fetchone()
+    if not offer:
+        abort(404)
+    # Add ownership check if multi-user:
+    # if current_user.role != 'admin' and offer['created_by'] != current_user.id:
+    #     abort(403)
+</code></pre>
+<hr />
+<h4>🟠 HARDCODED FILE PATHS</h4>
+<p><strong>Location:</strong> <code>backup_db.sh</code></p>
+<pre><code class="language-bash">BASE_DIR=&quot;/Users/anamarperezmarrero/Mvp_Arias_Fassa&quot;
+</code></pre>
+<p><strong>Severity:</strong> LOW-MEDIUM</p>
+<p><strong>Recommendation:</strong> Use environment variables:</p>
+<pre><code class="language-bash">BASE_DIR=&quot;${FASSA_BASE_DIR:-$(pwd)}&quot;
+</code></pre>
+<hr />
+<h3>1.4 Security Strengths</h3>
+<p>✅ <strong>Well-Implemented Security Controls:</strong></p>
+<ol>
+<li><strong>CSRF Protection</strong> — Flask-WTF with global CSRF + JS auto-injection</li>
+<li><strong>Session Hardening</strong> — HTTPOnly, SameSite=Lax, Secure (prod-only)</li>
+<li><strong>SQL Injection Prevention</strong> — Parameterized queries, allowlist validation</li>
+<li><strong>Password Security</strong> — bcrypt hashing, env-based seed passwords</li>
+<li><strong>Open Redirect Prevention</strong> — <code>_safe_next_url()</code> helper</li>
+<li><strong>XSS Prevention</strong> — Jinja2 auto-escaping (default in Flask)</li>
+<li><strong>Database Adapter Security</strong> — SQL translation layer with PRAGMA blocking</li>
+</ol>
+<hr />
+<h2>2. Code Quality Assessment</h2>
+<h3>2.1 Architecture</h3>
+<p><strong>Pattern:</strong> Flask monolith with emerging modular structure</p>
+<pre><code>app.py (4969 lines) — Main application
+├── Database layer (db/) — PostgreSQL adapter skeleton
+├── Logistics engine (logistics/engine.py) — Pure Python calculation
+├── Exports (exports/) — PDF/Excel generation
+└── Templates (templates/) — 15 HTML templates
+</code></pre>
+<p><strong>Assessment:</strong> ✅ <strong>GOOD</strong> — Clear separation of concerns emerging.</p>
+<hr />
+<h3>2.2 Code Metrics</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+<th>Assessment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total Lines (app.py)</td>
+<td>4,969</td>
+<td>⚠️ Large file</td>
+</tr>
+<tr>
+<td>Total Routes</td>
+<td>~50</td>
+<td>⚠️ Many endpoints</td>
+</tr>
+<tr>
+<td>Functions (calc engine)</td>
+<td>8</td>
+<td>✅ Well-tested</td>
+</tr>
+<tr>
+<td>Test Coverage (unit)</td>
+<td>100%</td>
+<td>✅ Excellent</td>
+</tr>
+<tr>
+<td>Test Coverage (app.py)</td>
+<td>15.8%</td>
+<td>⚠️ Low (expected for unit-only)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>2.3 Code Style &amp; Conventions</h3>
+<p><strong>Strengths:</strong>
+- ✅ Consistent naming conventions (Spanish domain language)
+- ✅ Type hints on critical functions
+- ✅ Comprehensive docstrings on complex logic
+- ✅ Dataclasses for structured data (logistics)</p>
+<p><strong>Areas for Improvement:</strong>
+- ⚠️ Function length: Some functions exceed 100 lines
+- ⚠️ Magic numbers: Some hardcoded values (e.g., discount percentages)
+- ⚠️ Comment density: Could benefit from more "why" comments</p>
+<hr />
+<h3>2.4 Critical Functions Review</h3>
+<h4><code>calculate_quote()</code> (lines 1859-1945)</h4>
+<p><strong>Purpose:</strong> Top-level quote orchestration</p>
+<p><strong>Assessment:</strong> ✅ <strong>WELL-STRUCTURED</strong>
+- Clear input/output contract
+- Proper error handling
+- Comprehensive test coverage (90%+)</p>
+<hr />
+<h4><code>compute_logistics()</code> (logistics/engine.py)</h4>
+<p><strong>Purpose:</strong> Container optimization engine</p>
+<p><strong>Assessment:</strong> ✅ <strong>EXCELLENT</strong>
+- Pure function (no side effects)
+- Well-documented business logic
+- Comprehensive unit tests</p>
+<hr />
+<h4><code>init_db()</code> (app.py:402-625)</h4>
+<p><strong>Purpose:</strong> Database initialization + migrations</p>
+<p><strong>Assessment:</strong> ⚠️ <strong>NEEDS REFACTORING</strong>
+- 223 lines in single function
+- Multiple migration functions called sequentially
+- Consider extracting to <code>db/migrations.py</code></p>
+<hr />
+<h2>3. Test Coverage Analysis</h2>
+<h3>3.1 Test Suite Status</h3>
+<pre><code>tests/
+├── unit/                    # 101 tests — ALL PASSING ✅
+│   ├── test_num.py
+│   ├── test_detect_family.py
+│   ├── test_compute_line.py
+│   ├── test_container_result.py
+│   ├── test_estimate_containers.py
+│   ├── test_compute_totals.py
+│   ├── test_dedup_alerts.py
+│   └── test_logistics_engine.py
+├── integration/
+│   ├── test_calculate_quote.py
+│   ├── test_db_skeleton.py
+│   └── test_offer_pipeline.py
+└── test_coverage_gate.py    # Per-function coverage validation
+</code></pre>
+<h3>3.2 Coverage Results</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Coverage</th>
+<th>Target</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Calculation Engine</td>
+<td>100%</td>
+<td>≥85%</td>
+<td>✅ PASS</td>
+</tr>
+<tr>
+<td><code>calculate_quote()</code></td>
+<td>92%</td>
+<td>≥90%</td>
+<td>✅ PASS</td>
+</tr>
+<tr>
+<td><code>app.py</code> (overall)</td>
+<td>15.8%</td>
+<td>N/A</td>
+<td>⚠️ Low (unit tests only)</td>
+</tr>
+</tbody>
+</table>
+<h3>3.3 Test Quality</h3>
+<p><strong>Strengths:</strong>
+- ✅ Boundary condition testing
+- ✅ Regression tests for known bugs
+- ✅ Property-based assertions
+- ✅ Clear test naming</p>
+<p><strong>Gaps:</strong>
+- ⚠️ Limited integration tests (PostgreSQL)
+- ⚠️ No end-to-end UI tests
+- ⚠️ Missing security tests (auth bypass, rate limiting)</p>
+<hr />
+<h2>4. Dependency Audit</h2>
+<h3>4.1 Production Dependencies</h3>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Version</th>
+<th>Status</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Flask</td>
+<td>3.1.3</td>
+<td>✅ Current</td>
+<td>Latest stable</td>
+</tr>
+<tr>
+<td>Flask-Login</td>
+<td>0.6.3</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>Flask-WTF</td>
+<td>1.3.0</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>bcrypt</td>
+<td>5.0.0</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>ReportLab</td>
+<td>4.4.10</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>openpyxl</td>
+<td>3.1.5</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>SQLAlchemy</td>
+<td>2.0.49</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>Alembic</td>
+<td>1.18.4</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td>psycopg</td>
+<td>3.3.3</td>
+<td>✅ Current</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>python-dotenv</strong></td>
+<td><strong>1.2.1</strong></td>
+<td>🔴 <strong>VULNERABLE</strong></td>
+<td>Upgrade to 1.2.2</td>
+</tr>
+<tr>
+<td><strong>Pillow</strong></td>
+<td><strong>11.3.0</strong></td>
+<td>🔴 <strong>VULNERABLE</strong></td>
+<td>Upgrade to 12.2.0</td>
+</tr>
+</tbody>
+</table>
+<h3>4.2 Development Dependencies</h3>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Version</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pytest</td>
+<td>9.0.3</td>
+<td>✅ Current</td>
+</tr>
+<tr>
+<td>pytest-cov</td>
+<td>7.1.0</td>
+<td>✅ Current</td>
+</tr>
+<tr>
+<td>coverage</td>
+<td>7.13.5</td>
+<td>✅ Current</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>5. Database Architecture</h2>
+<h3>5.1 Current State</h3>
+<p><strong>Primary:</strong> SQLite (<code>fassa_ops.db</code>)<br />
+<strong>Target:</strong> PostgreSQL (skeleton in <code>db/</code>)</p>
+<p><strong>Schema:</strong>
+- 19 tables (clients, products, projects, offers, etc.)
+- Proper indexing
+- Foreign key constraints
+- Audit logging</p>
+<h3>5.2 Migration Status</h3>
+<p><strong>Alembic migrations:</strong> ✅ <strong>CONFIGURED</strong>
+- <code>0001_initial_schema.py</code> — Full PostgreSQL schema
+- Enum types for status fields
+- Proper type mappings (NUMERIC, TIMESTAMPTZ, JSONB)</p>
+<p><strong>Assessment:</strong> ✅ <strong>WELL-PREPARED</strong> for PostgreSQL migration.</p>
+<hr />
+<h3>5.3 Data Integrity</h3>
+<p><strong>Strengths:</strong>
+- ✅ Parameterized queries throughout
+- ✅ Transaction management
+- ✅ Audit log table
+- ✅ Price history tracking</p>
+<p><strong>Recommendations:</strong>
+- ⚠️ Add database-level constraints (CHECK constraints)
+- ⚠️ Consider row-level security for multi-tenant scenarios</p>
+<hr />
+<h2>6. Infrastructure &amp; DevOps</h2>
+<h3>6.1 Docker Configuration</h3>
+<p><strong>File:</strong> <code>docker-compose.yml</code></p>
+<pre><code class="language-yaml">services:
+  postgres:       # Port 5434, persistent
+  postgres-test:  # Port 5433, tmpfs (volatile)
+</code></pre>
+<p><strong>Assessment:</strong> ✅ <strong>WELL-CONFIGURED</strong>
+- Separate dev/test databases
+- Health checks
+- Volume management</p>
+<hr />
+<h3>6.2 CI/CD (GitHub Actions)</h3>
+<p><strong>File:</strong> <code>.github/workflows/tests.yml</code></p>
+<p><strong>Assessment:</strong> ✅ <strong>GOOD</strong>
+- Runs on push + PR
+- Python 3.11
+- Coverage gate enforcement
+- Artifact upload</p>
+<p><strong>Recommendations:</strong>
+- ⚠️ Add security scanning (pip-audit, bandit)
+- ⚠️ Add linting (ruff, mypy)
+- ⚠️ Consider matrix testing (Python 3.10, 3.11, 3.12)</p>
+<hr />
+<h3>6.3 Environment Configuration</h3>
+<p><strong>File:</strong> <code>.env.example</code></p>
+<p><strong>Assessment:</strong> ✅ <strong>COMPREHENSIVE</strong>
+- SECRET_KEY generation documented
+- DATABASE_URL for PostgreSQL
+- Seed password configuration
+- Clear separation of concerns</p>
+<hr />
+<h2>7. Documentation Quality</h2>
+<h3>7.1 Documentation Inventory</h3>
+<table>
+<thead>
+<tr>
+<th>Document</th>
+<th>Status</th>
+<th>Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>README.md</td>
+<td>✅ Complete</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>HANDOFF.md</td>
+<td>✅ Complete</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>SPEC-001.md</td>
+<td>✅ Complete</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>docs/design/</td>
+<td>✅ Present</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>docs/deployment/</td>
+<td>✅ Present</td>
+<td>Good</td>
+</tr>
+</tbody>
+</table>
+<h3>7.2 Documentation Strengths</h3>
+<p>✅ <strong>README.md:</strong>
+- Clear setup instructions
+- Architecture diagram
+- Module overview table
+- Quick start guide</p>
+<p>✅ <strong>HANDOFF.md:</strong>
+- ERP migration roadmap
+- Data model mapping (Odoo-compatible)
+- JSON export contract
+- Gap analysis</p>
+<p>✅ <strong>SPEC-001.md:</strong>
+- Clear acceptance criteria
+- Test structure specification
+- Coverage requirements</p>
+<hr />
+<h2>8. Recommendations</h2>
+<h3>8.1 Immediate Actions (P0 — This Week)</h3>
+<ol>
+<li>
+<p><strong>Upgrade Vulnerable Dependencies:</strong>
+   <code>bash
+   pip install --upgrade python-dotenv==1.2.2 pillow==12.2.0</code></p>
+</li>
+<li>
+<p><strong>Add Rate Limiting to Login:</strong>
+   <code>python
+   pip install flask-limiter
+   # Add @limiter.limit("5 per minute") to /login</code></p>
+</li>
+<li>
+<p><strong>Fix Hardcoded Paths:</strong></p>
+</li>
+<li>Update <code>backup_db.sh</code> to use environment variables</li>
+</ol>
+<hr />
+<h3>8.2 Short-Term Actions (P1 — This Month)</h3>
+<ol>
+<li><strong>Add IDOR Protection:</strong></li>
+<li>Review all <code>/api/&lt;resource&gt;/&lt;id&gt;</code> endpoints</li>
+<li>
+<p>Add ownership validation</p>
+</li>
+<li>
+<p><strong>Expand Test Coverage:</strong></p>
+</li>
+<li>Integration tests for PostgreSQL</li>
+<li>Security tests (auth, CSRF bypass attempts)</li>
+<li>
+<p>End-to-end tests for critical flows</p>
+</li>
+<li>
+<p><strong>Add CI Security Scanning:</strong>
+   ```yaml</p>
+</li>
+<li>name: Security audit
+     run: pip-audit -r requirements.txt</li>
+<li>name: Linting
+     run: ruff check .
+   ```</li>
+</ol>
+<hr />
+<h3>8.3 Medium-Term Actions (P2 — This Quarter)</h3>
+<ol>
+<li><strong>Refactor Large Functions:</strong></li>
+<li>Split <code>init_db()</code> into smaller migration functions</li>
+<li>
+<p>Extract route handlers to blueprints</p>
+</li>
+<li>
+<p><strong>PostgreSQL Migration:</strong></p>
+</li>
+<li>Complete SPEC-002b (schema migrations)</li>
+<li>
+<p>Test with production data volume</p>
+</li>
+<li>
+<p><strong>Add Monitoring:</strong></p>
+</li>
+<li>Health check endpoint</li>
+<li>Performance metrics</li>
+<li>Error tracking (Sentry integration)</li>
+</ol>
+<hr />
+<h3>8.4 Long-Term Actions (P3 — This Year)</h3>
+<ol>
+<li>
+<p><strong>ERP Integration Readiness:</strong></p>
+<ul>
+<li>Implement JSON export endpoint (§4 HANDOFF.md)</li>
+<li>Rename legacy fields to Odoo-compatible names</li>
+<li>Add factory/logistics order auto-generation</li>
+</ul>
+</li>
+<li>
+<p><strong>Scalability Improvements:</strong></p>
+<ul>
+<li>Connection pooling</li>
+<li>Caching layer (Redis)</li>
+<li>Background job processing (Celery)</li>
+</ul>
+</li>
+</ol>
+<hr />
+<h2>9. Compliance Considerations</h2>
+<h3>9.1 Data Protection</h3>
+<p><strong>GDPR/LPDP Considerations:</strong>
+- ✅ Personal data (clients) stored with RNC (tax ID)
+- ⚠️ No data retention policy implemented
+- ⚠️ No data export/deletion endpoints</p>
+<p><strong>Recommendations:</strong>
+- Add data retention configuration
+- Implement right-to-erasure endpoint
+- Document data processing activities</p>
+<hr />
+<h3>9.2 Audit Trail</h3>
+<p><strong>Current State:</strong> ✅ <strong>GOOD</strong>
+- <code>audit_log</code> table tracks offer changes
+- <code>price_history</code> tracks price changes
+- <code>stage_events</code> tracks project progression</p>
+<p><strong>Enhancement:</strong>
+- Add user login tracking
+- Export audit logs for compliance reporting</p>
+<hr />
+<h2>10. Conclusion</h2>
+<h3>10.1 Overall Assessment</h3>
+<p>The Arias_Group application demonstrates <strong>strong engineering fundamentals</strong> with a solid security foundation. The codebase is well-documented, tested (for critical calculation logic), and architected for future growth.</p>
+<p><strong>Key Strengths:</strong>
+- ✅ Security-first mindset (CSRF, SQL injection, open redirect protection)
+- ✅ Comprehensive documentation
+- ✅ Strong test coverage on business-critical logic
+- ✅ PostgreSQL migration prepared</p>
+<p><strong>Key Risks:</strong>
+- 🔴 Vulnerable dependencies (immediate fix required)
+- 🟡 Missing rate limiting (brute-force vulnerability)
+- 🟡 Low overall test coverage (15.8% on app.py)</p>
+<hr />
+<h3>10.2 Risk Score Summary</h3>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Risk Level</th>
+<th>Priority</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dependencies</td>
+<td>🔴 HIGH</td>
+<td>P0</td>
+</tr>
+<tr>
+<td>Authentication</td>
+<td>🟡 MEDIUM</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>Authorization</td>
+<td>🟡 MEDIUM</td>
+<td>P1</td>
+</tr>
+<tr>
+<td>Data Protection</td>
+<td>🟢 LOW</td>
+<td>P2</td>
+</tr>
+<tr>
+<td>Infrastructure</td>
+<td>🟢 LOW</td>
+<td>P2</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>10.3 Next Steps</h3>
+<ol>
+<li><strong>Immediate:</strong> Fix vulnerable dependencies (python-dotenv, pillow)</li>
+<li><strong>This Week:</strong> Add rate limiting to <code>/login</code></li>
+<li><strong>This Month:</strong> Expand test coverage, add security scanning to CI</li>
+<li><strong>This Quarter:</strong> Complete PostgreSQL migration, refactor large functions</li>
+</ol>
+<hr />
+<p><strong>Audit Completed:</strong> 2026-04-25<br />
+<strong>Next Scheduled Audit:</strong> 2026-07-25 (Quarterly)</p>
+<hr />
+<p><em>This audit was conducted using automated tools (pip-audit, pytest) and manual code review. Findings should be validated before production deployment.</em></p>
+</body>
+</html>

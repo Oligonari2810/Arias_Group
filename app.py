@@ -1640,15 +1640,13 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
         return {
             'lines': [],
             'totals': {'product_cost_eur': 0.0, 'logistic_eur': 0.0, 'sale_eur': 0.0},
-            'meta': {'has_per_line_log': False, 'margin_global_pct': margin_global_pct},
+            'meta': {'margin_global_pct': margin_global_pct},
         }
 
-    has_per_line_log = any(_num(li.get('log_unit_cost', 0)) > 0 for li in raw_lines)
     margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
 
     breakdown_lines: list[dict[str, Any]] = []
     total_product = 0.0
-    total_logistic = 0.0
     total_sale = 0.0
     for i, cl in enumerate(computed):
         line_input = raw_lines[i] if i < len(raw_lines) else {}
@@ -1664,17 +1662,12 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
             m_val = _num(m_raw)
             margin_line = m_val / 100 if m_val >= 1 else m_val
 
-        if has_per_line_log:
-            log_unit = _num(line_input.get('log_unit_cost', 0))
-            log_line = log_unit * qty_w
-        else:
-            share = cost_prod / product_cost_total
-            log_line = logistic_global_eur * share
-            log_unit = (log_line / qty_w) if qty_w else 0.0
-
+        # Venta = coste producto / (1 - margen). Logística se suma globalmente.
         sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
-        sale_line = sale_product + log_line
-        sale_unit = (sale_line / qty_w) if qty_w else 0.0
+        sale_line = sale_product  # Sin logística por línea
+
+        total_product += cost_prod
+        total_sale += sale_line
 
         breakdown_lines.append({
             'sku': cl.get('sku'),
@@ -1684,27 +1677,22 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
             'qty_neta': round(qty_neta, 2),
             'qty_waste': round(qty_w, 2),
             'price_arias_eur': round(price_arias, 4),
-            'log_unit_eur': round(log_unit, 4),
             'margin_pct': round(margin_line * 100, 2),
             'cost_line_eur': round(cost_prod, 2),
-            'log_line_eur': round(log_line, 2),
             'sale_line_eur': round(sale_line, 2),
-            'sale_unit_eur': round(sale_unit, 4),
         })
 
-        total_product += cost_prod
-        total_logistic += log_line
-        total_sale += sale_line
+    # La logística se suma al total global, no está embebida en las líneas
+    total_sale_with_log = total_sale + logistic_global_eur
 
     return {
         'lines': breakdown_lines,
         'totals': {
             'product_cost_eur': round(total_product, 2),
-            'logistic_eur': round(total_logistic, 2),
-            'sale_eur': round(total_sale, 2),
+            'logistic_eur': round(logistic_global_eur, 2),
+            'sale_eur': round(total_sale_with_log, 2),
         },
         'meta': {
-            'has_per_line_log': has_per_line_log,
             'margin_global_pct': margin_global_pct,
         },
     }
@@ -3236,8 +3224,6 @@ def save_offer():
             'sku': pd['sku'], 'name': pd['name'], 'family': pd['category'],
             'unit': pd['unit'], 'price': pd['unit_price_eur'], 'qty': qty,
             'margin': _num(li.get('margin', data.get('margin', 33))),
-            'log_unit_cost': _num(li.get('log_unit_cost', 0)),
-            'log_cost_manual': bool(li.get('log_cost_manual', False)),
             'competitor_price_eur': _num(li.get('competitor_price_eur', 0)),
             'note': li.get('note'),
         })
@@ -3255,9 +3241,7 @@ def save_offer():
         li.update({
             'qty_waste': br['qty_waste'],
             'cost_line_eur': br['cost_line_eur'],
-            'log_line_eur': br['log_line_eur'],
             'sale_line_eur': br['sale_line_eur'],
-            'sale_unit_eur': br['sale_unit_eur'],
             'margin_applied_pct': br['margin_pct'],
         })
 
