@@ -3631,7 +3631,6 @@ def api_compute_logistics():
                 'category': s.category,
                 'pallets': s.pallets,
                 'weight_total_kg': s.weight_total_kg,
-                'cbm': s.cbm_total,
                 'unit_log_cost_eur': s.unit_log_cost_eur,
                 'm2_log_cost_eur': s.m2_log_cost_eur,
             } for s in result.skus
