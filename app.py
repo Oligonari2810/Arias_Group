@@ -2594,6 +2594,15 @@ def quote():
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
+    
+    # Pallet profiles por familia
+    pallet_profiles_rows = db.execute('SELECT * FROM pallet_profiles').fetchall()
+    pallet_profiles = {r['category']: dict(r) for r in pallet_profiles_rows}
+    
+    # Container 40HC profile
+    container_40hc_row = db.execute('SELECT * FROM container_profiles WHERE type = ?', ('40HC',)).fetchone()
+    container_40hc = dict(container_40hc_row) if container_40hc_row else {}
+    
     # Fuente única (ver dashboard): el cotizador toma el rate oficial de
     # fx_rates, no app_settings. Si fx_rates está vacío, fallback a
     # app_settings y luego al hardcoded 1.18.
@@ -2615,7 +2624,8 @@ def quote():
                           families=families_ordered,
                           subfamilies=subfamilies_friendly, systems=systems_data,
                           routes=routes_data, fx_rate=fx_rate,
-                          projects=projects_data, edit_offer=edit_offer)
+                          projects=projects_data, edit_offer=edit_offer,
+                          pallet_profiles=pallet_profiles, container_40hc=container_40hc)
 
 
 @app.route('/projects/<int:project_id>/quote/<int:quote_id>/pdf')
