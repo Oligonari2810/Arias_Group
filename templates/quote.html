@@ -158,6 +158,26 @@
   </div>
   <!-- Panel de análisis logístico: muestra peso, m² y m³ por contenedor -->
   <div id="capacityAlert" style="display:none; margin-top:8px; padding:8px 12px; border-radius:3px; font-size:0.85em;"></div>
+  <!-- Tabla de desglose logístico por producto -->
+  <div id="logisticsBreakdown" style="display:none; margin-top:10px;">
+    <h3>📦 Desglose logístico por producto</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>SKU</th>
+          <th>Producto</th>
+          <th>Familia</th>
+          <th class="num">Cantidad</th>
+          <th class="num">Palés</th>
+          <th class="num">Peso kg</th>
+          <th class="num">m²</th>
+          <th class="num">m³</th>
+          <th class="num">Coste Log €/ud</th>
+        </tr>
+      </thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
 </div>
 
 
@@ -450,6 +470,7 @@ async function recomputeLogistics() {
       }),
     });
     const j = await r.json();
+    console.log('API response:', j);  // DEBUG
     if (!j.ok) { state.textContent = 'error: ' + (j.error || r.status); return; }
     // Actualizar contador de contenedores y mostrar resultado
     document.getElementById('containerCount').value = j.n_containers;
@@ -457,10 +478,18 @@ async function recomputeLogistics() {
     const decimalLabel = j.n_containers_decimal && j.n_containers_decimal !== j.n_containers
       ? ` (carga real ${j.n_containers_decimal.toFixed(2)})` : '';
     state.innerHTML = `<b>${j.n_containers}×${containerType}</b>${decimalLabel} · dominante: <b>${j.dominant_family}</b> (por ${drv}) · € ${fmtN(j.total_cost_eur)}`;
+    console.log('Calling renderCapacityAlert with:', { free_capacity: j.free_capacity, n_containers: j.n_containers, dominant_family: j.dominant_family });  // DEBUG
     renderCapacityAlert(j.free_capacity, j.n_containers, j.dominant_family);
+    // Renderizar tabla de desglose logístico por producto
+    const perSkuWithNames = j.per_sku.map(s => {
+      const line = lines.find(l => l.sku === s.sku);
+      return { ...s, name: line ? line.name : s.category, qty: line ? line.qty : 0 };
+    });
+    renderLogisticsBreakdown(perSkuWithNames);
     recalcAll();
   } catch (e) {
     state.textContent = 'error de red: ' + e.message;
+    console.error('Error in recomputeLogistics:', e);
   }
 }
 
@@ -535,6 +564,43 @@ function renderCapacityAlert(fc, nCont, dominantFamily) {
     `</div>` +
     `<div style="margin-top:4px;"><b>Total (${nCont} cont.):</b> ${fmtN(tot.weight_kg || 0)} kg · ${fmtN(tot.floor_m2 || 0)} m² · ${fmtN(tot.cbm || 0)} m³ libres.</div>` +
     suggestion;
+  div.style.display = 'block';
+}
+
+// Renderiza tabla de desglose logístico por producto (kg, m², m³ por SKU)
+function renderLogisticsBreakdown(perSkuData) {
+  const div = document.getElementById('logisticsBreakdown');
+  const body = document.getElementById('logBody');
+  if (!div || !body) return;
+  
+  if (!perSkuData || perSkuData.length === 0) {
+    div.style.display = 'none';
+    body.innerHTML = '';
+    return;
+  }
+  
+  body.innerHTML = '';
+  perSkuData.forEach(sku => {
+    const pallets = sku.pallets || 0;
+    const weight = sku.weight_total_kg || 0;
+    const cbm = sku.cbm || 0;
+    // m² = pallets × área de palé (estimado 1.2×1.0 = 1.2 m² por palé)
+    const m2 = pallets * 1.2;
+    const unitLogCost = sku.unit_log_cost_eur || 0;
+    
+    body.innerHTML += `<tr>
+      <td class="mono">${escapeHtml(sku.sku)}</td>
+      <td>${escapeHtml(sku.name || sku.category)}</td>
+      <td>${escapeHtml(sku.category)}</td>
+      <td class="num">${fmtQ(sku.qty || 0)}</td>
+      <td class="num">${fmtN(pallets, 1)}</td>
+      <td class="num">${fmtN(weight, 0)}</td>
+      <td class="num">${fmtN(m2, 1)}</td>
+      <td class="num">${fmtN(cbm, 2)}</td>
+      <td class="num">${unitLogCost > 0 ? fmtN(unitLogCost, 4) : '—'}</td>
+    </tr>`;
+  });
+  
   div.style.display = 'block';
 }
 

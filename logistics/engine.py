@@ -92,6 +92,7 @@ class SkuInput:
 class SkuComputed:
     sku: str
     category: str
+    qty: float
     pallets: int
     weight_total_kg: float
     cbm_total: float
@@ -187,6 +188,7 @@ def _compute_sku(sku: SkuInput, pallet: PalletProfile) -> SkuComputed:
     return SkuComputed(
         sku=sku.sku,
         category=sku.category,
+        qty=sku.qty,
         pallets=pallets,
         weight_total_kg=round(weight_total, 2),
         cbm_total=round(cbm_total, 4),
