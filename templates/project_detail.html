@@ -18,7 +18,7 @@
         <div><label>Área m²</label><input name="area_sqm" value="{{ project['area_sqm'] }}"></div>
         <div><label>FX</label><input name="fx_rate" value="{{ project['fx_rate'] }}"></div>
         <div><label>Margen obj. %</label><input name="target_margin_pct" value="{{ project['target_margin_pct'] }}"></div>
-        <div><label>Flete € (total)</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
+        <div><label>Coste Variable (Logística) €</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
         <div><label>INCOTERM</label>
           <select name="incoterm">
             {% for ic in ['EXW','FOB','DAP'] %}
@@ -110,7 +110,7 @@
         <div><label>Versión</label><input name="version_label" placeholder="V1"></div>
         <div><label>Área m²</label><input name="area_sqm" value="{{ project['area_sqm'] }}"></div>
         <div><label>FX</label><input name="fx_rate" value="{{ project['fx_rate'] }}"></div>
-        <div><label>Flete €</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
+        <div><label>Coste Variable €</label><input name="freight_eur" value="{{ project['freight_eur'] }}"></div>
         <div><label>Margen obj.</label><input name="target_margin_pct" value="{{ project['target_margin_pct'] }}"></div>
       </div>
       <button type="submit" style="margin-top:6px;">Calcular</button>

@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Logística — ofertas</h1>
-<p class="muted">Calcula contenedores y flete. Confirma para generar PDF.</p>
+<p class="muted">Calcula contenedores y coste variable. Confirma para generar PDF.</p>
 
 {% if not offers %}
 <p class="muted">No hay ofertas. Genera una desde <a href="{{ url_for('quote') }}">Cotización</a>.</p>
@@ -49,7 +49,7 @@
     </div>
     <div><label>Ruta marítima</label>
       <select class="route-sel" onchange="calcLogistics(this)">
-        <option value="">— Sin flete —</option>
+        <option value="">— Sin coste variable —</option>
         {% for r in routes %}
         <option value="{{ r['id'] }}" data-c40="{{ r['container_40_eur'] }}">{{ r['origin_port'] }} → {{ r['destination_port'] }} ({{ r['carrier'] }})</option>
         {% endfor %}
@@ -65,7 +65,7 @@
   </div>
   <table style="max-width:400px; margin-top:6px;">
     <tr><td>Producto + desperdicio</td><td class="num">€ {{ "%.2f"|format(offer['total_product_eur']) }}</td></tr>
-    <tr><td>+ Logística</td><td class="num">€ <span class="log-total">0.00</span></td></tr>
+    <tr><td>+ Coste Variable</td><td class="num">€ <span class="log-total">0.00</span></td></tr>
     <tr><th>TOTAL</th><td class="num"><b class="final-total">€ {{ "%.2f"|format(offer['total_final_eur']) }}</b></td></tr>
   </table>
 
@@ -78,12 +78,56 @@
   </div>
   <table style="max-width:400px; margin-top:6px;">
     <tr><td>Producto</td><td class="num">€ {{ "%.2f"|format(offer['total_product_eur']) }}</td></tr>
-    <tr><td>+ Logística</td><td class="num">€ {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</td></tr>
+    <tr><td>+ Coste Variable</td><td class="num">€ {{ "%.2f"|format(offer['total_logistic_eur'] or 0) }}</td></tr>
     <tr><th>TOTAL</th><td class="num"><b>€ {{ "%.2f"|format(offer['total_final_eur']) }}</b></td></tr>
   </table>
   {% endif %}
 </div>
 {% endfor %}
 
-<script src="{{ url_for('static', filename='js/logistics.js') }}"></script>
+<script>
+function calcLogistics(el) {
+  const card = el.closest('.card');
+  const routeSel = card.querySelector('.route-sel');
+  const containerInput = card.querySelector('.container-input');
+  const logTotal = card.querySelector('.log-total');
+  const finalTotal = card.querySelector('.final-total');
+  const prodTotal = parseFloat(card.querySelector('[data-prod]').textContent) || 0;
+  const containers = parseInt(containerInput.value) || 0;
+  let freight = 0;
+  if (routeSel.selectedIndex > 0 && containers > 0) {
+    const opt = routeSel.options[routeSel.selectedIndex];
+    const c40 = parseFloat(opt.dataset.c40) || 0;
+    freight = containers * c40;
+  }
+  logTotal.textContent = freight.toFixed(2);
+  finalTotal.textContent = '€ ' + (prodTotal + freight).toFixed(2);
+}
+
+function confirmOffer(offerId) {
+  const card = document.getElementById('offer-' + offerId);
+  const logTotal = parseFloat(card.querySelector('.log-total').textContent) || 0;
+  const prodTotal = parseFloat(card.querySelector('[data-prod]').textContent) || 0;
+  fetch('/api/update-offer', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      id: offerId,
+      incoterm: card.querySelector('.incoterm-sel').value,
+      route_id: card.querySelector('.route-sel').value || null,
+      container_count: parseInt(card.querySelector('.container-input').value) || 0,
+      logistic_cost: logTotal,
+      final_total: prodTotal + logTotal,
+      status: 'confirmed'
+    })
+  }).then(r => r.json()).then(d => { if (d.ok) location.reload(); });
+}
+
+function deleteOffer(offerId) {
+  if (!confirm('¿Eliminar esta oferta?')) return;
+  fetch('/api/delete-offer', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: offerId})
+  }).then(r => r.json()).then(d => { if (d.ok) location.reload(); });
+}
+</script>
 {% endblock %}

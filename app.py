@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import math
 import os
 import re
@@ -12,9 +11,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-
-# Import compatibility layer for PostgreSQL support
-from db.compat import safe_json_loads, safe_slice_date
 
 # Carga .env si existe (dev local). En producción las env vars ya están
 # inyectadas por el runtime (Render, Docker, etc.) y override=False respeta
@@ -87,38 +83,6 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 app.config['WTF_CSRF_TIME_LIMIT'] = None  # token vive lo que la sesión
 csrf = CSRFProtect(app)
 BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
-
-
-def _setup_logging() -> None:
-    """Configuración básica de logs para operación local/servidor."""
-    if app.logger.handlers:
-        return
-    level = logging.DEBUG if _debug else logging.INFO
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s [%(name)s] %(message)s'
-    ))
-    app.logger.addHandler(handler)
-    app.logger.setLevel(level)
-
-
-_setup_logging()
-
-
-@app.errorhandler(500)
-def handle_internal_error(err):
-    """Return JSON for API 500s so frontend fetch() never receives HTML."""
-    if request.path.startswith('/api/'):
-        db = g.get('db')
-        if db is not None:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-        if app.debug:
-            return jsonify({'ok': False, 'error': f'Internal server error: {err}'}), 500
-        return jsonify({'ok': False, 'error': 'Internal server error'}), 500
-    return err, 500
 
 
 def _safe_next_url(target: str | None) -> str | None:
@@ -246,20 +210,6 @@ def using_postgres() -> bool:
     """True when the current get_db() would return a Postgres adapter."""
     from db import adapter
     return adapter.is_configured()
-
-
-def _last_insert_id(db: Any) -> int | None:
-    """Compat helper: sqlite3 uses SQL function; Pg adapter exposes method."""
-    fn = getattr(db, 'last_insert_rowid', None)
-    if callable(fn):
-        return fn()
-    row = db.execute('SELECT last_insert_rowid()').fetchone()
-    if row is None:
-        return None
-    try:
-        return int(row[0])  # sqlite3.Row positional access
-    except Exception:
-        return int(row['id']) if isinstance(row, dict) and 'id' in row else None
 
 
 def init_db() -> None:
@@ -509,6 +459,16 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_logistics_orders_offer ON logistics_orders(offer_id);
 
+        CREATE TABLE IF NOT EXISTS pickup_pricing (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            pickup_point TEXT NOT NULL,
+            price_eur_unit REAL NOT NULL,
+            notes TEXT,
+            FOREIGN KEY(product_id) REFERENCES products(id),
+            UNIQUE(product_id, pickup_point)
+        );
+
         CREATE TABLE IF NOT EXISTS family_defaults (
             category TEXT PRIMARY KEY,
             discount_pct REAL NOT NULL DEFAULT 50,
@@ -608,19 +568,6 @@ def init_db() -> None:
     _logistics_aggregated_calibration_20260425(db)
     _audit_misc_20260425(db)
     _cleanup_demo_data_20260425(db)
-    _schema_cleanup_and_client_fk_20260425(db)
-    _catalog_discount_completion_20260425(db)
-    _catalog_real_data_from_pdf_20260425(db)
-    _catalog_real_weights_20260425(db)
-    _catalog_pdf_extras_and_discontinued_20260425(db)
-    _catalog_discontinued_skus_20260425(db)
-    _fix_cinta_guardavivos_names_20260425(db)
-    _catalog_fill_gaps_20260425(db)
-    _cintas_by_caja_and_verify_20260425(db)
-    _revert_cintas_to_rollo_20260425(db)
-    _add_sku_560901_and_rendimiento_20260425(db)
-    _rendimientos_and_fixes_20260425(db)
-    _add_skus_revocos_yeso_20260425(db)
 
 
 def _audit_fixes_20260423(db: sqlite3.Connection) -> None:
@@ -1252,1367 +1199,6 @@ def _audit_misc_20260425(db: sqlite3.Connection) -> None:
     )
 
 
-def _schema_cleanup_and_client_fk_20260425(db: sqlite3.Connection) -> None:
-    """Limpieza de schema decidida en auditoría 2026-04-25:
-
-    1) DROP `pickup_pricing` — tabla muerta. 0 referencias en código fuera del
-       CREATE original (idea de pickup points alternativos que no se llevó a
-       producción). Solo se borra si está vacía (defensivo).
-
-    2) ADD `pending_offers.client_id INTEGER` — el enlace actual a clientes va
-       por `client_name` (texto), lo que rompe silenciosamente si renombras al
-       cliente. Backfill por matching exacto sobre `clients.name` o
-       `clients.company`. `client_name` se mantiene por compat (no lo
-       borramos: las ofertas históricas son inmutables y su texto es contrato).
-
-    Idempotente vía flag en app_settings. El paso 2 también es idempotente
-    porque _safe_add_column comprueba si la columna ya existe.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'schema_cleanup_and_client_fk_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Drop pickup_pricing si existe y está vacía.
-    pp_dropped = False
-    pp_exists = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='pickup_pricing'"
-    ).fetchone()
-    if pp_exists:
-        rows = db.execute('SELECT COUNT(*) AS c FROM pickup_pricing').fetchone()['c']
-        if rows == 0:
-            db.execute('DROP TABLE pickup_pricing')
-            pp_dropped = True
-        else:
-            print(f'[migration] pickup_pricing tiene {rows} filas — no se borra (revisar manualmente)')
-
-    # 2) Añadir client_id a pending_offers + backfill.
-    offer_cols = {r[1] for r in db.execute("PRAGMA table_info(pending_offers)").fetchall()}
-    backfilled = 0
-    if 'client_id' not in offer_cols:
-        _safe_add_column(db, 'pending_offers', 'client_id', 'INTEGER')
-        # Backfill: emparejar offer.client_name con clients.name o clients.company.
-        cursor = db.execute("""
-            UPDATE pending_offers
-            SET client_id = (
-                SELECT id FROM clients
-                WHERE clients.name = pending_offers.client_name
-                   OR clients.company = pending_offers.client_name
-                LIMIT 1
-            )
-            WHERE client_id IS NULL
-        """)
-        backfilled = cursor.rowcount
-        # Diagnóstico: ofertas que NO encontraron cliente (texto fuera de DB).
-        orphan = db.execute(
-            "SELECT COUNT(*) AS c FROM pending_offers WHERE client_id IS NULL"
-        ).fetchone()['c']
-        if orphan:
-            print(
-                f'[migration] {orphan} oferta(s) sin client_id tras backfill — '
-                f'su client_name no matchea ningún clients.name/company. '
-                f'Revisa manualmente o crea el cliente.'
-            )
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('schema_cleanup_and_client_fk_20260425',
-         f'pickup_pricing_dropped={pp_dropped};client_id_backfilled={backfilled}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] schema cleanup 2026-04-25: pickup_pricing dropped={pp_dropped}, '
-        f'pending_offers.client_id backfilled={backfilled}'
-    )
-
-
-def _catalog_discount_completion_20260425(db: sqlite3.Connection) -> None:
-    """Auditoría de catálogo 2026-04-25 (Oliver):
-
-    1) `discount_extra_pct` estaba NULL en 191 SKUs cuando debería ser 5.0.
-       El precio Arias YA reflejaba el descuento compuesto (50%+5% = ratio
-       0,475 sobre PVP), pero la columna no lo declaraba. Cosmético, pero
-       confunde la UI y rompe queries de auditoría. Backfill a 5.0.
-
-    2) 2 SKUs FASSACOL (PASTAS) tenían precio_arias desviado del descuento
-       estándar — no era política comercial diferente, era un error de
-       carga. Se corrige a `precio_arias_eur_unit = pvp_eur_unit × 0,475`:
-         - 1773Y1A FASSACOL MULTI GRIS: 5,83 → 5,52 €
-         - 1775Y1A FASSACOL FLEX GRIS: 6,60 → 6,27 €
-       También se actualiza `unit_price_eur` (campo legacy que el motor
-       todavía lee y debe quedar sincronizado con `precio_arias_eur_unit`).
-
-    REGLA OFERTAS INMUTABLES: las 4 ofertas que ya contienen estos SKUs
-    (#13, #18, #19, #21) NO se tocan. `lines_json` y `total_final_eur`
-    son contractuales — el cliente firmó con el precio del momento. El
-    nuevo precio aplica solo a futuras ofertas.
-
-    Idempotente vía flag en app_settings.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_discount_completion_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Backfill discount_extra_pct = 5.0 donde sea NULL.
-    cursor = db.execute(
-        "UPDATE products SET discount_extra_pct = 5.0 WHERE discount_extra_pct IS NULL"
-    )
-    extra_backfilled = cursor.rowcount
-
-    # 2) Corregir las 2 PASTAS desviadas. PVP × 0,475 redondeado a 2 decimales.
-    fassacol_fixes = [
-        ('1773Y1A', 5.52),  # PVP 11,63 × 0,475 = 5,52425 → 5,52
-        ('1775Y1A', 6.27),  # PVP 13,20 × 0,475 = 6,27000 → 6,27
-    ]
-    pastas_fixed = 0
-    for sku, new_arias in fassacol_fixes:
-        cur = db.execute(
-            "UPDATE products SET unit_price_eur = ?, precio_arias_eur_unit = ? "
-            "WHERE sku = ? AND ABS(precio_arias_eur_unit - ?) > 0.01",
-            (new_arias, new_arias, sku, new_arias),
-        )
-        pastas_fixed += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_discount_completion_20260425',
-         f'extra_pct_backfilled={extra_backfilled};fassacol_fixed={pastas_fixed}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog 2026-04-25: discount_extra_pct backfilled='
-        f'{extra_backfilled}, FASSACOL precios corregidos={pastas_fixed} '
-        f'(ofertas históricas intactas)'
-    )
-
-
-# ── Datos extraídos del PDF ANEXO GYPSOTECH NOVIEMBRE 2025 (perfiles) ──
-# Esto es la **fuente de verdad** para `kg_per_ml` de PERFILES Fassa, que
-# permite recalcular `kg_per_unit` real (sin estimación) como
-#   kg_per_unit_real = kg_per_ml × (longitud_mm / 1000)
-# Los códigos son los SKUs Arias (= Cód. Artículo Fassa).
-# Si Fassa publica un anexo nuevo, esta tabla se actualiza aquí.
-_PERFILES_KG_PER_ML_BY_PREFIX = {
-    # PERFILES — prefijo del SKU (sin últimos 4 chars de longitud) → kg/ml
-    'C344836': 0.57,    # MONTANTE 48/35 (Z1 y Z2)
-    'C367038': 0.70,    # MONTANTE 70/37
-    'C399041': 0.82,    # MONTANTE 90/40
-    'C3910041': 0.87,   # MONTANTE 100/40
-    'C4612548': 0.98,   # MONTANTE 125/47
-    'C4615048': 1.10,   # MONTANTE 150/47
-    'U304830': 0.45,    # RAIL 48
-    'U307030': 0.55,    # RAIL 70 Z1 (Z2 = 0.57)
-    'U309030': 0.64,    # RAIL 90 Z1 (Z2 = 0.69)
-    'U3010030': 0.70,   # RAIL 100
-    'U3512535': 0.81,   # RAIL 125
-    'U4015040': 0.91,   # RAIL 150
-    'C174717': 0.44,    # PERFIL TC 47
-    'C154830': 0.45,    # PERFIL TC 48
-    'C286028': 0.60,    # PERFIL TC 60
-    'U472447': 0.53,    # PERFIL SIERRA TC 47/48/60
-    'L233430':  0.25,   # PERFIL ANGULAR Z1 y Z2
-    'U201928': 0.24,    # PERFIL CLIP
-    'U193019': 0.33,    # PERFIL U 30
-    'E168218': 0.0,     # OMEGA — peso no publicado
-}
-
-
-def _catalog_real_data_from_pdf_20260425(db: sqlite3.Connection) -> None:
-    """Schema completo de catálogo + backfill desde Tarifa Fassa 2026.
-
-    Datos extraídos de:
-      - Tarifa Gypsotech Abril 2026 (placas, pastas, tornillos, trampillas,
-        accesorios, cintas, GypsoCOMETE)
-      - Anexo Gypsotech Noviembre 2025 (perfiles, accesorios, tornillos,
-        trampillas con uds/palé real y kg/ml para perfiles)
-
-    Cambios:
-
-    1) NUEVAS COLUMNAS estructuradas en `products`:
-       - Dimensiones: length_mm, width_mm, thickness_mm, dim_a_mm, dim_b_mm,
-         dim_c_mm, diameter_mm, espesor_acero_mm
-       - Empaquetado: kg_per_ml, box_units (separa uds/caja del uds/palé real),
-         peso_saco_kg
-       - Comercial: min_order_qty, dispo_tarancon, tariff_origen,
-         pvp_calliano_eur, pvp_onda_lerida_eur, pvp_antas_eur
-       - Metadata: norma_text, color, description_long, tiempo_trabajab_min
-
-    2) BACKFILL automático desde el `name` y `pack_size` (regex en SQL):
-       - length_mm, width_mm para placas (de "1200×2500" → 1200 y 2500)
-       - thickness_mm para placas (de "BA 13 MM" → 13)
-       - longitud para perfiles (de "— 2.490mm" → 2490)
-       - dimensiones para tornillos (de "Ø3,5×25" → diameter 3.5, length 25)
-       - box_units para tornillos/cintas/accesorios (de "— 1.000ud" → 1000)
-
-    3) BACKFILL kg_per_ml para PERFILES desde tabla embebida _PERFILES_KG_PER_ML.
-       A partir de eso, recálculo de kg_per_unit real (= kg_per_ml × longitud_m)
-       para los 41 SKUs de perfiles → desaparece la marca [peso estimado] de
-       toda la familia.
-
-    4) DROP de columnas cache que generan drift:
-       - products.pvp_per_m2 (calculable: pvp_eur_unit × upp / sqm_pp)
-       - products.precio_arias_m2 (idem con precio_arias_eur_unit)
-
-    5) DEFAULT operativo:
-       - dispo_tarancon = 'green' para todos (afinable luego desde UI admin)
-
-    REGLA OFERTAS INMUTABLES: SOLO se toca `products`. Las ofertas existentes
-    quedan intactas (lines_json es contractual).
-
-    Idempotente vía flag en app_settings.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_real_data_from_pdf_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Schema: nuevas columnas (idempotente vía _safe_add_column).
-    new_cols = [
-        # Dimensiones físicas estructuradas
-        ('length_mm', 'INTEGER'),
-        ('width_mm', 'INTEGER'),
-        ('thickness_mm', 'REAL'),
-        ('dim_a_mm', 'REAL'),
-        ('dim_b_mm', 'REAL'),
-        ('dim_c_mm', 'REAL'),
-        ('diameter_mm', 'REAL'),
-        ('espesor_acero_mm', 'REAL'),
-        # Empaquetado
-        ('kg_per_ml', 'REAL'),
-        ('box_units', 'INTEGER'),
-        ('peso_saco_kg', 'REAL'),
-        # Comercial
-        ('min_order_qty', 'INTEGER'),
-        ('dispo_tarancon', 'TEXT'),
-        ('tariff_origen', 'TEXT'),
-        ('pvp_calliano_eur', 'REAL'),
-        ('pvp_onda_lerida_eur', 'REAL'),
-        ('pvp_antas_eur', 'REAL'),
-        # Metadata
-        ('norma_text', 'TEXT'),
-        ('color', 'TEXT'),
-        ('description_long', 'TEXT'),
-        ('tiempo_trabajab_min', 'INTEGER'),
-    ]
-    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
-    cols_added = 0
-    for col, typ in new_cols:
-        if col not in existing:
-            _safe_add_column(db, 'products', col, typ)
-            cols_added += 1
-
-    # 2) Default dispo_tarancon = 'green' donde sea NULL (sin info contraria).
-    db.execute("UPDATE products SET dispo_tarancon = 'green' WHERE dispo_tarancon IS NULL")
-
-    # 3) BACKFILL via regex SQL (sin Python). SQLite regex es limitado, usamos
-    #    LIKE con wildcards y substr() — más torpe pero portable.
-
-    # 3a) PLACAS: extraer thickness desde "BA 13mm" (lowercase en la DB Arias).
-    #     LIKE en SQLite es case-insensitive por defecto para ASCII.
-    placas_thick = [(6, '%BA 6mm%'), (9.5, '%BA 9,5mm%'), (12.5, '%BA 13mm%'),
-                    (15, '%BA 15mm%'), (18, '%BA 18mm%'), (20, '%BA 20mm%'),
-                    (25, '%BA 25mm%')]
-    for thick, like in placas_thick:
-        db.execute(
-            "UPDATE products SET thickness_mm = ? "
-            "WHERE category = 'PLACAS' AND name LIKE ? AND thickness_mm IS NULL",
-            (thick, like),
-        )
-
-    # 3b) PLACAS: width_mm = 1200 (todas las placas Fassa estándar).
-    db.execute(
-        "UPDATE products SET width_mm = 1200 "
-        "WHERE category = 'PLACAS' AND width_mm IS NULL"
-    )
-
-    # 3c) PLACAS: extraer length_mm de content_per_unit "1200×2500 mm (...)".
-    #     Patrón: el segundo número entre × y mm.
-    placas = db.execute(
-        "SELECT id, content_per_unit FROM products "
-        "WHERE category = 'PLACAS' AND length_mm IS NULL AND content_per_unit LIKE '1200×%'"
-    ).fetchall()
-    placas_filled = 0
-    for p in placas:
-        try:
-            # "1200×2500 mm (3.00 m²/placa)" → 2500
-            after_x = p['content_per_unit'].split('×', 1)[1]
-            length = int(''.join(c for c in after_x.split(' ', 1)[0] if c.isdigit()))
-            if 500 <= length <= 4000:
-                db.execute('UPDATE products SET length_mm = ? WHERE id = ?', (length, p['id']))
-                placas_filled += 1
-        except (ValueError, IndexError):
-            pass
-
-    # 3d) PLACAS: tariff_origen del prefijo del SKU (P → Tarancón, L → Calliano).
-    db.execute(
-        "UPDATE products SET tariff_origen = 'Tarancón' "
-        "WHERE category = 'PLACAS' AND sku LIKE 'P%' AND tariff_origen IS NULL"
-    )
-    db.execute(
-        "UPDATE products SET tariff_origen = 'Calliano' "
-        "WHERE category = 'PLACAS' AND sku LIKE 'L%' AND tariff_origen IS NULL"
-    )
-
-    # 3e) PERFILES: backfill kg_per_ml desde la tabla embebida + recalcular kg_per_unit.
-    perfiles_filled = 0
-    perfiles_kg_recalc = 0
-    perfiles = db.execute(
-        "SELECT id, sku, name, kg_per_unit FROM products WHERE category = 'PERFILES'"
-    ).fetchall()
-    for pr in perfiles:
-        sku = pr['sku'] or ''
-        kg_ml = None
-        for prefix, value in _PERFILES_KG_PER_ML_BY_PREFIX.items():
-            if sku.startswith(prefix):
-                kg_ml = value
-                break
-        if kg_ml is None or kg_ml <= 0:
-            continue
-        db.execute('UPDATE products SET kg_per_ml = ? WHERE id = ?', (kg_ml, pr['id']))
-        perfiles_filled += 1
-        # Extraer longitud:
-        # 1) Primero del nombre "— 2.490mm" / "— 3.000mm" si está presente.
-        # 2) Si no, de los últimos 4 chars del SKU Fassa (`xxxA`/`xxxB` →
-        #    primeros 3 dígitos × 10 = longitud_mm). Ej: C344836249A → 249 → 2490mm.
-        name = pr['name'] or ''
-        length_mm = None
-        if '—' in name:
-            tail = name.split('—', 1)[1].strip()
-            digits = tail.replace('.', '').replace(' ', '').replace('mm', '')
-            try:
-                cand = int(digits)
-                if 500 <= cand <= 6000:
-                    length_mm = cand
-            except ValueError:
-                pass
-        if length_mm is None:
-            # Patrón Fassa: últimos 3 dígitos antes del sufijo de variante × 10.
-            # Sufijo puede ser sólo letras ('A'/'BA'/'B') o letra+número ('Z1'/'Z2').
-            # Ej: C344836249A   → 249 → 2490mm  (sufijo A)
-            #     C1548300BA    → 300 → 3000mm  (sufijo BA)
-            #     E168218300Z1  → 300 → 3000mm  (sufijo Z1)
-            m = re.search(r'(\d{3})[A-Z][A-Z0-9]*$', sku)
-            if m:
-                cand = int(m.group(1)) * 10
-                if 500 <= cand <= 6000:
-                    length_mm = cand
-        if length_mm:
-            db.execute('UPDATE products SET length_mm = ? WHERE id = ?', (length_mm, pr['id']))
-            kg_real = round(kg_ml * (length_mm / 1000.0), 3)
-            db.execute(
-                'UPDATE products SET kg_per_unit = ? WHERE id = ?',
-                (kg_real, pr['id']),
-            )
-            perfiles_kg_recalc += 1
-    # Limpia la marca [peso estimado] de los perfiles que ahora tienen peso real.
-    db.execute(
-        "UPDATE products SET notes = REPLACE(REPLACE(notes, '[peso estimado]', ''), "
-        "'[peso estimado] ', '') WHERE category = 'PERFILES' AND kg_per_ml > 0"
-    )
-
-    # 3f) PASTAS: peso_saco_kg de pack_size ("5 kg" / "10 kg" / "25 kg").
-    for kg in (5.0, 10.0, 12.0, 15.0, 20.0, 25.0):
-        db.execute(
-            "UPDATE products SET peso_saco_kg = ? "
-            "WHERE category = 'PASTAS' AND peso_saco_kg IS NULL "
-            "AND (pack_size LIKE ? OR content_per_unit LIKE ?)",
-            (kg, f'%{int(kg) if kg == int(kg) else kg} kg%',
-             f'%{int(kg) if kg == int(kg) else kg} kg%'),
-        )
-
-    # 3g) PASTAS: color por defecto blanco (revisable desde UI admin).
-    db.execute(
-        "UPDATE products SET color = 'Blanco' "
-        "WHERE category = 'PASTAS' AND color IS NULL"
-    )
-
-    # 3h) TORNILLOS / CINTAS / ACCESORIOS: box_units extraído del name.
-    #     Patrón: "— 1.000ud" / "— 24 rollos/caja" / "— 50 unidades".
-    #     SQLite no tiene regex robusta, usamos UPDATE por valores comunes.
-    for n in (250, 500, 1000, 3000, 5000):
-        db.execute(
-            "UPDATE products SET box_units = ? "
-            "WHERE box_units IS NULL AND category IN ('TORNILLOS', 'CINTAS', 'ACCESORIOS') "
-            "AND (name LIKE ? OR name LIKE ?)",
-            (n, f'%— {n}ud%', f'%— {n}.000ud%' if n == 1000 else f'%— {n} ud%'),
-        )
-
-    # 3i) Norma textual por familia (defaults Fassa).
-    norma_by_family = {
-        'PLACAS': 'UNE EN 520',
-        'PERFILES': 'UNE 14195 / EN 14195',
-        'PASTAS': 'UNE EN 13963',
-        'CINTAS': 'UNE EN 13963',
-    }
-    for fam, norma in norma_by_family.items():
-        db.execute(
-            'UPDATE products SET norma_text = ? WHERE category = ? AND norma_text IS NULL',
-            (norma, fam),
-        )
-
-    # 3j) GYPSOCOMETE: dispo='yellow' (todos bajo pedido según PDF abril 2026).
-    db.execute(
-        "UPDATE products SET dispo_tarancon = 'yellow' WHERE category = 'GYPSOCOMETE'"
-    )
-
-    # 4) Cleanup: drop columnas cache (calculables on-the-fly).
-    cache_dropped = []
-    for col in ('pvp_per_m2', 'precio_arias_m2'):
-        if col in existing:
-            try:
-                db.execute(f'ALTER TABLE products DROP COLUMN {col}')
-                cache_dropped.append(col)
-            except sqlite3.OperationalError:
-                pass  # SQLite < 3.35 no soporta DROP COLUMN — saltamos silenciosamente.
-
-    # Marcar migración aplicada.
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_real_data_from_pdf_20260425',
-         f'cols_added={cols_added};placas_length={placas_filled};'
-         f'perfiles_kg_ml={perfiles_filled};perfiles_kg_recalc={perfiles_kg_recalc};'
-         f'cache_dropped={",".join(cache_dropped) or "none"}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog real-data 2026-04-25: {cols_added} cols nuevas, '
-        f'{placas_filled} placas con length_mm, {perfiles_filled} perfiles con kg/ml, '
-        f'{perfiles_kg_recalc} perfiles con kg_per_unit recalculado real, '
-        f'cache dropped: {cache_dropped or "none"}'
-    )
-
-
-# ── Pesos reales aportados por Oliver 2026-04-25 (cintas, tornillos,
-# accesorios, trampillas, GypsoCOMETE). Derivados de proformas + albaranes.
-# Cada fila: (sku, kg_per_unit_final_en_unidad_de_venta, fuente_nota).
-# La regla de unidad de venta sigue lo que publica el catálogo Fassa:
-#   TORNILLOS, ACCESORIOS, GYPSOCOMETE → caja/embalaje
-#   CINTAS                              → rollo
-#   TRAMPILLAS                          → unidad
-# Cuando Oliver dio el peso por unidad individual y la unidad de venta es
-# caja, multiplicamos por uds/caja para alinear con el motor logístico
-# (qty × kg_per_unit donde qty va en la unidad de venta).
-_REAL_WEIGHTS_20260425 = [
-    # CINTAS (kg/rollo, directo)
-    ('304056', 0.28),  # Cinta Juntas 50mm×23m
-    ('304057', 0.60),  # Cinta Juntas 50mm×75m
-    ('304058', 1.15),  # Cinta Juntas 50mm×150m
-    ('301121', 5.60),  # Malla Externa Light 50m
-    ('304075', 0.53),  # Banda Estanca 50mm×30m
-    # TORNILLOS (kg/caja, directo)
-    ('304101', 1.40),  # PM Punta Clavo Ø3,5×25 — 1.000ud
-    ('304104', 1.84),  # PM Punta Clavo Ø3,5×35 — 1.000ud
-    ('304115', 1.45),  # PM Punta Broca Ø3,5×25 — 1.000ud
-    ('304134', 1.05),  # MM Punta Broca Ø3,5×9,5 — 1.000ud
-    ('301244', 1.15),  # Externa Light Ø4,0×32 — 500ud
-    # TRAMPILLAS (kg/unidad, directo)
-    ('304081', 1.25),  # Trampilla Click Metálica 300×300
-    ('304082', 1.80),  # Trampilla Click Metálica 400×400
-    ('304086', 2.10),  # Trampilla Click Aluminio Aqua H1 300×300
-    # ACCESORIOS (Oliver dio kg/unidad → multiplicar × uds/caja)
-    # Cruceta TC 60: 0.05 kg/ud × 25 ud/caja = 1.25 kg/caja
-    ('304015', 1.25),
-    # Suspensión TC 47 90mm: 0.06 × 100 = 6.00 kg/caja
-    ('304021', 6.00),
-    # Cantonera Yeso 2.6m: 0.65 × 100 = 65.00 kg/caja
-    ('1091001Y', 65.00),
-    # GYPSOCOMETE (Oliver dio kg/unidad → multiplicar × uds/embalaje)
-    # ANGLE 240×240: 0.45 × 2 = 0.90 kg/embalaje
-    ('301600', 0.90),
-    # LINE 2000mm — solo existe la versión XL en la DB; aplico ahí: 2.40 × 5 = 12 kg/caja
-    ('301605XL', 12.00),
-]
-
-
-def _catalog_real_weights_20260425(db: sqlite3.Connection) -> None:
-    """Pesos reales aportados por Oliver 2026-04-25 para 17 SKUs de cintas,
-    tornillos, accesorios, trampillas y GypsoCOMETE.
-
-    Regla de unidad de venta (según catálogo Fassa Abril 2026):
-      - TORNILLOS, ACCESORIOS, GYPSOCOMETE → caja/embalaje
-      - CINTAS                              → rollo
-      - TRAMPILLAS                          → unidad
-
-    Cuando Oliver dio el peso por unidad individual y la unidad de venta es
-    caja (accesorios + GypsoCOMETE), se multiplica por uds/caja para que el
-    motor logístico (qty × kg_per_unit, qty en unidad de venta) calcule peso
-    correcto. Eso ya está hecho en la tabla embebida _REAL_WEIGHTS_20260425.
-
-    Pendientes de confirmación (no se aplican):
-      - 304000 Pieza Empalme TC 47 (no existe en DB; Oliver pendiente confirmar
-        si quería decir 304007).
-      - 304015 — el peso 0,05 kg corresponde a "Cruceta TC 47" según Oliver,
-        pero en la DB el SKU 304015 es CRUCETA TC 60 (304014 es la TC 47).
-        Aquí se aplica el peso al SKU 304015 (TC 60) calculado como 0,05 × 25
-        uds/caja = 1,25 kg/caja, asumiendo que Oliver se refería al SKU que
-        existe; pendiente confirmar si quería al 304014.
-
-    Limpia la marca [peso estimado] de los notes de cada SKU actualizado.
-    Idempotente vía flag en app_settings.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_real_weights_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    updated = 0
-    not_found = []
-    for sku, kg in _REAL_WEIGHTS_20260425:
-        cur = db.execute(
-            "UPDATE products SET kg_per_unit = ?, "
-            "notes = TRIM(REPLACE(REPLACE(COALESCE(notes, ''), "
-            "'[peso estimado 2026-04-24]', ''), '[peso estimado]', '')) "
-            "WHERE sku = ?",
-            (kg, sku),
-        )
-        if cur.rowcount == 0:
-            not_found.append(sku)
-        else:
-            updated += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_real_weights_20260425',
-         f'updated={updated};not_found={",".join(not_found) or "none"}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog real-weights 2026-04-25: {updated} SKUs con peso '
-        f'real aplicado (cintas+tornillos+accesorios+trampillas+gypsocomete). '
-        f'Not found: {not_found or "none"}'
-    )
-
-
-# ── Datos extraídos del Anexo Gypsotech Noviembre 2025 (PERFILES) ──
-# Cada entrada: prefijo del SKU (sin últimos 4 chars de longitud) →
-# {upp_real, min_order, dim_a_mm, dim_b_mm, dim_c_mm, espesor_acero_mm}
-# Los uds/palé son los REALES (no uds/caja). Permite limpiar el lío histórico
-# de "units_per_pallet hospitando uds/caja" en perfiles.
-_PERFILES_EXTRAS_BY_PREFIX = {
-    # MONTANTES
-    'C344836':  {'upp': 480,  'min': 10, 'a': 34, 'b': 46.5,  'c': 36, 'esp': 0.60},
-    'C367038':  {'upp': 250,  'min': 10, 'a': 36, 'b': 69.5,  'c': 38, 'esp': 0.60},
-    'C399041':  {'upp': 200,  'min': 10, 'a': 39, 'b': 88.5,  'c': 41, 'esp': 0.60},
-    'C3910041': {'upp': 160,  'min': 8,  'a': 39, 'b': 98.5,  'c': 41, 'esp': 0.60},
-    'C4612548': {'upp': 120,  'min': 4,  'a': 46, 'b': 123.5, 'c': 48, 'esp': 0.60},
-    'C4615048': {'upp': 120,  'min': 4,  'a': 46, 'b': 148.5, 'c': 48, 'esp': 0.60},
-    # RAILS
-    'U304830':  {'upp': 560,  'min': 10, 'a': 30, 'b': 48,    'c': 30, 'esp': 0.55},
-    'U307030':  {'upp': 350,  'min': 10, 'a': 30, 'b': 70,    'c': 30, 'esp': 0.55},
-    'U309030':  {'upp': 280,  'min': 10, 'a': 30, 'b': 90,    'c': 30, 'esp': 0.55},
-    'U3010030': {'upp': 160,  'min': 8,  'a': 30, 'b': 100,   'c': 30, 'esp': 0.55},
-    'U3512535': {'upp': 120,  'min': 4,  'a': 35, 'b': 125,   'c': 35, 'esp': 0.55},
-    'U4015040': {'upp': 120,  'min': 4,  'a': 40, 'b': 150,   'c': 40, 'esp': 0.55},
-    # OTROS
-    'E168218':  {'upp': 600,  'min': 10, 'a': 18, 'b': 82,    'c': 16, 'esp': 0.55},
-    'C174717':  {'upp': 1440, 'min': 10, 'a': 18, 'b': 47,    'c': 18, 'esp': 0.60},
-    'C1548300': {'upp': 1440, 'min': 10, 'a': 15, 'b': 48,    'c': 15, 'esp': 0.60},
-    'C286028':  {'upp': 480,  'min': 10, 'a': 28, 'b': 60,    'c': 28, 'esp': 0.60},
-    'U472447':  {'upp': 600,  'min': 10, 'a': 47, 'b': 17,    'c': 47, 'esp': 0.70},
-    'L233430':  {'upp': 1080, 'min': 30, 'a': 23, 'b': 34,    'c': None, 'esp': 0.55},
-    'U201928':  {'upp': 420,  'min': 10, 'a': 28, 'b': 19,    'c': 20, 'esp': 0.55},
-    'U193019':  {'upp': 1280, 'min': 10, 'a': 19, 'b': 30,    'c': 19, 'esp': 0.55},
-}
-
-# Box_units explícitos por SKU (uds dentro de la unidad de venta "caja").
-# Cuando la unidad de venta es la caja (tornillos, accesorios, gypsocomete),
-# `box_units` indica cuántas unidades individuales lleva la caja.
-# CINTAS: rollos por caja (la unidad de venta es el rollo, pero se compran
-# en cajas para almacén).
-_BOX_UNITS_BY_SKU = {
-    # ACCESORIOS — Anexo Nov 2025 pp. 6-8
-    '304000': 100,    # Horquilla Cuelgue Rápida M6 TC 47
-    '301008': 100,    # Horquilla Cuelgue M6 TC 48
-    '304001': 50,     # Horquilla Cuelgue M6 TC 60
-    '304007': 50,     # Pieza Empalme TC 47
-    '304008': 50,     # Pieza Empalme TC 60
-    '304014': 50,     # Cruceta TC 47
-    '304015': 25,     # Cruceta TC 60
-    '304021': 100,    # Suspensión TC 47 90mm
-    '304022': 100,    # Suspensión TC 47 180mm
-    '304023': 50,     # Suspensión TC 47 240mm
-    '304029': 100,    # Anclaje Directo 47×120
-    '304030': 100,    # Anclaje Directo 60×120
-    '301060': 100,    # Gancho Fijación Vigas
-    '304042': 100,    # Clip Horizontal 4-10
-    '304043': 100,    # Clip Horizontal 10-15
-    '304036': 100,    # Anclaje Universal Omega M6
-    '304049': 20,     # Aislador Acústico TC 47
-    '304050': 25,     # Aislador Acústico Trasdosado
-    '304095': 100,    # Varilla Roscada Ø6×1000
-    '304096': 50,     # Varilla Roscada Ø6×2000
-    '304097': 100,    # Manguito Cilíndrico Ø6×20
-    # CINTAS — Anexo Nov 2025 p. 9 (rollos por caja)
-    '304056': 24,     # Cinta Juntas 23m
-    '304057': 20,     # Cinta Juntas 75m
-    '304058': 10,     # Cinta Juntas 150m
-    '304078': 54,     # Malla FV 50m × 45m
-    '304079': 12,     # Malla FV 50m × 153m
-    '301121':  6,     # Malla Externa Light 50m
-    '304064': 10,     # Cinta Guardavivos 12.5m
-    '304065': 10,     # Cinta Guardavivos 30m
-    '304075': 22,     # Banda Estanca 50mm
-    '304076': 15,     # Banda Estanca 70mm
-    '304077': 11,     # Banda Estanca 90mm
-    # GYPSOCOMETE — Tarifa Gypsotech Abril 2026 p. 46
-    '301600': 2,      # ANGLE
-    '301601': 2,      # CROSS
-    '301602': 2,      # STAR
-    '301605': 5,      # LINE 2m
-    '301606': 5,      # Recambio pantalla 2m
-    '301607': 5,      # Recambio pantalla 3m
-    '301600XL': 2,
-    '301601XL': 2,
-    '301602XL': 2,
-    '301605XL': 5,
-    '301606XL': 5,
-}
-
-
-def _catalog_pdf_extras_and_discontinued_20260425(db: sqlite3.Connection) -> None:
-    """Datos adicionales extraídos del PDF + flags para SKUs descartados.
-
-    1) BACKFILL adicional desde Anexo Gypsotech Nov 2025:
-       - units_per_pallet REAL para los 41 perfiles (de 480, 250, 200, etc.
-         según modelo). Esto sobreescribe los valores históricos donde la
-         columna venía de uds/caja en lugar de uds/palé real.
-       - min_order_qty para perfiles (10, 4, 8, 30 según modelo).
-       - dim_a_mm, dim_b_mm, dim_c_mm para perfiles (sección C/U/Ω).
-       - espesor_acero_mm (0.55 / 0.60 / 0.70).
-
-    2) BACKFILL box_units para 40+ SKUs de accesorios, cintas, GypsoCOMETE
-       (de la tarifa y anexo). Esto separa el "uds/caja" del
-       "units_per_pallet" real.
-
-    3) NUEVAS COLUMNAS para gestionar SKUs descartados:
-       - is_active (BOOLEAN, default 1) — sigue en operativa Arias.
-       - discontinued_reason (TEXT) — motivo si is_active=0.
-         Valores comunes: 'caribbean_unsuitable', 'oversized_logistics',
-         'fassa_discontinued', 'low_demand', etc.
-
-    Esta migración deja el SCHEMA listo pero NO marca ningún SKU como
-    descartado. Oliver indicará en migración 0011 qué SKUs descartar y por
-    qué motivo concreto.
-
-    REGLA OFERTAS INMUTABLES: solo `products`. Las ofertas históricas no se
-    tocan — sus pesos y units_per_pallet quedan congelados en lines_json.
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_pdf_extras_and_discontinued_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Schema: añadir is_active + discontinued_reason.
-    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
-    cols_added = 0
-    if 'is_active' not in existing:
-        # Nota: no podemos usar DEFAULT 1 porque la allowlist de _safe_add_column
-        # no lo permite. Hacemos ALTER + UPDATE explícito.
-        _safe_add_column(db, 'products', 'is_active', 'INTEGER')
-        db.execute('UPDATE products SET is_active = 1 WHERE is_active IS NULL')
-        cols_added += 1
-    if 'discontinued_reason' not in existing:
-        _safe_add_column(db, 'products', 'discontinued_reason', 'TEXT')
-        cols_added += 1
-
-    # 2) Backfill PERFILES con datos del Anexo Nov 2025.
-    perfiles_updated = 0
-    perfiles = db.execute("SELECT id, sku FROM products WHERE category = 'PERFILES'").fetchall()
-    for pr in perfiles:
-        sku = pr['sku'] or ''
-        spec = None
-        for prefix, data in _PERFILES_EXTRAS_BY_PREFIX.items():
-            if sku.startswith(prefix):
-                spec = data
-                break
-        if spec is None:
-            continue
-        db.execute(
-            "UPDATE products SET units_per_pallet = ?, min_order_qty = ?, "
-            "dim_a_mm = ?, dim_b_mm = ?, dim_c_mm = ?, espesor_acero_mm = ? "
-            "WHERE id = ?",
-            (spec['upp'], spec['min'], spec['a'], spec['b'], spec['c'], spec['esp'],
-             pr['id']),
-        )
-        perfiles_updated += 1
-
-    # 3) Backfill box_units para los SKUs catalogados.
-    box_updated = 0
-    for sku, n in _BOX_UNITS_BY_SKU.items():
-        cur = db.execute(
-            "UPDATE products SET box_units = ? WHERE sku = ? AND box_units IS NULL",
-            (n, sku),
-        )
-        box_updated += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_pdf_extras_and_discontinued_20260425',
-         f'cols_added={cols_added};perfiles_updated={perfiles_updated};'
-         f'box_units_set={box_updated}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog pdf-extras 2026-04-25: +{cols_added} cols '
-        f'(is_active+discontinued_reason), {perfiles_updated} perfiles con upp/min/dims real, '
-        f'{box_updated} SKUs con box_units explícito'
-    )
-
-
-# Lista de SKUs descartados — decisión Oliver 2026-04-25:
-#
-# - Placas con longitud > 2.600 mm: la dimensión hace que el flete por
-#   m² sea inviable para distribución Caribe (no caben optimizadas en
-#   contenedor 40HC y bloquean el aprovechamiento). Demanda pequeña de
-#   placas largas en proyectos RD.
-# - Perfil TC 47 5.300 mm: idéntica razón — un perfil de 5.30 m
-#   desperdicia el contenedor (12,03 m útiles → 2 piezas y media).
-#
-# Trampillas, EXTERNA, SILENS, LIGNUM, FASSATHERM se MANTIENEN. La
-# dimensión es lo que filtra, no el tipo de placa.
-_DISCONTINUED_OVERSIZED = [
-    # Placas STD > 2.600 mm
-    ('P00A000270A0', 'oversized_logistics'),  # STD BA 10mm 1200×2700 (Calliano)
-    ('P00A003270A0', 'oversized_logistics'),  # STD BA 13mm 1200×2700
-    ('P00A003280A0', 'oversized_logistics'),  # STD BA 13mm 1200×2800
-    ('P00A000300A0', 'oversized_logistics'),  # STD BA 10mm 1200×3000
-    ('P00A003300A0', 'oversized_logistics'),  # STD BA 13mm 1200×3000
-    ('P00A005300A0', 'oversized_logistics'),  # STD BA 15mm 1200×3000
-    ('P00A008300A0', 'oversized_logistics'),  # STD BA 18mm 1200×3000
-    ('P00A003320A0', 'oversized_logistics'),  # STD BA 13mm 1200×3200 (Calliano)
-    ('P00A003360A0', 'oversized_logistics'),  # STD BA 13mm 1200×3600 (Calliano)
-    # Placas SIMPLY > 2.600 mm
-    ('P00Y003280A0', 'oversized_logistics'),  # GypsoSIMPLY BA 13mm 1200×2800
-    ('P00Y003300A0', 'oversized_logistics'),  # GypsoSIMPLY BA 13mm 1200×3000
-    # Placas AQUA H2 > 2.600 mm
-    ('P00H003280A0', 'oversized_logistics'),  # AQUA H2 BA 13mm 1200×2800
-    ('P00H003300A0', 'oversized_logistics'),  # AQUA H2 BA 13mm 1200×3000
-    ('P00H005300A0', 'oversized_logistics'),  # AQUA H2 BA 15mm 1200×3000
-    # Placas AQUASUPER > 2.600 mm
-    ('P00W003300A0', 'oversized_logistics'),  # AQUASUPER BA 13mm 1200×3000
-    ('P00W005300A0', 'oversized_logistics'),  # AQUASUPER BA 15mm 1200×3000
-    ('P00W008300A0', 'oversized_logistics'),  # AQUASUPER BA 18mm 1200×3000
-    # Placas FOCUS > 2.600 mm
-    ('P00F005280A0', 'oversized_logistics'),  # FOCUS BA 15mm 1200×2800
-    ('P00F003300A0', 'oversized_logistics'),  # FOCUS BA 13mm 1200×3000
-    ('P00F005300A2', 'oversized_logistics'),  # FOCUS BA 15mm 1200×3000
-    # Placa LIGNUM > 2.600 mm
-    ('P00LB03300AC', 'oversized_logistics'),  # GypsoLIGNUM BA 13mm 1200×3000
-    # Perfil más largo que un contenedor 40HC útil
-    ('C174717530A', 'oversized_logistics'),   # Perfil TC 47 Z1 — 5.300mm
-]
-
-
-def _catalog_discontinued_skus_20260425(db: sqlite3.Connection) -> None:
-    """Marca como descartados los 22 SKUs cuya dimensión hace inviable la
-    logística Caribe (Oliver 2026-04-25):
-
-      - 21 placas con longitud > 2.600 mm (STD, SIMPLY, AQUA H2, AQUASUPER,
-        FOCUS, LIGNUM)
-      - 1 perfil TC 47 Z1 — 5.300 mm
-
-    El criterio NO es por tipo de placa (EXTERNA, SILENS, LIGNUM, FASSATHERM
-    se MANTIENEN — son productos válidos para Caribe). Solo se descartan por
-    DIMENSIÓN > 2.600 mm que hace inviable el flete optimizado en contenedor
-    40HC (12,03 m útiles).
-
-    Verificado: 0 ofertas activas usan estos 22 SKUs (consulta cruzada
-    pending_offers + order_lines, status != cancelled).
-
-    REGLA OFERTAS INMUTABLES: si en futuro alguna oferta histórica los
-    cita, NO se actualiza — el catálogo refleja la operativa actual, las
-    ofertas mantienen su precio congelado.
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_discontinued_skus_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    discontinued = 0
-    not_found = []
-    for sku, reason in _DISCONTINUED_OVERSIZED:
-        cur = db.execute(
-            "UPDATE products SET is_active = 0, discontinued_reason = ? "
-            "WHERE sku = ? AND (is_active IS NULL OR is_active = 1)",
-            (reason, sku),
-        )
-        if cur.rowcount == 0:
-            not_found.append(sku)
-        else:
-            discontinued += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_discontinued_skus_20260425',
-         f'discontinued={discontinued};not_found={",".join(not_found) or "none"}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog discontinued 2026-04-25: {discontinued} SKUs '
-        f'descartados por oversized_logistics (placas >2600mm + TC 47 5.300mm). '
-        f'Not found: {not_found or "none"}'
-    )
-
-
-def _fix_cinta_guardavivos_names_20260425(db: sqlite3.Connection) -> None:
-    """Auditoría 2026-04-25: 2 cintas Guardavivos tenían nombres mezclados con
-    Malla FV (45m/153m + 54/12 rollos/caja). Verificado contra Anexo Gypsotech
-    Noviembre 2025: las cintas Guardavivos correctas son 12,5m y 30m con 10
-    rollos/caja.
-
-    Corrige a:
-      - 304064 → "Cinta Guardavivos 50mm×12,5m — 10 rollos/caja"
-      - 304065 → "Cinta Guardavivos 50mm×30m — 10 rollos/caja"
-
-    Verificado: 0 ofertas activas usan estos SKUs (ofertas inmutables OK).
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'fix_cinta_guardavivos_names_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    fixes = [
-        ('304064', 'Cinta Guardavivos 50mm×12,5m — 10 rollos/caja'),
-        ('304065', 'Cinta Guardavivos 50mm×30m — 10 rollos/caja'),
-    ]
-    updated = 0
-    for sku, new_name in fixes:
-        cur = db.execute(
-            'UPDATE products SET name = ? WHERE sku = ? AND name != ?',
-            (new_name, sku, new_name),
-        )
-        updated += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('fix_cinta_guardavivos_names_20260425', f'updated={updated}', now_iso()),
-    )
-    db.commit()
-    print(f'[migration] cinta guardavivos names: {updated} SKUs renombrados')
-
-
-def _catalog_fill_gaps_20260425(db: sqlite3.Connection) -> None:
-    """Rellena huecos detectados en la auditoría 2026-04-25 (familia por
-    familia) — datos extraíbles del name del SKU sin necesidad de input
-    externo.
-
-    1) PLACAS — 3 SKUs con thickness_mm vacío:
-       - STD BA 10mm (P00A000250A0, P00A000260A0) → thickness=9,5
-       - EXTERNA LIGHT BR 13mm 1200×2000 (P00XL03200EI) → thickness=12,5
-
-    2) TORNILLOS — 17 SKUs sin box_units (uds/caja explícito está en el
-       name como '— 1.000ud', '— 500ud', etc). Regex en Python para extraer.
-
-    3) ACCESORIOS — Cantonera 1091001Y → box_units=100 (el name lo dice).
-
-    4) CINTAS — Fassanet 700960 (rollo 1×50m) → box_units=1.
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'catalog_fill_gaps_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) PLACAS thickness.
-    placas_thickness = [
-        ('P00A000250A0', 9.5),
-        ('P00A000260A0', 9.5),
-        ('P00XL03200EI', 12.5),
-    ]
-    placas_fixed = 0
-    for sku, thick in placas_thickness:
-        cur = db.execute(
-            'UPDATE products SET thickness_mm = ? WHERE sku = ? AND thickness_mm IS NULL',
-            (thick, sku),
-        )
-        placas_fixed += cur.rowcount
-
-    # 2) TORNILLOS — extraer box_units del name con regex robusto.
-    # Patrones: "— 1.000ud", "— 500ud", "— 250ud", "— 5.000ud"
-    tornillos = db.execute(
-        "SELECT id, sku, name FROM products "
-        "WHERE category = 'TORNILLOS' AND box_units IS NULL"
-    ).fetchall()
-    tornillos_fixed = 0
-    for t in tornillos:
-        m = re.search(r'—\s*(\d{1,3}(?:\.\d{3})*)\s*ud', t['name'] or '')
-        if m:
-            n = int(m.group(1).replace('.', ''))
-            if 1 <= n <= 100000:
-                db.execute(
-                    'UPDATE products SET box_units = ? WHERE id = ?',
-                    (n, t['id']),
-                )
-                tornillos_fixed += 1
-
-    # 3) ACCESORIOS — Cantonera Yeso (100 ud/caja según name).
-    cur = db.execute(
-        "UPDATE products SET box_units = 100 WHERE sku = '1091001Y' AND box_units IS NULL"
-    )
-    cantonera_fixed = cur.rowcount
-
-    # 4) CINTAS — Fassanet 160 (1 rollo por venta).
-    cur = db.execute(
-        "UPDATE products SET box_units = 1 WHERE sku = '700960' AND box_units IS NULL"
-    )
-    fassanet_fixed = cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('catalog_fill_gaps_20260425',
-         f'placas_thickness={placas_fixed};tornillos_box={tornillos_fixed};'
-         f'cantonera={cantonera_fixed};fassanet={fassanet_fixed}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] catalog fill-gaps 2026-04-25: '
-        f'+{placas_fixed} thickness placas, +{tornillos_fixed} box_units tornillos, '
-        f'+{cantonera_fixed} cantonera, +{fassanet_fixed} fassanet'
-    )
-
-
-# Pesos kg/caja confirmados por Oliver contra Tarifa Fassa Hispania
-# (auditoría 2026-04-25). La unidad de venta operativa es la CAJA porque
-# Fassa solo sirve cajas completas (no rollos sueltos), aunque en factura
-# al cliente final se cuente por rollos. El motor logístico calcula
-# qty × kg_per_unit con qty en cajas.
-_CINTAS_KG_PER_CAJA = [
-    # (sku, kg_caja, source: 'oficial' o 'derivado_de_kg_rollo_existente')
-    ('301121', 33.60, 'oficial'),    # Malla Externa Light 50m × 6 rollos = 33,6
-    ('304056',  6.72, 'derivado'),   # Cinta Juntas 23m × 24 rollos × 0,28
-    ('304057', 12.00, 'derivado'),   # Cinta Juntas 75m × 20 × 0,60
-    ('304058', 11.50, 'oficial'),
-    ('304064',  3.00, 'derivado'),   # Guardavivos 12,5m × 10 × 0,30 (pendiente confirmar)
-    ('304065', 17.38, 'oficial'),    # Guardavivos 30m — corregido (era 10,00 → 17,38)
-    ('304075', 11.58, 'oficial'),
-    ('304076', 17.42, 'oficial'),    # Banda Estanca 70mm — corregido (era 10,50 → 17,42)
-    ('304078',  4.75, 'oficial'),    # Malla FV 45m — corregido (era 8,10 → 4,75)
-    ('304079', 14.38, 'oficial'),    # Malla FV 153m — corregido (era 6,00 → 14,38)
-    ('700960',  8.10, 'oficial'),    # Fassanet 160 (1 rollo = 1 caja)
-]
-
-# SKUs cuyo peso ha sido verificado oficialmente contra Tarifa Fassa.
-# Se les quita la marca [peso estimado] del campo notes.
-_VERIFIED_NO_LONGER_ESTIMATED = [
-    # TORNILLOS confirmados Oliver 2026-04-25 vs Tarifa Fassa
-    '301240', '304102', '304109', '304117',
-    # TRAMPILLAS confirmadas
-    '304090', '301462', '301764',
-    # GYPSOCOMETE confirmadas
-    '301602XL',
-]
-
-
-def _cintas_by_caja_and_verify_20260425(db: sqlite3.Connection) -> None:
-    """Migración 2026-04-25: alinear CINTAS al modelo "venta por caja"
-    (Fassa Hispania solo sirve cajas completas, no rollos sueltos).
-
-    Cambios en CINTAS activas:
-      1) `unit` pasa de 'rollo' a 'caja'.
-      2) `kg_per_unit` pasa de kg/rollo a kg/caja (valores Tarifa Fassa).
-         Esto corrige 4 SKUs cuyo peso/rollo era erróneo (304065, 304076,
-         304078, 304079).
-
-    Y limpia la marca `[peso estimado]` de 8 SKUs ya verificados oficialmente
-    contra Tarifa Fassa Hispania (4 tornillos + 3 trampillas + 1 GypsoCOMETE).
-
-    REGLA OFERTAS INMUTABLES: solo `products`. Las ofertas existentes
-    quedan con sus pesos congelados en lines_json.
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'cintas_by_caja_and_verify_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) CINTAS — unit→caja + kg/caja oficiales.
-    cintas_updated = 0
-    for sku, kg_caja, _src in _CINTAS_KG_PER_CAJA:
-        cur = db.execute(
-            "UPDATE products SET unit = 'caja', kg_per_unit = ? WHERE sku = ? AND category = 'CINTAS'",
-            (kg_caja, sku),
-        )
-        cintas_updated += cur.rowcount
-
-    # 2) Quitar [peso estimado] de los SKUs verificados oficialmente.
-    cleaned = 0
-    placeholder = ', '.join('?' for _ in _VERIFIED_NO_LONGER_ESTIMATED)
-    cur = db.execute(
-        f"UPDATE products SET notes = TRIM(REPLACE(REPLACE(COALESCE(notes,''), "
-        f"'[peso estimado 2026-04-24]', ''), '[peso estimado]', '')) "
-        f"WHERE sku IN ({placeholder})",
-        _VERIFIED_NO_LONGER_ESTIMATED,
-    )
-    cleaned = cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('cintas_by_caja_and_verify_20260425',
-         f'cintas_to_caja={cintas_updated};estimated_cleaned={cleaned}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] cintas-by-caja: {cintas_updated} cintas a kg/caja, '
-        f'{cleaned} SKUs sin marca [peso estimado]'
-    )
-
-
-# Pesos kg/ROLLO (unidad de venta real) calculados a partir de los pesos
-# kg/caja oficiales aportados por Oliver (Tarifa Fassa Hispania
-# 2026-04-25), divididos por uds/caja del PDF Anexo Nov 2025.
-#
-# Modelo: las CINTAS se venden por rollo al cliente final. Fassa solo
-# sirve cajas completas (= mínimo de pedido), pero eso es restricción
-# logística, NO unidad de venta. El motor cotiza qty × kg_per_unit con
-# qty en rollos.
-_CINTAS_KG_PER_ROLLO = [
-    # (sku, kg_caja_oficial, uds_caja → kg_rollo = caja/uds)
-    ('301121', 33.60,  6),  # 5.6   kg/rollo
-    ('304056',  6.72, 24),  # 0.28  (igual que antes)
-    ('304057', 12.00, 20),  # 0.60  (igual)
-    ('304058', 11.50, 10),  # 1.15  (igual)
-    ('304064',  3.00, 10),  # 0.30  (sigue estimado)
-    ('304065', 17.38, 10),  # 1.738 (era 1.00, corregido)
-    ('304075', 11.58, 22),  # 0.526 (~igual)
-    ('304076', 17.42, 15),  # 1.161 (era 0.70, corregido)
-    ('304078',  4.75, 54),  # 0.088 (era 0.15, corregido)
-    ('304079', 14.38, 12),  # 1.198 (era 0.50, corregido)
-    ('700960',  8.10,  1),  # 8.10  (igual; 1 rollo = 1 caja)
-]
-
-
-def _revert_cintas_to_rollo_20260425(db: sqlite3.Connection) -> None:
-    """Corrige el bug introducido por la migración previa _cintas_by_caja_:
-    NO se debe cambiar la unidad de venta a 'caja' — las cintas se siguen
-    cotizando por rollo (cliente pide rollos sueltos). El "kg/caja" de la
-    Tarifa Fassa Hispania que aportó Oliver es información operativa
-    (logística: Fassa solo sirve cajas completas como mínimo de pedido),
-    NO unidad comercial.
-
-    Esta migración:
-      1) Devuelve `unit` a 'rollo' para todas las cintas activas.
-      2) Establece `kg_per_unit` = kg/rollo = kg_caja_oficial / box_units.
-      3) Esto SÍ corrige los 4 valores erróneos previos (304065, 304076,
-         304078, 304079) usando los kg/caja oficiales como fuente de verdad.
-
-    Sin esto, ofertas históricas con qty=100 rollos serían recalculadas
-    como 100 × kg_caja → ~10x el peso real. Bug crítico.
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'revert_cintas_to_rollo_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    updated = 0
-    for sku, kg_caja, uds_caja in _CINTAS_KG_PER_ROLLO:
-        kg_rollo = round(kg_caja / uds_caja, 4)
-        cur = db.execute(
-            "UPDATE products SET unit = 'rollo', kg_per_unit = ? "
-            "WHERE sku = ? AND category = 'CINTAS'",
-            (kg_rollo, sku),
-        )
-        updated += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('revert_cintas_to_rollo_20260425', f'updated={updated}', now_iso()),
-    )
-    db.commit()
-    print(f'[migration] cintas revertidas a unit=rollo: {updated} SKUs')
-
-
-def _add_sku_560901_and_rendimiento_20260425(db: sqlite3.Connection) -> None:
-    """Añade el SKU 560901 (Fassajoint 1H formato 25 kg, Tarancón) y la columna
-    `rendimiento_kg_per_m2` para registrar el consumo unitario de pasta/cinta
-    por m² de pared. El cotizador podrá auto-calcular cantidades cuando se
-    cotice por m² (futuro).
-
-    Datos 560901 (Tarifa Fassa Hispania Abr 2026 — Oliver 2026-04-25):
-      - PVP 23,63 €/saco (50% + 5% extra → Arias 11,22 €)
-      - 50 sacos/palé · 1.250 kg/palé neto
-      - kg_per_unit = 25 kg
-      - Origen: Tarancón
-      - Tiempo trabajabilidad: 60 min (1 hora)
-      - Color: Blanco · Norma: UNE EN 13963
-
-    Rendimiento Fassajoint 1H = 0,4 kg/m² (default conservador
-    intermedio en el rango 0,3-0,5 que aporta Oliver).
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'add_sku_560901_and_rendimiento_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Añadir columna `rendimiento_kg_per_m2` si no existe.
-    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
-    if 'rendimiento_kg_per_m2' not in existing:
-        _safe_add_column(db, 'products', 'rendimiento_kg_per_m2', 'REAL')
-
-    # 2) Crear SKU 560901 si no existe.
-    exists = db.execute("SELECT 1 FROM products WHERE sku = '560901'").fetchone()
-    sku_created = 0
-    if not exists:
-        db.execute(
-            """INSERT INTO products
-               (sku, name, category, subfamily, source_catalog, unit,
-                unit_price_eur, kg_per_unit, units_per_pallet, sqm_per_pallet,
-                pvp_eur_unit, precio_arias_eur_unit,
-                discount_pct, discount_extra_pct,
-                peso_saco_kg, color, norma_text, dispo_tarancon,
-                tariff_origen, tiempo_trabajab_min, rendimiento_kg_per_m2,
-                box_units, is_active, notes)
-               VALUES (?, ?, ?, ?, ?, ?,
-                       ?, ?, ?, ?,
-                       ?, ?,
-                       ?, ?,
-                       ?, ?, ?, ?,
-                       ?, ?, ?,
-                       ?, ?, ?)""",
-            ('560901', 'FASSAJOINT 1H BLANCO 25kg', 'PASTAS', 'Pastas de juntas',
-             'Gypsotech Abr2026', 'saco',
-             11.22, 25.0, 50, None,
-             23.63, 11.22,
-             50.0, 5.0,
-             25.0, 'Blanco', 'UNE EN 13963', 'green',
-             'Tarancón', 60, 0.4,
-             1, 1, '25 kg/saco · 1.250 kg/palé · Tarifa Abr 2026'),
-        )
-        sku_created = 1
-
-    # 3) Backfill rendimiento para Fassajoint 1H 10kg también (mismo producto,
-    #    formato distinto). Conservador 0,4 kg/m².
-    db.execute(
-        "UPDATE products SET rendimiento_kg_per_m2 = 0.4 "
-        "WHERE sku IN ('560901', '351E1') AND rendimiento_kg_per_m2 IS NULL"
-    )
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('add_sku_560901_and_rendimiento_20260425',
-         f'sku_560901_created={sku_created};rendimiento_col_added={"rendimiento_kg_per_m2" not in existing}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] sku 560901 + rendimiento: created={sku_created}, '
-        f'rendimiento col added={"rendimiento_kg_per_m2" not in existing}'
-    )
-
-
-# Rendimientos kg/m² verificados Oliver 2026-04-25 (Tarifa Fassa Hispania).
-# Cada entrada: (sku, kg_per_m2, capa_mm, descripcion)
-_RENDIMIENTOS_KG_M2 = [
-    # PASTAS DE JUNTAS — Fassajoint family (default 0,4 kg/m²)
-    ('351E1', 0.4, '—',  'FASSAJOINT 1H 10kg'),  # ya aplicado en 0017, idempotente
-    ('352E1', 0.4, '—',  'FASSAJOINT 2H 5kg'),
-    ('353E1', 0.4, '—',  'FASSAJOINT 2H 10kg'),
-    ('354',   0.4, '—',  'FASSAJOINT 2H 25kg'),
-    ('356',   0.4, '—',  'FASSAJOINT 3H 25kg'),
-    ('358U3', 0.4, '—',  'Fassajoint 8h 25kg'),
-    # ACABADOS Y REVOCOS — alto consumo por m²
-    ('1259Y1', 15.0, '10mm', 'KX 16 W2 Extra-blanco (revoco proyectar)'),
-    # MASA DE AGARRE — Gypsomaf (capa fina, 2mm)
-    ('359',   1.0, '2mm',  'Gypsomaf 25kg'),
-    ('360E1', 1.0, '2mm',  'Gypsomaf 10kg'),
-]
-
-# Rendimientos L/m² para pinturas (consumo por capa).
-# Default Fassa: 4-5 m²/L → 0,20-0,25 L/m². Conservador 0,20 L/m².
-_RENDIMIENTOS_L_M2 = [
-    ('GYP010000', 0.20, 'GYPSOPAINT 14L'),
-    ('GYP010001', 0.20, 'GYPSOPAINT 5L'),
-]
-
-# Bug: regex peso_saco_kg de migración 0008 matcheaba "5 kg" dentro de "25 kg".
-# Corregir SKUs cuyo peso_saco_kg está mal porque kg_per_unit y name contradicen.
-_PESO_SACO_FIXES = [
-    ('1259Y1', 25.0),  # KX 16 W2 25kg (era 5,0)
-    ('359',    25.0),  # Gypsomaf 25kg (era 5,0)
-]
-
-
-def _rendimientos_and_fixes_20260425(db: sqlite3.Connection) -> None:
-    """Migración 2026-04-25 (continuación) — datos técnicos Oliver verificados:
-
-    1) Backfill rendimiento_kg_per_m2 para PASTAS y REVOCOS:
-       - Fassajoint family (0,4 kg/m²)
-       - KX 16 W2 (15,0 kg/m² capa 10mm)
-       - Gypsomaf (1,0 kg/m² capa 2mm)
-
-    2) Añade columna `rendimiento_l_per_m2` REAL para pinturas y backfill:
-       - GypsoPaint 14L y 5L → 0,20 L/m² (capa standard)
-
-    3) Corrige peso_saco_kg de 2 SKUs (bug regex de migración 0008 que
-       matcheaba "5 kg" dentro de "25 kg"):
-       - 1259Y1 KX 16 W2 25kg: 5,0 → 25,0
-       - 359    Gypsomaf 25kg: 5,0 → 25,0
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'rendimientos_and_fixes_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    # 1) Backfill rendimiento_kg_per_m2.
-    kg_updated = 0
-    for sku, kg_m2, _capa, _desc in _RENDIMIENTOS_KG_M2:
-        cur = db.execute(
-            'UPDATE products SET rendimiento_kg_per_m2 = ? WHERE sku = ? '
-            'AND (rendimiento_kg_per_m2 IS NULL OR rendimiento_kg_per_m2 != ?)',
-            (kg_m2, sku, kg_m2),
-        )
-        kg_updated += cur.rowcount
-
-    # 2) Columna nueva rendimiento_l_per_m2 + backfill pinturas.
-    existing = {r[1] for r in db.execute('PRAGMA table_info(products)').fetchall()}
-    col_added = False
-    if 'rendimiento_l_per_m2' not in existing:
-        _safe_add_column(db, 'products', 'rendimiento_l_per_m2', 'REAL')
-        col_added = True
-    l_updated = 0
-    for sku, l_m2, _desc in _RENDIMIENTOS_L_M2:
-        cur = db.execute(
-            'UPDATE products SET rendimiento_l_per_m2 = ? WHERE sku = ?',
-            (l_m2, sku),
-        )
-        l_updated += cur.rowcount
-
-    # 3) Fix peso_saco_kg de SKUs con bug regex.
-    saco_fixed = 0
-    for sku, peso in _PESO_SACO_FIXES:
-        cur = db.execute(
-            'UPDATE products SET peso_saco_kg = ? WHERE sku = ? AND peso_saco_kg != ?',
-            (peso, sku, peso),
-        )
-        saco_fixed += cur.rowcount
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('rendimientos_and_fixes_20260425',
-         f'kg_m2={kg_updated};l_m2={l_updated};col_added={col_added};peso_saco_fixed={saco_fixed}',
-         now_iso()),
-    )
-    db.commit()
-    print(
-        f'[migration] rendimientos+fixes: +{kg_updated} kg/m² SKUs, '
-        f'+{l_updated} L/m² pinturas, peso_saco corregido en {saco_fixed} SKUs'
-    )
-
-
-# 3 SKUs nuevos — Tarifa Fassa Hispania Abr 2026 (Oliver 2026-04-25):
-# Revocos KS 9 / MH 19 + Yeso proyectar Yesodur 1.
-# PVP × 0,475 = precio Arias (descuento estándar 50% + 5%).
-_SKUS_REVOCOS_YESO = [
-    # (sku, name, subfamily, pvp, kg_saco, upp, color, norma, rendimiento_kg_m2)
-    ('405Y1',
-     'KS 9 Revoco fondo Gris — 25kg',
-     'Revocos y morteros',
-     3.23, 25.0, 64, 'Gris', 'EN 998-1', 13.3),
-    ('1060',
-     'MH 19 Revoco hidrófugo Gris — 25kg',
-     'Revocos y morteros',
-     3.74, 25.0, 64, 'Gris', 'EN 998-1', 15.0),
-    ('1264Y1',
-     'Yesodur 1 Yeso proyectar Blanco — 17kg',
-     'Yesos proyectar',
-     4.40, 17.0, 80, 'Blanco', 'EN 13279-1', 10.0),
-]
-
-
-def _add_skus_revocos_yeso_20260425(db: sqlite3.Connection) -> None:
-    """Crea 3 SKUs nuevos en PASTAS — Tarifa Fassa Hispania Abr 2026:
-
-      - 405Y1  KS 9 Revoco fondo (3,23 €, 64 sacos/palé, gris, EN 998-1)
-      - 1060   MH 19 Revoco hidrófugo (3,74 €, 64 sacos/palé, gris, EN 998-1)
-      - 1264Y1 Yesodur 1 Yeso proyectar (4,40 €, 80 sacos/palé, blanco, EN 13279-1)
-
-    Todos:
-      - Origen: Tarancón
-      - Suministro por palé completo (uds/caja=1, ya que cada saco es la unidad)
-      - Descuento Arias estándar 50% + 5% extra (ratio 0,475)
-
-    Idempotente vía flag.
-    """
-    flag = db.execute(
-        "SELECT value FROM app_settings WHERE key = 'add_skus_revocos_yeso_20260425'"
-    ).fetchone()
-    if flag:
-        return
-
-    created = 0
-    for sku, name, subfam, pvp, kg, upp, color, norma, rend_m2 in _SKUS_REVOCOS_YESO:
-        # No re-crear si ya existe (idempotente extra).
-        exists = db.execute("SELECT 1 FROM products WHERE sku = ?", (sku,)).fetchone()
-        if exists:
-            continue
-        arias = round(pvp * 0.475, 4)
-        db.execute(
-            """INSERT INTO products
-               (sku, name, category, subfamily, source_catalog, unit,
-                unit_price_eur, kg_per_unit, units_per_pallet,
-                pvp_eur_unit, precio_arias_eur_unit,
-                discount_pct, discount_extra_pct,
-                peso_saco_kg, color, norma_text, dispo_tarancon,
-                tariff_origen, rendimiento_kg_per_m2,
-                box_units, is_active, notes)
-               VALUES (?, ?, 'PASTAS', ?, 'Gypsotech Abr2026', 'saco',
-                       ?, ?, ?,
-                       ?, ?,
-                       50.0, 5.0,
-                       ?, ?, ?, 'green',
-                       'Tarancón', ?,
-                       1, 1, ?)""",
-            (sku, name, subfam,
-             arias, kg, upp,
-             pvp, arias,
-             kg, color, norma,
-             rend_m2,
-             f'{kg:.0f} kg/saco · {int(kg*upp)} kg/palé · Tarifa Abr 2026'),
-        )
-        created += 1
-
-    db.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
-        ('add_skus_revocos_yeso_20260425', f'created={created}', now_iso()),
-    )
-    db.commit()
-    print(f'[migration] SKUs revocos+yeso: {created} creados (KS 9, MH 19, Yesodur 1)')
-
-
 def _logistics_aggregated_calibration_20260425(db: sqlite3.Connection) -> None:
     """Calibración operativa del motor logístico (sesión Oliver 2026-04-25).
 
@@ -3042,12 +1628,12 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
 
     Regla:
       - margen por línea = raw_lines[i]['margin'] si viene, si no margen global
-      - flete por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
-        Si NINGUNA línea trae log_unit_cost, el flete global del payload se
+      - coste variable por línea  = raw_lines[i]['log_unit_cost'] * qty_con_waste
+        Si NINGUNA línea trae log_unit_cost, el coste variable global del payload se
         prorratea proporcional al coste de producto por línea (equivalente
         matemáticamente al cálculo global previo, mantiene compat con bot).
-      - venta línea = cost_producto / (1 - margen_línea) + flete_línea
-        (flete es pass-through: no genera margen, igual que el frontend).
+      - venta línea = cost_producto / (1 - margen_línea) + coste_variable_línea
+        (coste variable es pass-through: no genera margen, igual que el frontend).
     """
     product_cost_total = sum(_num(cl.get('cost_exw_eur')) for cl in computed)
     if product_cost_total <= 0 or not computed:
@@ -3415,7 +2001,7 @@ def dashboard():
     total_pipeline_eur = 0
     total_confirmed_eur = 0
     for o in recent_offers:
-        lines = safe_json_loads(o['lines_json'])
+        lines = json.loads(o['lines_json']) if o['lines_json'] else []
         margin_pct = float(o['margin_pct'] or 20)
         quotes_data.append({
             'id': o['id'], 'offer_number': o['offer_number'],
@@ -3429,7 +2015,7 @@ def dashboard():
             'margin_pct': margin_pct,
             'lines': len(lines),
             'containers': o['container_count'] or 0,
-            'created_at': safe_slice_date(o['created_at']),
+            'created_at': (o['created_at'] or '')[:10],
         })
         if o['status'] in ('pending', 'approved'):
             total_pipeline_eur += o['total_final_eur'] or 0
@@ -3478,7 +2064,8 @@ def dashboard():
     # Familias más cotizadas (de lines_json)
     all_lines = []
     for o in db.execute("SELECT lines_json FROM pending_offers WHERE status IN ('pending','approved')"):
-        all_lines.extend(safe_json_loads(o['lines_json']))
+        lines_data = json.loads(o['lines_json']) if o['lines_json'] else []
+        all_lines.extend(lines_data)
     family_totals: dict[str, float] = {}
     for li in all_lines:
         fam = li.get('family', '?')
@@ -3528,20 +2115,12 @@ def clients():
 @login_required
 def products():
     db = get_db()
-    # Por defecto solo SKUs activos. ?show_inactive=1 los muestra todos.
-    show_inactive = request.args.get('show_inactive') == '1'
-    where = '' if show_inactive else "WHERE p.is_active = 1 OR p.is_active IS NULL"
-    rows = db.execute(f'''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
+    rows = db.execute('''SELECT p.*, COALESCE(fd.display_order, 99) AS cat_order
                          FROM products p
                          LEFT JOIN family_defaults fd ON fd.category = p.category
-                         {where}
                          ORDER BY cat_order,
                                   COALESCE(p.subfamily, ''),
                                   p.name''').fetchall()
-    # Conteo de descartados (para el badge en el header).
-    inactive_count = db.execute(
-        'SELECT COUNT(*) AS c FROM products WHERE is_active = 0'
-    ).fetchone()['c']
     # Agrupar por categoría y subfamilia
     groups: dict[str, dict[str, list[dict]]] = {}
     for r in rows:
@@ -3563,8 +2142,6 @@ def products():
                            fam_defaults=fam_defaults,
                            fam_extras=fam_extras,
                            fx_eur_usd=fx_eur_usd,
-                           show_inactive=show_inactive,
-                           inactive_count=inactive_count,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
 
@@ -3589,40 +2166,6 @@ def api_update_product(product_id: int):
     if not existing:
         return jsonify({'ok': False, 'error': 'not found'}), 404
     data = request.get_json() or {}
-    
-    # === VALIDACIÓN DE INPUTS ===
-    errors = []
-    
-    # Validar campos numéricos
-    numeric_fields = {
-        'pvp_eur_unit': (0, None, 'PVP debe ser >= 0'),
-        'precio_arias_eur_unit': (0, None, 'Precio Arias debe ser >= 0'),
-        'discount_pct': (0, 100, 'Descuento debe estar entre 0-100%'),
-        'discount_extra_pct': (0, 100, 'Descuento extra debe estar entre 0-100%'),
-        'kg_per_unit': (0, None, 'kg/ud debe ser >= 0'),
-        'units_per_pallet': (0, None, 'Ud/palé debe ser >= 0'),
-        'sqm_per_pallet': (0, None, 'm²/palé debe ser >= 0'),
-    }
-    
-    for field, (min_val, max_val, error_msg) in numeric_fields.items():
-        if field in data and data[field] is not None:
-            try:
-                val = float(data[field])
-                if val < min_val:
-                    errors.append(error_msg)
-                elif max_val is not None and val > max_val:
-                    errors.append(f'{field} excede máximo')
-            except (TypeError, ValueError):
-                errors.append(f'{field} debe ser numérico')
-    
-    # Nombre no vacío
-    if 'name' in data and (not data['name'] or not data['name'].strip()):
-        errors.append('Nombre no puede estar vacío')
-    
-    if errors:
-        return jsonify({'ok': False, 'error': 'Validación fallida', 'errors': errors}), 400
-    # === FIN VALIDACIÓN ===
-    
     # Campos editables
     editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
                 'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
@@ -3759,19 +2302,20 @@ def project_detail(project_id: int):
             db.commit()
             flash('Etapa actualizada.')
         elif action == 'save_project':
-            # Convert percentages to decimal (30 → 0.30) for NUMERIC(5,4) fields
-            area_sqm = float(request.form.get('area_sqm') or 0)
-            fx_rate = float(request.form.get('fx_rate') or 1)
-            target_margin_pct = float(request.form.get('target_margin_pct') or 30) / 100
-            freight_eur = float(request.form.get('freight_eur') or 0)
-            customs_pct = float(request.form.get('customs_pct') or 18) / 100
-            incoterm = request.form.get('incoterm') or 'EXW'
-            go_no_go = request.form.get('go_no_go') or 'PENDING'
-            logistics_notes = request.form.get('logistics_notes')
             db.execute(
                 '''UPDATE projects SET area_sqm = ?, fx_rate = ?, target_margin_pct = ?, freight_eur = ?, customs_pct = ?, incoterm = ?, go_no_go = ?, logistics_notes = ?
                    WHERE id = ?''',
-                (area_sqm, fx_rate, target_margin_pct, freight_eur, customs_pct, incoterm, go_no_go, logistics_notes, project_id),
+                (
+                    float(request.form.get('area_sqm') or 0),
+                    float(request.form.get('fx_rate') or 1),
+                    float(request.form.get('target_margin_pct') or 0.30),
+                    float(request.form.get('freight_eur') or 0),
+                    float(request.form.get('customs_pct') or 0.18),
+                    request.form.get('incoterm') or 'EXW',
+                    request.form.get('go_no_go') or 'PENDING',
+                    request.form.get('logistics_notes'),
+                    project_id,
+                ),
             )
             db.commit()
             flash('Proyecto actualizado.')
@@ -3802,7 +2346,7 @@ def project_detail(project_id: int):
 
     parsed_quotes = []
     for q in quotes:
-        payload = safe_json_loads(q['result_json'])
+        payload = json.loads(q['result_json'])
         parsed_quotes.append({'meta': q, 'payload': payload})
 
     return render_template('project_detail.html', project=project, systems=systems, quotes=parsed_quotes, events=events, stages=STAGES)
@@ -4039,34 +2583,26 @@ def quote():
                 unique.append({'key': sf, 'label': label})
         subfamilies_friendly[fam] = unique
     
-    # PostgreSQL no tiene json_object, construimos el JSON en Python
-    systems_raw = db.execute(
-        '''SELECT s.id, s.name, s.description,
-                  p.sku, p.name as product_name, p.category, p.unit, p.unit_price_eur,
-                  sc.consumption_per_sqm, sc.waste_pct
+    systems = db.execute(
+        '''SELECT s.*, GROUP_CONCAT(
+            json_object('sku', p.sku, 'name', p.name, 'category', p.category,
+                        'unit', p.unit, 'unit_price_eur', p.unit_price_eur,
+                        'consumption_per_sqm', sc.consumption_per_sqm,
+                        'waste_pct', sc.waste_pct)
+        ) as components_json
            FROM systems s
            LEFT JOIN system_components sc ON sc.system_id = s.id
            LEFT JOIN products p ON p.id = sc.product_id
-           ORDER BY s.id'''
+           GROUP BY s.id'''
     ).fetchall()
-    
-    # Agrupar components por sistema
-    systems_dict = {}
-    for row in systems_raw:
-        sid = row['id']
-        if sid not in systems_dict:
-            systems_dict[sid] = {
-                'id': sid, 'name': row['name'], 'description': row['description'],
-                'components': []
-            }
-        if row['sku']:
-            systems_dict[sid]['components'].append({
-                'sku': row['sku'], 'name': row['product_name'], 'category': row['category'],
-                'unit': row['unit'], 'unit_price_eur': row['unit_price_eur'],
-                'consumption_per_sqm': row['consumption_per_sqm'], 'waste_pct': row['waste_pct']
-            })
-    
-    systems_data = list(systems_dict.values())
+    systems_data = []
+    for s in systems:
+        sd = dict(s)
+        comps = json.loads('[' + (sd.get('components_json') or '') + ']') if sd.get('components_json') else []
+        systems_data.append({
+            'id': sd['id'], 'name': sd['name'], 'description': sd['description'],
+            'components': comps
+        })
     
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
@@ -4085,38 +2621,13 @@ def quote():
         row = db.execute('SELECT * FROM pending_offers WHERE id = ?', (edit_id,)).fetchone()
         if row:
             edit_offer = dict(row)
-            # Handle both SQLite (JSON string) and Postgres (native list)
-            edit_offer['lines'] = safe_json_loads(row['lines_json'])
-
-    # Perfiles físicos de palé/contenedor para el panel de análisis logístico
-    # del frontend (desglose: ¿por qué N contenedores?). El cálculo real lo hace
-    # /api/compute-logistics; aquí solo exponemos la geometría para mostrarla.
-    pallet_profiles_raw = db.execute(
-        'SELECT category, pallet_length_m, pallet_width_m, pallet_height_m, '
-        'stackable_levels FROM pallet_profiles'
-    ).fetchall()
-    pallet_profiles_data = {
-        r['category']: {
-            'length_m': r['pallet_length_m'],
-            'width_m': r['pallet_width_m'],
-            'height_m': r['pallet_height_m'],
-            'levels': r['stackable_levels'],
-        }
-        for r in pallet_profiles_raw
-    }
-    cp_40hc = db.execute(
-        "SELECT inner_length_m, inner_width_m, inner_height_m, payload_kg, "
-        "stowage_factor, floor_stowage_factor FROM container_profiles WHERE type='40HC'"
-    ).fetchone()
-    container_40hc_data = dict(cp_40hc) if cp_40hc else {}
+            edit_offer['lines'] = json.loads(row['lines_json']) if row['lines_json'] else []
 
     return render_template('quote.html', products=products_data, clients=clients_data,
                           families=families_ordered,
                           subfamilies=subfamilies_friendly, systems=systems_data,
                           routes=routes_data, fx_rate=fx_rate,
-                          projects=projects_data, edit_offer=edit_offer,
-                          pallet_profiles=pallet_profiles_data,
-                          container_40hc=container_40hc_data)
+                          projects=projects_data, edit_offer=edit_offer)
 
 
 @app.route('/projects/<int:project_id>/quote/<int:quote_id>/pdf')
@@ -4153,12 +2664,11 @@ def quote_pdf(project_id: int, quote_id: int):
         title=f"Oferta {quote['version_label']} - {project['name']}",
     )
 
-    # Paleta oficial Arias Group (alineada con offer_pdf y design system).
-    NAVY   = colors.HexColor('#1A3557')
-    BLUE   = colors.HexColor('#2563A8')
-    GOLD   = BLUE                          # acentos antes en dorado → ahora azul
-    LGRAY  = colors.HexColor('#EEF3F9')    # fondo tabla / bloques (BLUE_PALE)
-    MGRAY  = colors.HexColor('#5C7A99')    # labels/meta (STONE)
+    NAVY   = colors.HexColor('#0D1B4B')
+    BLUE   = colors.HexColor('#1A3A8F')
+    GOLD   = colors.HexColor('#C9A84C')
+    LGRAY  = colors.HexColor('#F2F0EB')
+    MGRAY  = colors.HexColor('#888888')
     WHITE  = colors.white
 
     styles = getSampleStyleSheet()
@@ -4191,21 +2701,12 @@ def quote_pdf(project_id: int, quote_id: int):
     story.append(Spacer(1, 5*mm))
 
     # ── REFERENCE ROW ─────────────────────────────────────────────
-    ref_date = safe_slice_date(quote['created_at'])
-    # project_quotes (oferta técnica interna) no tiene columna validity_days; la
-    # validez vive en pending_offers (oferta comercial → offer_pdf). Si en el
-    # futuro se añade la columna o se vuelca al payload result_json, este lookup
-    # la recoge sin tocar más código.
-    quote_keys = quote.keys()
-    if 'validity_days' in quote_keys and quote['validity_days']:
-        validity = int(quote['validity_days'])
-    else:
-        validity = int(_num(summary.get('validity_days', 30)) or 30)
+    ref_date = quote['created_at'][:10]
     ref_data = [[
         Paragraph(f"<b>Ref:</b> {quote['version_label']}", S['body']),
         Paragraph(f"<b>Fecha:</b> {ref_date}", S['body']),
         Paragraph(f"<b>Incoterm:</b> {project['incoterm']}", S['body']),
-        Paragraph(f"<b>Validez:</b> {validity} días", S['body']),
+        Paragraph(f"<b>Validez:</b> 30 días", S['body']),
     ]]
     ref_tbl = Table(ref_data, colWidths=[W*0.28, W*0.24, W*0.24, W*0.24])
     ref_tbl.setStyle(TableStyle([
@@ -4288,7 +2789,7 @@ def quote_pdf(project_id: int, quote_id: int):
 
     fin_rows = [
         ['Coste producto EXW fábrica', f"€ {summary['product_cost_eur']:,.2f}"],
-        ['Flete internacional estimado', f"€ {summary['freight_eur']:,.2f}"],
+        ['Coste Variable (Logística)', f"€ {summary['freight_eur']:,.2f}"],
         ['Coste total puesto en destino', f"€ {summary['landed_total_eur']:,.2f}"],
     ]
     fin_tbl = Table(
@@ -4341,7 +2842,7 @@ def quote_pdf(project_id: int, quote_id: int):
         "<b>Plazo de entrega:</b> Según confirmación de fábrica tras recepción de pago. Stock estándar: aprox. 2 días hábiles hasta carga.",
         "<b>Validez de oferta:</b> 30 días naturales desde fecha de emisión.",
         "<b>Normativa:</b> Todos los productos cumplen normativa europea vigente (CE, ETA, EN). Fichas técnicas disponibles bajo solicitud.",
-        "<b>Logística:</b> Cotización de flete no incluida — se facilita gestión con operador logístico recomendado.",
+        "<b>Coste Variable:</b> La logística se cotiza como línea separada para no distorsionar el valor de fábrica de los productos Fassa Bortolo.",
     ]
     for c in conditions:
         story.append(Paragraph(c, S['cond']))
@@ -4496,7 +2997,7 @@ def dashboard_financial():
     total_pipeline_eur = 0
     total_confirmed_eur = 0
     for q in recent_quotes:
-        payload = safe_json_loads(q['result_json'])
+        payload = json.loads(q['result_json'])
         s = payload['summary']
         margin_pct = round(s['gross_margin_pct'] * 100, 1)
         quotes_data.append({
@@ -4516,7 +3017,7 @@ def dashboard_financial():
             'price_per_sqm': s['price_per_sqm_eur'],
             'pallets': s['total_pallets'],
             'containers_40': s['containers_40_est'],
-            'created_at': safe_slice_date(q['created_at']),
+            'created_at': q['created_at'][:10],
             'margin_ok': margin_pct >= 18,
         })
         total_pipeline_eur += s['sale_total_eur']
@@ -4560,15 +3061,12 @@ def crm():
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'add_client':
-            # Convert score to int (PostgreSQL requires SMALLINT, default 50)
-            score_val = request.form.get('score', '').strip()
-            score_int = int(score_val) if score_val and score_val.isdigit() else 50
             db.execute(
                 '''INSERT INTO clients (name, company, email, phone, country, score, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
                 (request.form['name'], request.form.get('company'),
                  request.form.get('email'), request.form.get('phone'),
-                 request.form.get('country', 'RD'), score_int,
+                 request.form.get('country', 'RD'), request.form.get('score', 'C'),
                  now_iso())
             )
             flash('Cliente creado.')
@@ -4699,7 +3197,7 @@ def config():
                           customs=[dict(c) for c in customs],
                           fx=[dict(f) for f in fx],
                           fx_eur_usd=float(fx_setting['value']) if fx_setting else 1.18,
-                          fx_updated=(str(fx_setting['updated_at'])[:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
+                          fx_updated=(fx_setting['updated_at'][:16].replace('T', ' ') if fx_setting and fx_setting['updated_at'] else None))
 
 
 # ── API: Save pending offer ───────────────────────────────────────
@@ -4710,51 +3208,6 @@ def save_offer():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'No data'}), 400
-
-    # === VALIDACIÓN DE INPUTS ===
-    errors = []
-    
-    # Cliente requerido
-    if not data.get('client'):
-        errors.append('Cliente requerido')
-    
-    # Líneas no vacías
-    raw_lines = data.get('lines', [])
-    if not raw_lines or len(raw_lines) == 0:
-        errors.append('Al menos una línea requerida')
-    
-    # Validar parámetros numéricos
-    waste_pct = _num(data.get('wastePct', 5))
-    if waste_pct < 0 or waste_pct > 50:
-        errors.append('Desperdicio debe estar entre 0-50%')
-    
-    margin_pct = _num(data.get('margin', 33))
-    if margin_pct < 0 or margin_pct > 100:
-        errors.append('Margen debe estar entre 0-100%')
-    
-    fx = _num(data.get('fx', 1.18))
-    if fx <= 0 or fx > 10:
-        errors.append('FX inválido')
-    
-    # Validar líneas individuales
-    for i, li in enumerate(raw_lines):
-        sku = li.get('sku')
-        qty = _num(li.get('qty', 0))
-        price = _num(li.get('price', 0))
-        line_margin = _num(li.get('margin', 0))
-        
-        if not sku:
-            errors.append(f'Línea {i+1}: SKU requerido')
-        if qty <= 0:
-            errors.append(f'Línea {i+1}: cantidad inválida')
-        if price < 0:
-            errors.append(f'Línea {i+1}: precio inválido')
-        if line_margin < 0 or line_margin > 100:
-            errors.append(f'Línea {i+1}: margen inválido')
-    
-    if errors:
-        return jsonify({'error': 'Validación fallida', 'errors': errors}), 400
-    # === FIN VALIDACIÓN ===
 
     waste_pct = _num(data.get('wastePct', 5)) / 100
     margin_pct = _num(data.get('margin', 33)) / 100
@@ -4815,20 +3268,7 @@ def save_offer():
     # ('2026-' + Date.now().slice(-4)), lo que causó colisiones históricas
     # (p.ej. ofertas #18 y #19 con el mismo '2026-8464').
     offer_num = generate_offer_number(db)
-    
-    # Convertir Decimal a float para JSON serializable
-    input_lines_clean = []
-    for line in input_lines:
-        clean_line = {}
-        for k, v in line.items():
-            from decimal import Decimal
-            if isinstance(v, Decimal):
-                clean_line[k] = float(v)
-            else:
-                clean_line[k] = v
-        input_lines_clean.append(clean_line)
-    
-    raw_hash = compute_raw_hash(json.dumps(input_lines_clean, sort_keys=True))
+    raw_hash = compute_raw_hash(json.dumps(input_lines, sort_keys=True))
     dup = find_offer_by_hash(db, raw_hash)
     if dup:
         return jsonify({
@@ -4838,52 +3278,45 @@ def save_offer():
         }), 409
 
     validity_days = int(_num(data.get('validityDays', 30)) or 30)
-    try:
-        db.execute(
-            '''INSERT INTO pending_offers
-            (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
-             lines_json, total_product_eur, total_logistic_eur, total_final_eur,
-             status, incoterm, container_count, validity_days, raw_hash, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (
-                offer_num,
-                data.get('client', ''),
-                data.get('project', ''),
-                data.get('wastePct', 5),
-                data.get('margin', 33),
-                fx,
-                json.dumps(input_lines),
-                round(product_cost, 2),
-                round(logistic_eur, 2),
-                round(total_final, 2),
-                'pending',
-                data.get('incoterm', 'EXW'),
-                int(container_count),
-                validity_days,
-                raw_hash,
-                now_iso(),
-            )
+    db.execute(
+        '''INSERT INTO pending_offers
+        (offer_number, client_name, project_name, waste_pct, margin_pct, fx_rate,
+         lines_json, total_product_eur, total_logistic_eur, total_final_eur,
+         status, incoterm, container_count, validity_days, raw_hash, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        (
+            offer_num,
+            data.get('client', ''),
+            data.get('project', ''),
+            data.get('wastePct', 5),
+            data.get('margin', 33),
+            fx,
+            json.dumps(input_lines),
+            round(product_cost, 2),
+            round(logistic_eur, 2),
+            round(total_final, 2),
+            'pending',
+            data.get('incoterm', 'EXW'),
+            int(container_count),
+            validity_days,
+            raw_hash,
+            now_iso(),
         )
-        offer_id = _last_insert_id(db)
-        if not offer_id:
-            raise RuntimeError('No se pudo obtener ID de la oferta recién creada')
-        save_order_lines(db, offer_id, computed)
-        log_audit(db, int(offer_id), 'OFFER_CREATED',
-                  f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        app.logger.exception('save_offer failed for offer_number=%s', offer_num)
-        return jsonify({'ok': False, 'error': f'Error al guardar oferta: {exc}'}), 500
+    )
+    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+    save_order_lines(db, offer_id, computed)
+    log_audit(db, offer_id, 'OFFER_CREATED',
+              f'{offer_num} | {len(computed)} líneas | €{round(total_final, 2)}')
+    db.commit()
     return jsonify({
         'ok': True,
         'offer_number': offer_num,
         'offer_id': offer_id,
         'product_cost_eur': round(product_cost, 2),
         'total_final_eur': round(total_final, 2),
-        'total_weight_kg': float(round(totals['weight_total_kg'], 2)),
-        'pallets_logistic': float(round(totals['pallets_logistic'], 2)),
-        'container_recommendation': float(totals.get('containers', 0)) if totals.get('containers') else None,
+        'total_weight_kg': totals['weight_total_kg'],
+        'pallets_logistic': totals['pallets_logistic'],
+        'container_recommendation': totals.get('containers'),
         'alerts': dedup_alerts(computed),
         'skipped_skus': skipped,
     })
@@ -4977,18 +3410,6 @@ def update_full_offer():
         })
     container_count = (totals.get('containers') or {}).get('units', 0) or _num(data.get('containerCount', 0))
 
-    # Convertir Decimal a float para JSON serializable
-    from decimal import Decimal
-    input_lines_clean = []
-    for line in input_lines:
-        clean_line = {}
-        for k, v in line.items():
-            if isinstance(v, Decimal):
-                clean_line[k] = float(v)
-            else:
-                clean_line[k] = v
-        input_lines_clean.append(clean_line)
-
     validity_days = int(_num(data.get('validityDays', existing['validity_days'] or 30)) or 30)
     db.execute(
         '''UPDATE pending_offers SET
@@ -5005,14 +3426,14 @@ def update_full_offer():
             data.get('wastePct', 5),
             data.get('margin', 20),
             fx,
-            json.dumps(input_lines_clean),
+            json.dumps(input_lines),
             round(product_cost, 2),
             round(logistic_eur, 2),
             round(total_final, 2),
             data.get('incoterm', 'EXW'),
             int(container_count),
             validity_days,
-            compute_raw_hash(json.dumps(input_lines_clean, sort_keys=True)),
+            compute_raw_hash(json.dumps(input_lines, sort_keys=True)),
             now_iso(),
             edit_id,
         )
@@ -5124,13 +3545,13 @@ def api_compute_logistics():
     # migración 0003 — usamos 1.0 como fallback (comportamiento previo).
     floor_stowage = cp_row['floor_stowage_factor'] if 'floor_stowage_factor' in cp_row.keys() else 1.0
     container = ContainerProfile(
-        type=str(cp_row['type']),
-        inner_length_m=float(cp_row['inner_length_m']),
-        inner_width_m=float(cp_row['inner_width_m']),
-        inner_height_m=float(cp_row['inner_height_m']),
-        payload_kg=float(cp_row['payload_kg']),
-        door_clearance_m=float(cp_row['door_clearance_m']),
-        stowage_factor=float(cp_row['stowage_factor']),
+        type=cp_row['type'],
+        inner_length_m=cp_row['inner_length_m'],
+        inner_width_m=cp_row['inner_width_m'],
+        inner_height_m=cp_row['inner_height_m'],
+        payload_kg=cp_row['payload_kg'],
+        door_clearance_m=cp_row['door_clearance_m'],
+        stowage_factor=cp_row['stowage_factor'],
         floor_stowage_factor=float(floor_stowage),
     )
 
@@ -5138,11 +3559,11 @@ def api_compute_logistics():
     pallet_profiles: dict[str, PalletProfile] = {}
     for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
         pallet_profiles[r['category']] = PalletProfile(
-            category=str(r['category']),
-            length_m=float(r['pallet_length_m']),
-            width_m=float(r['pallet_width_m']),
-            height_m=float(r['pallet_height_m']),
-            stackable_levels=int(r['stackable_levels']),
+            category=r['category'],
+            length_m=r['pallet_length_m'],
+            width_m=r['pallet_width_m'],
+            height_m=r['pallet_height_m'],
+            stackable_levels=r['stackable_levels'],
             allow_mix_floor=bool(r['allow_mix_floor']),
         )
 
@@ -5273,7 +3694,7 @@ def _ensure_factory_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict | 
            VALUES (?, ?, 'draft', 'FASSA', ?)''',
         (offer['id'], name, now_iso())
     )
-    fo_id = _last_insert_id(db)
+    fo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     log_audit(db, offer['id'], 'FACTORY_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': fo_id, 'name': name, 'created': True}
@@ -5292,7 +3713,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
            VALUES (?, ?, 'draft', ?, ?)''',
         (offer['id'], name, offer['route_id'], now_iso())
     )
-    lo_id = _last_insert_id(db)
+    lo_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     log_audit(db, offer['id'], 'LOGISTICS_ORDER_CREATED',
               f'{name} ← {offer["offer_number"]}')
     return {'id': lo_id, 'name': name, 'created': True}
@@ -5492,12 +3913,11 @@ def offer_pdf(offer_id):
     if not offer:
         return 'Oferta no encontrada', 404
     
-    # Handle both SQLite (JSON string) and Postgres (native list)
-    lines = safe_json_loads(offer['lines_json'])
+    lines = json.loads(offer['lines_json'])
     total_eur = offer['total_final_eur']
     fx = offer['fx_rate'] or 1.18
     total_usd = total_eur * fx
-    ref_date = safe_slice_date(offer['created_at'])
+    ref_date = offer['created_at'][:10]
 
     client_row = db.execute(
         'SELECT name, company, address, country, rnc FROM clients WHERE name = ? OR company = ? LIMIT 1',
@@ -5853,7 +4273,7 @@ def offer_pdf(offer_id):
         ))
     story.append(Spacer(1, 6*mm))
 
-    # Logistics summary — solo cuando el flete lo gestiona Arias (no-EXW).
+    # Logistics summary — solo cuando el coste variable lo gestiona Arias (no-EXW).
     # En EXW el cliente se encarga del transporte; incluir puerto destino,
     # contenedores, etc. confunde porque no aplica al alcance del pedido.
     incoterm_upper = (offer['incoterm'] or 'EXW').upper()
@@ -6015,14 +4435,7 @@ def _load_offer_with_lines(offer_id: int):
         return None, None
     ol = db.execute('SELECT * FROM order_lines WHERE offer_id = ? ORDER BY id', (offer_id,)).fetchall()
     if not ol:
-        # Handle both SQLite (JSON string) and Postgres (native list)
-        lines_json = offer['lines_json']
-        if lines_json is None:
-            raw_lines = []
-        elif isinstance(lines_json, (list, dict)):
-            raw_lines = lines_json  # Postgres
-        else:
-            raw_lines = json.loads(lines_json)  # SQLite
+        raw_lines = json.loads(offer['lines_json']) if offer['lines_json'] else []
         computed = []
         for li in raw_lines:
             prod = db.execute('SELECT * FROM products WHERE sku = ?', (li.get('sku'),)).fetchone()
@@ -6031,98 +4444,6 @@ def _load_offer_with_lines(offer_id: int):
                 computed.append(cl)
         return offer, computed
     return offer, [dict(r) for r in ol]
-
-
-def _logistics_breakdown_for_offer(db, offer, lines):
-    """Recalcula el desglose logístico (floor/weight/cbm + driver dominante) con
-    el motor agregado para mostrarlo en PDFs como diagnóstico.
-
-    NO sobrescribe `offer['container_count']`: ese valor es el que el cliente
-    vio en la oferta firmada y es contractual. Aquí solo se enriquece la
-    presentación con métricas que no afectan al precio.
-
-    Devuelve un LogisticsResult o None si faltan datos.
-    """
-    from logistics.engine import ContainerProfile, PalletProfile, SkuInput, compute_logistics
-
-    log_row = db.execute(
-        'SELECT container_type FROM logistics_orders WHERE offer_id = ? ORDER BY id DESC LIMIT 1',
-        (offer['id'],)
-    ).fetchone()
-    container_type = (log_row['container_type'] if log_row and log_row['container_type'] else '40HC')
-
-    cp_row = db.execute('SELECT * FROM container_profiles WHERE type = ?', (container_type,)).fetchone()
-    if not cp_row:
-        return None
-    floor_stowage = cp_row['floor_stowage_factor'] if 'floor_stowage_factor' in cp_row.keys() else 1.0
-    container = ContainerProfile(
-        type=cp_row['type'],
-        inner_length_m=cp_row['inner_length_m'],
-        inner_width_m=cp_row['inner_width_m'],
-        inner_height_m=cp_row['inner_height_m'],
-        payload_kg=cp_row['payload_kg'],
-        door_clearance_m=cp_row['door_clearance_m'],
-        stowage_factor=cp_row['stowage_factor'],
-        floor_stowage_factor=float(floor_stowage),
-    )
-
-    pallet_profiles: dict[str, PalletProfile] = {}
-    for r in db.execute('SELECT * FROM pallet_profiles').fetchall():
-        pallet_profiles[r['category']] = PalletProfile(
-            category=r['category'],
-            length_m=r['pallet_length_m'],
-            width_m=r['pallet_width_m'],
-            height_m=r['pallet_height_m'],
-            stackable_levels=r['stackable_levels'],
-            allow_mix_floor=bool(r['allow_mix_floor']),
-        )
-
-    cost_per_container = 0.0
-    route_id = offer['route_id'] if 'route_id' in offer.keys() else None
-    if route_id:
-        col_map = {'20': 'container_20_eur', '40': 'container_40_eur', '40HC': 'container_40hc_eur'}
-        col = col_map.get(container_type, 'container_40hc_eur')
-        rt = db.execute(f'SELECT {col} AS c FROM shipping_routes WHERE id = ?', (route_id,)).fetchone()
-        if rt:
-            cost_per_container = float(rt['c'] or 0)
-
-    skus: list[SkuInput] = []
-    for ln in lines:
-        sku = str(ln.get('sku') or '').strip()
-        if not sku:
-            continue
-        qty = _num(ln.get('qty_logistic') or ln.get('qty_input') or ln.get('qty'))
-        if qty <= 0:
-            continue
-        p = db.execute(
-            'SELECT category, kg_per_unit, units_per_pallet, sqm_per_pallet, '
-            'pallet_length_m, pallet_width_m, pallet_height_m, pallet_weight_kg, '
-            'stackable_levels FROM products WHERE sku = ?', (sku,)
-        ).fetchone()
-        if not p or p['category'] not in pallet_profiles:
-            continue
-        upp = p['units_per_pallet'] or 0
-        sqm_pp = p['sqm_per_pallet']
-        unit_area_m2 = (float(sqm_pp) / float(upp)) if (upp and sqm_pp) else 0
-        skus.append(SkuInput(
-            sku=sku, category=p['category'], qty=qty,
-            unit_weight_kg=float(p['kg_per_unit'] or 0),
-            unit_area_m2=unit_area_m2,
-            units_per_pallet=float(upp) if upp else 1,
-            pallet_length_m=p['pallet_length_m'], pallet_width_m=p['pallet_width_m'],
-            pallet_height_m=p['pallet_height_m'], pallet_weight_kg=p['pallet_weight_kg'],
-            stackable_levels=p['stackable_levels'],
-        ))
-
-    if not skus:
-        return None
-    try:
-        return compute_logistics(skus, container, pallet_profiles, cost_per_container)
-    except (KeyError, ValueError):
-        return None
-
-
-_DRIVER_LABELS = {'floor': 'Suelo (huella palés)', 'weight': 'Peso bruto', 'cbm': 'Volumen'}
 
 
 # ── PDF: PreOrden Fábrica ─────────────────────────────────────────
@@ -6243,22 +4564,15 @@ def orden_logistica_pdf(offer_id):
     db.commit()
 
     ref_date = (offer['created_at'] or '')[:10]
-    total_pal = sum(int(_num(l.get('pallets_logistic', 0))) for l in lines)
-    total_kg = sum(_num(l.get('weight_total_kg', 0)) for l in lines)
-    total_m2 = sum(_num(l.get('m2_total', 0)) for l in lines)
-
-    # Container count CONGELADO de la oferta (lo que el cliente firmó). El nº
-    # impreso aquí debe coincidir con el del cotizador y con el offer_pdf.
-    container_count = int(_num(offer['container_count']) or 0)
-    log_row = db.execute(
-        'SELECT container_type FROM logistics_orders WHERE offer_id = ? ORDER BY id DESC LIMIT 1',
-        (offer['id'],)
-    ).fetchone()
-    container_type = (log_row['container_type'] if log_row and log_row['container_type'] else '40HC')
-
-    # Diagnóstico en vivo (modelo agregado): solo enriquece la presentación,
-    # NO sustituye container_count.
-    log_result = _logistics_breakdown_for_offer(db, offer, lines)
+    total_pal = total_kg = total_m2 = 0
+    fam_breakdown: dict[str, int] = {}
+    for l in lines:
+        total_pal += int(_num(l.get('pallets_logistic', 0)))
+        total_kg += _num(l.get('weight_total_kg', 0))
+        total_m2 += _num(l.get('m2_total', 0))
+        f = l.get('family') or '?'
+        fam_breakdown[f] = fam_breakdown.get(f, 0) + 1
+    cont = estimate_containers(total_pal, total_kg, fam_breakdown)
 
     # ── PAGE 1: Calculadora Logística ─────────────────────────────
     for el in _ag_unified_header('ORDEN LOGÍSTICA — CALCULADORA', W):
@@ -6307,21 +4621,16 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 4*mm))
 
     story.append(Paragraph('CONTENEDORES', S['h2']))
-    if container_count > 0:
-        cont_rows = [['Recomendación', f"{container_count} × {container_type}"]]
-        if log_result:
-            driver_label = _DRIVER_LABELS.get(log_result.dominant_driver, log_result.dominant_driver or '—')
-            cont_rows += [
-                ['Driver dominante', driver_label],
-                ['Suelo (huella palés)', f"{log_result.total_floor_m2:.1f} m² · ocupa {log_result.n_by_floor:.2f} cont."],
-                ['Peso bruto', f"{log_result.total_weight_kg:,.0f} kg · ocupa {log_result.n_by_weight:.2f} cont."],
-                ['Volumen', f"{log_result.total_cbm:.1f} m³ · ocupa {log_result.n_by_cbm:.2f} cont."],
-            ]
-        else:
-            cont_rows += [
-                ['Palés totales', str(total_pal)],
-                ['Peso total', f"{total_kg:,.0f} kg"],
-            ]
+    if cont:
+        pal_occ = f"{cont['pallet_occupancy']*100:.0f}%"
+        wei_occ = f"{cont['weight_occupancy']*100:.0f}%"
+        cont_rows = [
+            ['Recomendación', f"{cont['units']} x {cont['recommended']}"],
+            ['Palés totales', f"{total_pal} (capacidad {cont['pallets_capacity_per_unit']}/cont.)"],
+            ['Ocupación palés', pal_occ],
+            ['Peso total', f"{total_kg:,.0f} kg (capacidad {cont['weight_capacity_per_unit_kg']:,}/cont.)"],
+            ['Ocupación peso', wei_occ],
+        ]
     else:
         cont_rows = [['Sin datos logísticos suficientes', '']]
     ct = Table([[Paragraph(r[0], S['p']), Paragraph(r[1], S['p'])] for r in cont_rows],
@@ -6393,7 +4702,7 @@ def orden_logistica_pdf(offer_id):
     story.append(Spacer(1, 3*mm))
 
     story.append(Paragraph('DETALLE LOGÍSTICO', S['h2']))
-    cont_txt = f"{container_count} × {container_type}" if container_count > 0 else 'Por determinar'
+    cont_txt = f"{cont['units']} x {cont['recommended']}" if cont else 'Por determinar'
     det = [
         ['Contenedores necesarios', cont_txt],
         ['Peso bruto total', f"{total_kg:,.0f} kg" if total_kg else 'Por determinar'],
@@ -6413,9 +4722,9 @@ def orden_logistica_pdf(offer_id):
 
     story.append(Paragraph('SERVICIOS A COTIZAR', S['h2']))
     servicios = [
-        'Flete terrestre Tarancón → Valencia',
+        'Coste variable: Flete terrestre Tarancón → Valencia',
         'THC origen + despacho de exportación',
-        'Flete marítimo Valencia → Caucedo',
+        'Coste variable: Flete marítimo Valencia → Caucedo',
         'Seguro de transporte',
         'THC destino + despacho de importación',
         'Gastos portuarios destino',
@@ -6565,7 +4874,7 @@ def api_order():
          json.dumps(input_lines), round(product_cost, 2), 0, round(total_final, 2),
          'pending', data.get('incoterm', 'EXW'), int(container_count), raw_hash, now_iso())
     )
-    offer_id = _last_insert_id(db)
+    offer_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
     save_order_lines(db, offer_id, computed)
     log_audit(db, offer_id, 'ORDER_CREATED',
               f'{order_num} | {client_name} | {len(computed)} líneas | €{round(total_final, 2)}')
@@ -6650,18 +4959,6 @@ if os.environ.get('RUN_INIT_ON_IMPORT') == '1':
         import traceback
         print(f'[bootstrap] init/seed falló: {e}')
         traceback.print_exc()
-
-
-@app.route('/health')
-def health():
-    """Health check simple para operación y supervisión."""
-    try:
-        db = get_db()
-        db.execute('SELECT 1').fetchone()
-        return jsonify({'status': 'healthy', 'db': 'ok'}), 200
-    except Exception as exc:
-        app.logger.exception('health check failed')
-        return jsonify({'status': 'unhealthy', 'error': str(exc)}), 500
 
 
 if __name__ == '__main__':

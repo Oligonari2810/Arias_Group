@@ -10,7 +10,7 @@
         <div><label>Área m²</label><input name="area_sqm" type="number" step="0.01" value="1000"></div>
       </div>
       <div class="row">
-        <div><label>Flete EUR</label><input name="freight_eur" type="number" step="0.01" value="4200"></div>
+        <div><label>Coste Variable (Logística) EUR</label><input name="freight_eur" type="number" step="0.01" value="4200"></div>
         <div><label>Margen objetivo</label><input name="target_margin_pct" type="number" step="0.01" value="0.30"></div>
       </div>
       <div class="row">
@@ -35,7 +35,8 @@
 <h2>{{ result.system_name }}</h2>
 <table style="max-width:600px; margin-bottom:10px;">
   <tr><th>Palés</th><td class="num">{{ result.summary.total_pallets }}</td><th>20'</th><td class="num">{{ result.summary.containers_20_est }}</td><th>40'</th><td class="num">{{ result.summary.containers_40_est }}</td></tr>
-  <tr><th>Coste puesto €</th><td class="num">{{ result.summary.landed_total_eur }}</td><th>Venta €</th><td class="num">{{ result.summary.sale_total_eur }}</td><th>€/m²</th><td class="num">{{ result.summary.price_per_sqm_eur }}</td></tr>
+  <tr><th>Coste Productos €</th><td class="num">{{ result.summary.product_cost_eur }}</td><th>Coste Variable €</th><td class="num">{{ result.summary.freight_eur }}</td></tr>
+  <tr><th>Coste Puesto €</th><td class="num">{{ result.summary.landed_total_eur }}</td><th>Venta €</th><td class="num">{{ result.summary.sale_total_eur }}</td><th>€/m²</th><td class="num">{{ result.summary.price_per_sqm_eur }}</td></tr>
 </table>
 <table>
   <thead><tr><th>SKU</th><th>Producto</th><th class="num">Consumo/m²</th><th class="num">Unidades</th><th class="num">Palés</th><th class="num">Peso kg</th><th class="num">Coste €</th></tr></thead>
