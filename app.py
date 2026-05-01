@@ -2595,9 +2595,17 @@ def quote():
     routes = db.execute('SELECT * FROM shipping_routes').fetchall()
     routes_data = [dict(r) for r in routes]
     
-    # Pallet profiles por familia
+    # Pallet profiles por familia (transformar nombres de campos para JS)
     pallet_profiles_rows = db.execute('SELECT * FROM pallet_profiles').fetchall()
-    pallet_profiles = {r['category']: dict(r) for r in pallet_profiles_rows}
+    pallet_profiles = {}
+    for r in pallet_profiles_rows:
+        cat = r['category']
+        pallet_profiles[cat] = {
+            'length_m': r['pallet_length_m'],
+            'width_m': r['pallet_width_m'],
+            'height_m': r['pallet_height_m'],
+            'levels': r['stackable_levels'],
+        }
     
     # Container 40HC profile
     container_40hc_row = db.execute('SELECT * FROM container_profiles WHERE type = ?', ('40HC',)).fetchone()
