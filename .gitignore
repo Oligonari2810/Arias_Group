@@ -1,1 +1,15 @@
-(empty)
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Tests
+.pytest_cache/
+```
