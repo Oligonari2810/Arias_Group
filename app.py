@@ -1645,9 +1645,20 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
 
     margin_global = margin_global_pct if margin_global_pct < 1 else margin_global_pct / 100
 
+    # Detectar si alguna línea tiene log_unit_cost (logística por línea)
+    has_per_line_log = any(
+        raw_lines[i].get('log_unit_cost') is not None 
+        for i in range(len(computed)) 
+        if i < len(raw_lines)
+    )
+
     breakdown_lines: list[dict[str, Any]] = []
     total_product = 0.0
+    total_logistic = 0.0
     total_sale = 0.0
+    
+    # Primer paso: calcular costes de producto y logística por línea
+    line_data = []
     for i, cl in enumerate(computed):
         line_input = raw_lines[i] if i < len(raw_lines) else {}
         cost_prod = _num(cl.get('cost_exw_eur'))
@@ -1662,14 +1673,21 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
             m_val = _num(m_raw)
             margin_line = m_val / 100 if m_val >= 1 else m_val
 
-        # Venta = coste producto / (1 - margen). Logística se suma globalmente.
-        sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
-        sale_line = sale_product  # Sin logística por línea
+        # Calcular logística por línea
+        if has_per_line_log:
+            # Usar log_unit_cost de la línea si existe
+            log_unit_cost = _num(line_input.get('log_unit_cost', 0))
+            log_line = log_unit_cost * qty_w
+        else:
+            # Prorratear logística global proporcional al coste de producto
+            if product_cost_total > 0:
+                log_line = (cost_prod / product_cost_total) * logistic_global_eur
+            else:
+                log_line = 0.0
+        
+        log_unit_eur = log_line / qty_w if qty_w > 0 else 0.0
 
-        total_product += cost_prod
-        total_sale += sale_line
-
-        breakdown_lines.append({
+        line_data.append({
             'sku': cl.get('sku'),
             'name': cl.get('name'),
             'family': cl.get('family'),
@@ -1677,22 +1695,50 @@ def build_offer_breakdown(raw_lines: list[dict[str, Any]],
             'qty_neta': round(qty_neta, 2),
             'qty_waste': round(qty_w, 2),
             'price_arias_eur': round(price_arias, 4),
+            'log_unit_eur': round(log_unit_eur, 4),
             'margin_pct': round(margin_line * 100, 2),
             'cost_line_eur': round(cost_prod, 2),
-            'sale_line_eur': round(sale_line, 2),
+            'log_line_eur': round(log_line, 2),
+            'cost_prod': cost_prod,
+            'margin_line': margin_line,
+            'log_line': log_line,
         })
 
-    # La logística se suma al total global, no está embebida en las líneas
-    total_sale_with_log = total_sale + logistic_global_eur
+    # Segundo paso: calcular venta por línea y totales
+    for ld in line_data:
+        cost_prod = ld['cost_prod']
+        margin_line = ld['margin_line']
+        log_line = ld['log_line']
+        qty_w = _num(ld['qty_waste'])
+        
+        # Venta = coste producto / (1 - margen) + logística (pass-through)
+        sale_product = cost_prod / max(1 - margin_line, 0.01) if margin_line < 1 else cost_prod
+        sale_line = sale_product + log_line
+        
+        sale_unit_eur = sale_line / qty_w if qty_w > 0 else 0.0
+
+        total_product += cost_prod
+        total_logistic += log_line
+        total_sale += sale_line
+
+        ld['sale_line_eur'] = round(sale_line, 2)
+        ld['sale_unit_eur'] = round(sale_unit_eur, 4)
+        # Eliminar campos temporales
+        del ld['cost_prod']
+        del ld['margin_line']
+        del ld['log_line']
+
+        breakdown_lines.append(ld)
 
     return {
         'lines': breakdown_lines,
         'totals': {
             'product_cost_eur': round(total_product, 2),
-            'logistic_eur': round(logistic_global_eur, 2),
-            'sale_eur': round(total_sale_with_log, 2),
+            'logistic_eur': round(total_logistic, 2),
+            'sale_eur': round(total_sale, 2),
         },
         'meta': {
+            'has_per_line_log': has_per_line_log,
             'margin_global_pct': margin_global_pct,
         },
     }
