@@ -1,45 +1,15 @@
+```
 # Python
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-*.egg-info/
-dist/
-build/
+*.pyd
 
-# Testing / coverage
-.pytest_cache/
+# Coverage
 .coverage
-coverage.json
+coverage/
 htmlcov/
 
-# Virtual env
-.venv/
-venv/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Database — todo lo que sea DB queda fuera de git por defecto.
-fassa_ops.db
-*.db
-*.sqlite
-*.sqlite3
-backups/
-instance/
-dev/snapshots/
-
-# PDFs (demasiado grandes para git)
-docs/*.pdf
-
-# IDE
-.vscode/
-.idea/
-
-# Env
-.env
-*.env
-
-# Local runtime
-logs/
-run_prod.sh
+# Tests
+.pytest_cache/
+```
