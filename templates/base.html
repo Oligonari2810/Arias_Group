@@ -53,7 +53,9 @@
     <a href="{{ url_for('quote') }}">Cotización</a>
     <a href="{{ url_for('presupuestos') }}">Presupuestos</a>
     <a href="{{ url_for('products') }}">Catálogo</a>
+    {% if current_user and current_user.is_authenticated and current_user.role == 'admin' %}
     <a href="{{ url_for('config') }}">Configuración</a>
+    {% endif %}
     <span class="spacer"></span>
     {% if current_user and current_user.is_authenticated %}
       <span class="user">{{ current_user.username }}</span>

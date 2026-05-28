@@ -19,6 +19,37 @@
   </div>
 </div>
 
+<div style="margin-top:20px; padding:15px; border:1px solid #ccc;">
+
+    <h3>Asistente IA Arias</h3>
+
+    <input type="text" id="promptIA"
+           placeholder="Ej: muro RF60 hotel humedad alta"
+           style="width:400px; padding:10px;">
+
+    <button onclick="consultarIA()">
+        Consultar IA
+    </button>
+
+    <div id="respuestaIA"
+         style="margin-top:15px; white-space:pre-wrap;">
+    </div>
+
+</div>
+
+<script>
+async function consultarIA() {
+
+    const prompt = document.getElementById("promptIA").value;
+
+    const response = await fetch(`/ia?q=${encodeURIComponent(prompt)}`);
+
+    const texto = await response.text();
+
+    document.getElementById("respuestaIA").innerText = texto;
+}
+</script>
+
 <div class="grid-2" style="margin-top:12px;">
   <div>
     <h2>Top empresas por volumen</h2>
@@ -115,3 +146,22 @@
   </tbody>
 </table>
 {% endblock %}
+
+<h2>IA Constructiva</h2>
+
+<input id="prompt" placeholder="Ej: muro hotel humedad RF60" style="width:70%;padding:10px;">
+<button onclick="consultarIA()">Consultar</button>
+
+<pre id="resultado" style="margin-top:20px;background:#111;color:#0f0;padding:15px;"></pre>
+
+<script>
+async function consultarIA() {
+    const q = document.getElementById("prompt").value;
+
+    const res = await fetch("/ia?q=" + encodeURIComponent(q));
+    const data = await res.json();
+
+    document.getElementById("resultado").textContent =
+        JSON.stringify(data, null, 2);
+}
+</script>

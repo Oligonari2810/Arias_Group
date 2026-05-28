@@ -95,7 +95,8 @@
   </details>
 
   <div style="margin-top:6px; font-size:12px;">
-    {% if offer['status'] not in ('approved', 'rejected') %}
+    {% set is_admin = current_user and current_user.is_authenticated and current_user.role == 'admin' %}
+    {% if is_admin and offer['status'] not in ('approved', 'rejected') %}
     <a href="{{ url_for('quote') }}?edit={{ offer['id'] }}">Editar</a> ·
     {% endif %}
     <strong>Presupuesto:</strong>
@@ -109,15 +110,17 @@
     · <a href="/api/orden-logistica-pdf/{{ offer['id'] }}?download=1">Descargar</a>
     | <strong>Export:</strong>
     <a href="/api/export/cotizacion/{{ offer['id'] }}" target="_blank" title="Contrato JSON Odoo-compatible (HANDOFF §4)">JSON</a>
-    {% if offer['status'] == 'pending' %}
+    {% if is_admin and offer['status'] == 'pending' %}
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'approved'); return false;" style="color:green;font-weight:bold;">✓ Aprobar</a>
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'rejected'); return false;" style="color:#a23;">✗ Rechazar</a>
-    {% elif offer['status'] == 'approved' %}
+    {% elif is_admin and offer['status'] == 'approved' %}
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'pending'); return false;" style="color:#888;">↩ Volver a pendiente</a>
-    {% elif offer['status'] == 'rejected' %}
+    {% elif is_admin and offer['status'] == 'rejected' %}
     · <a href="#" onclick="changeStatus({{ offer['id'] }}, 'pending'); return false;" style="color:#888;">↩ Reabrir</a>
     {% endif %}
+    {% if is_admin %}
     · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;" style="color:#a23;">Borrar</a>
+    {% endif %}
   </div>
 </div>
 {% endfor %}

@@ -1,15 +1,30 @@
-```
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
+venv/
 
 # Coverage
 .coverage
 coverage/
 htmlcov/
+coverage.json
 
 # Tests
 .pytest_cache/
-```
+
+# Local environment and data
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.bak
+*.bak-*
+
+# OS/editor noise
+.DS_Store

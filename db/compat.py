@@ -60,9 +60,14 @@ def translate_sql(sql: str) -> str:
     if 'PRAGMA' in sql.upper():
         raise NotImplementedError('PRAGMA not supported on PostgreSQL')
     
-    # INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    # INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING.
+    # Do not add ON CONFLICT to normal INSERTs: that would hide legitimate
+    # uniqueness/data errors and can make lastval() point at the wrong row.
+    had_insert_or_ignore = bool(
+        re.search(r'\bINSERT\s+OR\s+IGNORE\b', sql, flags=re.IGNORECASE)
+    )
     sql = re.sub(r'\bINSERT\s+OR\s+IGNORE\b', 'INSERT', sql, flags=re.IGNORECASE)
-    if 'INSERT' in sql.upper() and 'ON CONFLICT' not in sql.upper():
+    if had_insert_or_ignore and 'ON CONFLICT' not in sql.upper():
         sql = sql.rstrip().rstrip(';') + ' ON CONFLICT DO NOTHING'
     
     # ? placeholders → %s

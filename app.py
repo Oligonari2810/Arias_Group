@@ -20,6 +20,11 @@ try:
     load_dotenv(override=False)
 except ImportError:
     pass
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
 from flask import Flask, abort, flash, g, redirect, render_template, request, url_for, make_response, session, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -1281,21 +1286,17 @@ def _sync_fx_sources_20260424(db: sqlite3.Connection) -> None:
 
 
 def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
-    """Recalcula precio_arias_eur_unit usando descuento compuesto (base × extra).
+    """Legacy migration kept idempotent for old DBs.
 
-    Fórmula: precio_arias = pvp × (1 - base/100) × (1 - extra/100)
-    Solo corre una vez (flag en app_settings). Las ofertas ya guardadas no
-    se tocan: guardan su propio precio congelado en lines_json.
+    Extra% no aplica al catálogo actual. For fresh legacy databases that have
+    not run this flag yet, align Arias price with the base discount only.
     """
     flag = db.execute("SELECT value FROM app_settings WHERE key = 'compound_discount_applied_v1'").fetchone()
     if flag:
         return
     rows = db.execute(
-        '''SELECT p.id, p.pvp_eur_unit, p.discount_pct, p.discount_extra_pct,
-                  p.precio_arias_eur_unit, p.pvp_per_m2,
-                  fd.discount_extra_pct AS fd_extra
-           FROM products p
-           LEFT JOIN family_defaults fd ON fd.category = p.category'''
+        '''SELECT id, pvp_eur_unit, discount_pct, precio_arias_eur_unit, pvp_per_m2
+           FROM products'''
     ).fetchall()
     updated = 0
     for r in rows:
@@ -1303,12 +1304,9 @@ def _apply_compound_discount_once(db: sqlite3.Connection) -> None:
         if pvp is None:
             continue
         base = r['discount_pct'] if r['discount_pct'] is not None else 50
-        extra_override = r['discount_extra_pct']
-        fd_extra = r['fd_extra'] if r['fd_extra'] is not None else 5
-        extra = extra_override if extra_override is not None else fd_extra
-        new_arias = round(float(pvp) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4)
+        new_arias = round(float(pvp) * (1 - float(base) / 100), 4)
         pvp_m2 = r['pvp_per_m2']
-        new_arias_m2 = round(float(pvp_m2) * (1 - float(base) / 100) * (1 - float(extra) / 100), 4) if pvp_m2 else None
+        new_arias_m2 = round(float(pvp_m2) * (1 - float(base) / 100), 4) if pvp_m2 else None
         db.execute(
             'UPDATE products SET precio_arias_eur_unit = ?, unit_price_eur = ?, precio_arias_m2 = ? WHERE id = ?',
             (new_arias, new_arias, new_arias_m2, r['id'])
@@ -1980,6 +1978,49 @@ def calculate_quote(system_id: int, area_sqm: float, freight_eur: float, target_
 
 
 # ── Authentication Routes ─────────────────────────────────────────────
+@app.route("/ia")
+def ia():
+
+    prompt = request.args.get("q", "").strip()
+
+    if not prompt:
+        return {"error": "missing query"}, 400
+
+    response = client.responses.create(
+        model="gpt-5-mini",
+        input=[
+            {
+                "role": "system",
+                "content": "Extrae 3-5 keywords técnicas de construcción. Solo palabras separadas por coma."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    keywords = response.output_text
+
+    db = get_db()
+    cursor = db.cursor()
+
+    cursor.execute("""
+        SELECT id, name, description
+        FROM systems
+        WHERE name LIKE ?
+        OR description LIKE ?
+        LIMIT 10
+    """, (f"%{keywords}%", f"%{keywords}%"))
+
+    results = cursor.fetchall()
+
+    return {
+        "input": prompt,
+        "keywords": keywords,
+        "systems": [dict(r) for r in results]
+    }
+ 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -2155,26 +2196,41 @@ def products():
                          ORDER BY cat_order,
                                   COALESCE(p.subfamily, ''),
                                   p.name''').fetchall()
+    products_data = [dict(r) for r in rows]
+    has_active_flag = bool(products_data) and 'is_active' in products_data[0]
+    show_inactive = request.args.get('show_inactive') == '1'
+    inactive_count = 0
+    if has_active_flag:
+        inactive_count = sum(1 for p in products_data if not p.get('is_active'))
+        if not show_inactive:
+            products_data = [p for p in products_data if p.get('is_active')]
+    else:
+        # Older SQLite databases do not have soft-delete metadata. Treat every
+        # catalog row as active so the UI does not show false discontinued marks.
+        for p in products_data:
+            p['is_active'] = True
+            p['discontinued_reason'] = None
+
     # Agrupar por categoría y subfamilia
     groups: dict[str, dict[str, list[dict]]] = {}
-    for r in rows:
-        cat = r['category'] or 'SIN CATEGORÍA'
-        sub = r['subfamily'] or ''
-        groups.setdefault(cat, {}).setdefault(sub, []).append(dict(r))
+    for p in products_data:
+        cat = p['category'] or 'SIN CATEGORÍA'
+        sub = p['subfamily'] or ''
+        groups.setdefault(cat, {}).setdefault(sub, []).append(p)
     # Resumen
     totals = {cat: sum(len(v) for v in subs.values()) for cat, subs in groups.items()}
-    missing = sum(1 for r in rows if r['pvp_eur_unit'] is None)
-    fd_rows = db.execute('SELECT category, discount_pct, discount_extra_pct FROM family_defaults').fetchall()
+    missing = sum(1 for p in products_data if p['pvp_eur_unit'] is None)
+    fd_rows = db.execute('SELECT category, discount_pct FROM family_defaults').fetchall()
     fam_defaults = {r['category']: r['discount_pct'] for r in fd_rows}
-    fam_extras = {r['category']: (r['discount_extra_pct'] if r['discount_extra_pct'] is not None else 5) for r in fd_rows}
     fx_eur_usd = get_current_fx_eur_usd()
     return render_template('products.html',
                            groups=groups,
                            totals=totals,
-                           grand_total=len(rows),
+                           grand_total=len(products_data),
+                           inactive_count=inactive_count,
+                           show_inactive=show_inactive,
                            missing=missing,
                            fam_defaults=fam_defaults,
-                           fam_extras=fam_extras,
                            fx_eur_usd=fx_eur_usd,
                            is_admin=(getattr(current_user, 'role', None) == 'admin'))
 
@@ -2202,7 +2258,7 @@ def api_update_product(product_id: int):
     data = request.get_json() or {}
     # Campos editables
     editable = ['name', 'subfamily', 'unit', 'content_per_unit', 'pack_size',
-                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
+                'pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
                 'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet', 'notes']
     changes = []
     sets = []
@@ -2213,7 +2269,7 @@ def api_update_product(product_id: int):
         new_v = data[f]
         old_v = existing[f]
         # normalizar números
-        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct', 'discount_extra_pct',
+        if f in ('pvp_eur_unit', 'precio_arias_eur_unit', 'discount_pct',
                  'kg_per_unit', 'units_per_pallet', 'sqm_per_pallet'):
             new_v = float(new_v) if new_v not in (None, '') else None
         if new_v == old_v:
@@ -2223,27 +2279,15 @@ def api_update_product(product_id: int):
         changes.append((f, old_v, new_v))
     if not sets:
         return jsonify({'ok': True, 'changed': 0, 'message': 'sin cambios'})
-    # Auto-sync: si cambió pvp_eur_unit, discount_pct o discount_extra_pct
-    # y no envió precio_arias_eur_unit explícito, recalcular con compuesto.
+    # Auto-sync: si cambió pvp_eur_unit o discount_pct y no envió
+    # precio_arias_eur_unit explícito, recalcular sin Extra% (legacy).
     if 'precio_arias_eur_unit' not in data:
         pvp_new = next((v for f, _, v in changes if f == 'pvp_eur_unit'), None)
         disc_new = next((v for f, _, v in changes if f == 'discount_pct'), None)
-        extra_new = next((v for f, _, v in changes if f == 'discount_extra_pct'), None)
         pvp = pvp_new if pvp_new is not None else existing['pvp_eur_unit']
         disc = disc_new if disc_new is not None else (existing['discount_pct'] or 50)
-        # Efectivo extra: override del producto > default de la familia > 0
-        try:
-            existing_extra = existing['discount_extra_pct']
-        except (IndexError, KeyError):
-            existing_extra = None
-        extra_override = extra_new if extra_new is not None else existing_extra
-        if extra_override is None:
-            fd = db.execute('SELECT discount_extra_pct FROM family_defaults WHERE category = ?',
-                            (existing['category'],)).fetchone()
-            extra_override = (fd['discount_extra_pct'] if fd and fd['discount_extra_pct'] is not None else 0)
-        extra = float(extra_override)
         if pvp is not None:
-            arias = round(float(pvp) * (1 - float(disc) / 100) * (1 - extra / 100), 4)
+            arias = round(float(pvp) * (1 - float(disc) / 100), 4)
             if arias != existing['precio_arias_eur_unit']:
                 sets.append('precio_arias_eur_unit = ?')
                 vals.append(arias)
@@ -2937,7 +2981,7 @@ def quote_pdf(project_id: int, quote_id: int):
 
 
 @app.route('/masters', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def masters():
     db = get_db()
     tab = request.args.get('tab', 'shipping')
@@ -3169,7 +3213,7 @@ def presupuestos():
 
 # ── Configuración: Rutas, aranceles, FX ─────────────────────────
 @app.route('/config', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def config():
     db = get_db()
     if request.method == 'POST':
@@ -3404,7 +3448,7 @@ def logistics():
 # ── API: Full offer update (from cotizador edit) ─────────────────
 
 @app.route('/api/update-full-offer', methods=['POST'])
-@login_required
+@admin_required
 def update_full_offer():
     db = get_db()
     data = request.get_json()
@@ -3496,7 +3540,7 @@ def update_full_offer():
 
 # ── API: Update offer logistics ──────────────────────────────────
 @app.route('/api/update-offer', methods=['POST'])
-@login_required
+@admin_required
 def update_offer():
     db = get_db()
     data = request.get_json()
@@ -3718,7 +3762,7 @@ def api_compute_logistics():
 
 # ── API: Delete offer ────────────────────────────────────────────
 @app.route('/api/delete-offer', methods=['POST'])
-@login_required
+@admin_required
 def delete_offer():
     db = get_db()
     offer_id = request.json.get('id')
@@ -3768,7 +3812,7 @@ def _ensure_logistics_order(db: sqlite3.Connection, offer: sqlite3.Row) -> dict 
 
 
 @app.route('/api/offer-status', methods=['POST'])
-@login_required
+@admin_required
 def offer_status():
     db = get_db()
     data = request.get_json() or {}
@@ -4493,7 +4537,6 @@ def _load_offer_with_lines(offer_id: int):
         return offer, computed
     return offer, [dict(r) for r in ol]
 
-
 # ── PDF: PreOrden Fábrica ─────────────────────────────────────────
 
 @app.route('/api/preorden-pdf/<int:offer_id>')
@@ -5014,3 +5057,29 @@ if __name__ == '__main__':
     host = os.environ.get('FLASK_HOST', '127.0.0.1')
     port = int(os.environ.get('FLASK_PORT', '5001'))
     app.run(debug=_debug, host=host, port=port)
+
+def preguntar_ia(prompt):
+
+    response = client.responses.create(
+        model="gpt-5-mini",
+        input=prompt
+    )
+
+    return response.output_text
+
+
+print(preguntar_ia("Sistema RF60 hotel Caribe"))
+
+
+def preguntar_ia(prompt):
+
+    response = client.responses.create(
+        model="gpt-5-mini",
+        input=prompt
+    )
+
+    return response.output_text
+
+
+print(preguntar_ia("Sistema RF60 hotel Caribe"))
+

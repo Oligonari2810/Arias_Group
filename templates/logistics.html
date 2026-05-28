@@ -8,6 +8,7 @@
 {% endif %}
 
 {% for offer in offers %}
+{% set is_admin = current_user and current_user.is_authenticated and current_user.role == 'admin' %}
 <div class="card" id="offer-{{ offer['id'] }}" style="margin-bottom:10px;">
   <h3>
     {{ offer['offer_number'] }}
@@ -37,7 +38,7 @@
     </table>
   </details>
 
-  {% if offer['status'] != 'confirmed' %}
+  {% if is_admin and offer['status'] != 'confirmed' %}
   <div class="row" style="align-items:end;">
     <div><label>Incoterm</label>
       <select class="incoterm-sel">
@@ -73,7 +74,9 @@
   <div style="margin-top:6px;">
     <a href="/api/offer-pdf/{{ offer['id'] }}" target="_blank">Ver PDF</a>
     · <a href="/api/offer-pdf/{{ offer['id'] }}?download=1">Descargar</a>
+    {% if is_admin %}
     · <a href="#" onclick="deleteOffer({{ offer['id'] }}); return false;">borrar</a>
+    {% endif %}
     · <span class="muted">Incoterm: {{ offer['incoterm'] }}{% if offer['container_count'] %} · {{ offer['container_count'] }} cont.{% endif %}</span>
   </div>
   <table style="max-width:400px; margin-top:6px;">

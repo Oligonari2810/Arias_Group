@@ -21,20 +21,13 @@ function toggleAll(open) {
 }
 
 /**
- * Extra por defecto si el input del producto está vacío (hereda de la familia)
- */
-const DEFAULT_EXTRA_PCT = 5;
-
-/**
  * Sincroniza precio Arias automáticamente al cambiar PVP o descuentos
- * Fórmula: PVP × (1 - disc%) × (1 - extra%)
+ * Fórmula actual: PVP × (1 - desc%)
  */
 function syncArias() {
   const pvp = parseFloat(document.getElementById('f_pvp_eur_unit').value) || 0;
   const disc = parseFloat(document.getElementById('f_discount_pct').value) || 0;
-  const extraRaw = document.getElementById('f_discount_extra_pct').value;
-  const extra = extraRaw === '' ? DEFAULT_EXTRA_PCT : (parseFloat(extraRaw) || 0);
-  const arias = pvp * (1 - disc/100) * (1 - extra/100);
+  const arias = pvp * (1 - disc/100);
   document.getElementById('f_precio_arias_eur_unit').value = arias.toFixed(4);
 }
 
@@ -49,7 +42,7 @@ async function openEdit(id) {
   document.getElementById('f_id').value = p.id;
   document.getElementById('modalTitle').textContent = p.sku + ' — ' + p.name;
   document.getElementById('modalMeta').textContent = 'Categoría: ' + p.category + ' · Unidad: ' + p.unit;
-  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','discount_extra_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
+  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
     const el = document.getElementById('f_' + f);
     if (el) el.value = (p[f] !== null && p[f] !== undefined) ? p[f] : '';
   }
@@ -94,13 +87,6 @@ function validateProduct(payload) {
     }
   }
   
-  if (payload.discount_extra_pct !== null && payload.discount_extra_pct !== undefined) {
-    const extra = parseFloat(payload.discount_extra_pct);
-    if (isNaN(extra) || extra < 0 || extra > 100) {
-      errors.push('Descuento extra debe estar entre 0-100%');
-    }
-  }
-  
   // Cantidad positiva
   ['kg_per_unit', 'units_per_pallet', 'sqm_per_pallet'].forEach(field => {
     if (payload[field] !== null && payload[field] !== undefined) {
@@ -123,7 +109,7 @@ function validateProduct(payload) {
 async function saveEdit() {
   const id = document.getElementById('f_id').value;
   const payload = {};
-  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','discount_extra_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
+  for (const f of ['name','subfamily','unit','content_per_unit','pack_size','pvp_eur_unit','precio_arias_eur_unit','discount_pct','kg_per_unit','units_per_pallet','sqm_per_pallet','notes']) {
     const v = document.getElementById('f_' + f).value;
     payload[f] = v === '' ? null : v;
   }
@@ -154,7 +140,7 @@ async function saveEdit() {
  */
 function initProducts() {
   document.addEventListener('DOMContentLoaded', () => {
-    ['f_pvp_eur_unit','f_discount_pct','f_discount_extra_pct'].forEach(id => {
+    ['f_pvp_eur_unit','f_discount_pct'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.addEventListener('input', syncArias);
     });
